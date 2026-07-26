@@ -1,0 +1,22 @@
+{
+  "name": "strategy_lab_v2",
+  "version": "0.1.0",
+  "description": "Personal trading dashboard, watchlist, and strategy journal",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "db:init": "node scripts/init-db.js",
+    "db:stamp": "node scripts/stamp-schema-version.js",
+    "smoke:watchlist": "node scripts/smoke-test-watchlist.js",
+    "test:offline": "node scripts/test-offline.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.21.1",
+    "yahoo-finance2": "^3.15.3"
+  }
+}

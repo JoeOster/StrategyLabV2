@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Local database files -- these are personal data, not source.
+data/
+
+# Local environment (API keys). .env.example IS tracked as the template.
+.env
+
+# Logs and OS noise
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db

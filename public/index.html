@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Strategy Lab V2 — Watchlist</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <h1 id="app-title">Strategy Lab</h1>
+      <nav class="view-nav">
+        <button type="button" class="view-btn active" data-view="dashboard">Dashboard</button>
+        <button type="button" class="view-btn" data-view="watchlist">Watchlist</button>
+        <button type="button" class="view-btn" data-view="orders">Orders</button>
+        <button type="button" class="view-btn" data-view="settings">Settings</button>
+      </nav>
+    </div>
+    <div class="header-actions" id="watchlist-actions">
+      <button id="refresh-history-btn" type="button">Refresh History</button>
+      <button id="refresh-btn" type="button">Refresh Prices</button>
+      <button id="add-ticker-btn" type="button" class="primary">+ Add Ticker</button>
+    </div>
+  </header>
+
+  <section id="view-dashboard">
+    <main>
+      <div id="dashboard-banner" class="status-banner" hidden></div>
+      <div class="summary-strip" id="dashboard-summary"></div>
+
+      <div class="table-toolbar">
+        <input id="dash-filter" type="search" placeholder="Filter by ticker or name…" autocomplete="off" />
+        <select id="dash-exchange-filter"><option value="">All exchanges</option></select>
+        <select id="dash-sort">
+          <option value="symbol:asc">Ticker A–Z</option>
+          <option value="symbol:desc">Ticker Z–A</option>
+          <option value="unrealized_pnl:desc">Gain $ (high → low)</option>
+          <option value="unrealized_pnl:asc">Gain $ (low → high)</option>
+          <option value="unrealized_pnl_percent:desc">Gain % (high → low)</option>
+          <option value="unrealized_pnl_percent:asc">Gain % (low → high)</option>
+          <option value="market_value:desc">Value (high → low)</option>
+          <option value="days_held:desc">Held longest</option>
+        </select>
+        <div class="view-toggle">
+          <button type="button" class="sub-tab active" data-dash-view="cards">Cards</button>
+          <button type="button" class="sub-tab" data-dash-view="table">Table</button>
+        </div>
+        <button type="button" id="dash-refresh-btn">Refresh Prices</button>
+        <span id="dash-count" class="row-count"></span>
+      </div>
+
+      <div id="dash-cards" class="cards-grid"></div>
+
+      <div id="dash-table" hidden>
+        <table class="items-table">
+          <thead><tr id="dash-thead-row"></tr></thead>
+          <tbody id="dash-tbody"></tbody>
+        </table>
+      </div>
+    </main>
+  </section>
+
+  <dialog id="ticker-detail-dialog">
+    <div id="ticker-detail-body"></div>
+    <div class="form-actions">
+      <button type="button" id="ticker-research-btn" title="Coming soon — will run a ticker research skill">Research (coming soon)</button>
+      <button type="button" id="ticker-detail-close-btn" class="primary">Close</button>
+    </div>
+  </dialog>
+
+  <section id="view-watchlist" hidden>
+    <nav id="watchlist-tabs" class="watchlist-tabs"></nav>
+
+    <main>
+      <div id="status-banner" class="status-banner" hidden></div>
+      <div class="table-toolbar">
+        <input id="filter-input" type="search" placeholder="Filter by symbol, name, notes, status…" autocomplete="off" />
+        <select id="type-filter">
+          <option value="">All types</option>
+          <option value="WATCH">Watching</option>
+          <option value="BUY_LIMIT">Buy Limit</option>
+          <option value="SELL_LIMIT">Sell Limit</option>
+        </select>
+        <span id="row-count" class="row-count"></span>
+      </div>
+      <table class="items-table">
+        <thead>
+          <tr id="items-thead-row"></tr>
+        </thead>
+        <tbody id="items-tbody"></tbody>
+      </table>
+    </main>
+  </section>
+
+  <section id="view-orders" hidden>
+    <nav id="orders-tabs" class="watchlist-tabs">
+      <button type="button" class="tab active" data-panel="positions">Open Positions</button>
+      <button type="button" class="tab" data-panel="history">History</button>
+    </nav>
+
+    <main>
+      <div id="orders-banner" class="status-banner" hidden></div>
+
+      <div class="summary-strip" id="portfolio-summary"></div>
+
+      <div class="orders-panel" data-panel="positions">
+        <div class="panel-head">
+          <h2>Open Positions</h2>
+          <div>
+            <button type="button" id="orders-refresh-prices-btn">Refresh Prices</button>
+            <button type="button" id="log-order-btn" class="primary">+ Log Order</button>
+          </div>
+        </div>
+        <div class="table-toolbar">
+          <input id="positions-filter" type="search" placeholder="Filter by ticker or name…" autocomplete="off" />
+          <span id="positions-count" class="row-count"></span>
+        </div>
+        <table class="items-table">
+          <thead><tr id="positions-thead-row"></tr></thead>
+          <tbody id="positions-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="orders-panel" data-panel="history" hidden>
+        <div class="panel-head">
+          <h2>Transaction History</h2>
+          <button type="button" id="log-order-btn-2" class="primary">+ Log Order</button>
+        </div>
+        <div class="table-toolbar">
+          <input id="history-symbol" type="search" placeholder="Ticker…" autocomplete="off" />
+          <select id="history-type">
+            <option value="">All types</option>
+            <option value="BUY">Buys</option>
+            <option value="SELL">Sells</option>
+            <option value="DIVIDEND">Dividends</option>
+          </select>
+          <input id="history-start" type="date" title="From date" />
+          <input id="history-end" type="date" title="To date" />
+          <button type="button" id="history-clear-btn">Clear</button>
+          <span id="history-count" class="row-count"></span>
+        </div>
+        <table class="items-table">
+          <thead><tr id="history-thead-row"></tr></thead>
+          <tbody id="history-tbody"></tbody>
+        </table>
+      </div>
+    </main>
+  </section>
+
+  <section id="view-settings" hidden>
+    <nav id="settings-tabs" class="watchlist-tabs">
+      <button type="button" class="tab active" data-panel="lists">Lists</button>
+      <button type="button" class="tab" data-panel="sources">Advice Sources</button>
+      <button type="button" class="tab" data-panel="holders">Account Holders</button>
+      <button type="button" class="tab" data-panel="exchanges">Exchanges</button>
+      <button type="button" class="tab" data-panel="general">General</button>
+    </nav>
+
+    <main>
+      <div id="settings-banner" class="status-banner" hidden></div>
+
+      <div class="settings-panel" data-panel="lists">
+        <div class="panel-head">
+          <h2>Watchlists</h2>
+          <button type="button" id="settings-add-list-btn" class="primary">+ New List</button>
+        </div>
+        <p class="panel-hint">Rename, reorder, or remove your watchlists. A list must be emptied (or its items moved) before it can be deleted.</p>
+        <ul id="settings-lists" class="settings-list"></ul>
+      </div>
+
+      <div class="settings-panel" data-panel="sources" hidden>
+        <div class="panel-head">
+          <h2>Advice Sources</h2>
+          <button type="button" id="settings-add-source-btn" class="primary">+ New Source</button>
+        </div>
+        <p class="panel-hint">People, groups, books and websites your trade ideas come from. Books and PDFs can be expanded later.</p>
+        <ul id="settings-sources" class="settings-list"></ul>
+      </div>
+
+      <div class="settings-panel" data-panel="holders" hidden>
+        <div class="panel-head">
+          <h2>Account Holders</h2>
+          <button type="button" id="settings-add-holder-btn" class="primary">+ New Holder</button>
+        </div>
+        <p class="panel-hint">Who owns the watchlists and positions. Deleting a holder removes everything they own.</p>
+        <ul id="settings-holders" class="settings-list"></ul>
+      </div>
+
+      <div class="settings-panel" data-panel="exchanges" hidden>
+        <div class="panel-head">
+          <h2>Exchanges</h2>
+          <button type="button" id="settings-add-exchange-btn" class="primary">+ New Exchange</button>
+        </div>
+        <p class="panel-hint">Exchanges are normally created automatically when a ticker is resolved. Add one manually only if you need to.</p>
+        <ul id="settings-exchanges" class="settings-list"></ul>
+      </div>
+
+      <div class="settings-panel" data-panel="general" hidden>
+        <div class="panel-head"><h2>General</h2></div>
+        <form id="general-settings-form" class="settings-form">
+          <label>App title
+            <input name="app_title" autocomplete="off" />
+          </label>
+          <label>Default take profit %
+            <input name="default_take_profit_percent" type="number" step="0.1" />
+          </label>
+          <label>Default stop loss %
+            <input name="default_stop_loss_percent" type="number" step="0.1" />
+          </label>
+          <label>Notification cooldown (minutes)
+            <input name="notification_cooldown_minutes" type="number" step="1" />
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="primary">Save</button>
+          </div>
+        </form>
+      </div>
+    </main>
+  </section>
+
+  <dialog id="add-ticker-dialog">
+    <form id="add-ticker-form">
+      <h2>Add Ticker</h2>
+      <label>Symbol
+        <input name="symbol" required placeholder="e.g. NVDA" autocomplete="off" />
+      </label>
+      <label>List
+        <select name="watchlistId" id="add-form-watchlist"></select>
+      </label>
+      <label>Order Type
+        <select name="orderType" id="add-form-order-type">
+          <option value="WATCH">Just watching (no alert)</option>
+          <option value="BUY_LIMIT">Buy at or below</option>
+          <option value="SELL_LIMIT">Sell at or above</option>
+        </select>
+      </label>
+      <label id="add-form-target-price-label">Target Price
+        <input name="targetPrice" type="number" step="0.01" placeholder="e.g. 11.00" />
+      </label>
+      <label>Notes
+        <textarea name="notes" rows="2"></textarea>
+      </label>
+      <div class="form-actions">
+        <button type="button" id="cancel-add-btn">Cancel</button>
+        <button type="submit" class="primary">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="delete-dialog">
+    <h2 id="delete-title">Remove from watchlist</h2>
+    <p id="delete-message"></p>
+    <ul id="delete-choices" class="delete-choices"></ul>
+    <label id="delete-select-all-label" class="select-all-label" hidden>
+      <input type="checkbox" id="delete-select-all" /> Select all
+    </label>
+    <p id="delete-warning" class="delete-warning" hidden></p>
+    <div class="form-actions">
+      <button type="button" id="delete-cancel-btn">Cancel</button>
+      <button type="button" id="delete-confirm-btn" class="danger">Remove</button>
+    </div>
+  </dialog>
+
+  <dialog id="duplicate-dialog">
+    <h2>Already on your watchlist</h2>
+    <p id="duplicate-message"></p>
+    <ul id="duplicate-list" class="duplicate-list"></ul>
+    <div class="form-actions">
+      <button type="button" id="duplicate-cancel-btn">Cancel</button>
+      <button type="button" id="duplicate-confirm-btn" class="primary">Add Anyway</button>
+    </div>
+  </dialog>
+
+  <dialog id="new-list-dialog">
+    <form id="new-list-form">
+      <h2>New List</h2>
+      <label>Name
+        <input name="name" required autocomplete="off" placeholder="e.g. Tech" />
+      </label>
+      <div class="form-actions">
+        <button type="button" id="cancel-list-btn">Cancel</button>
+        <button type="submit" class="primary">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="order-dialog">
+    <form id="order-form">
+      <h2>Log Order</h2>
+      <label>Type
+        <select name="transactionType" id="order-type-select">
+          <option value="BUY">Buy (executed)</option>
+          <option value="SELL">Sell (executed)</option>
+          <option value="DIVIDEND">Dividend received</option>
+        </select>
+      </label>
+      <div class="field-row">
+        <label>Ticker
+          <input name="symbol" required autocomplete="off" placeholder="NVDA" />
+        </label>
+        <label>Date
+          <input name="transactionDate" type="date" required />
+        </label>
+      </div>
+      <div class="field-row" id="order-qty-price-row">
+        <label id="order-qty-label">Quantity
+          <input name="quantity" type="number" step="any" min="0" />
+        </label>
+        <label><span id="order-price-text">Price per share</span>
+          <input name="price" type="number" step="any" min="0" />
+        </label>
+      </div>
+      <div class="field-row">
+        <label id="order-fees-label">Fees
+          <input name="fees" type="number" step="any" min="0" value="0" />
+        </label>
+        <label>Advice source
+          <select name="sourceId" id="order-source-select">
+            <option value="">— none —</option>
+          </select>
+        </label>
+      </div>
+      <label id="order-lot-label" hidden>Sell from lot
+        <select name="lotId" id="order-lot-select">
+          <option value="">Oldest first (FIFO)</option>
+        </select>
+      </label>
+      <label>Notes
+        <textarea name="notes" rows="2"></textarea>
+      </label>
+      <p id="order-hint" class="panel-hint"></p>
+      <div class="form-actions">
+        <button type="button" id="order-cancel-btn">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="source-dialog">
+    <form id="source-form">
+      <h2 id="source-dialog-title">New Source</h2>
+      <input type="hidden" name="id" />
+      <label>Type
+        <select name="type" id="source-type-select">
+          <option value="person">Person</option>
+          <option value="group">Group</option>
+          <option value="book">Book</option>
+          <option value="website">Website</option>
+        </select>
+      </label>
+      <label><span id="source-name-label">Name</span>
+        <input name="name" required autocomplete="off" />
+      </label>
+      <label>URL
+        <input name="url" autocomplete="off" placeholder="https://…" />
+      </label>
+      <label>Description
+        <textarea name="description" rows="2"></textarea>
+      </label>
+
+      <fieldset class="source-panel" data-source-panel="person">
+        <legend>Person details</legend>
+        <label>Email <input name="person_email" type="email" autocomplete="off" /></label>
+        <label>Phone <input name="person_phone" autocomplete="off" /></label>
+        <label>Contact app <input name="person_app_type" autocomplete="off" placeholder="Discord, Telegram…" /></label>
+        <label>Handle <input name="person_app_handle" autocomplete="off" /></label>
+      </fieldset>
+
+      <fieldset class="source-panel" data-source-panel="group" hidden>
+        <legend>Group details</legend>
+        <label>Primary contact <input name="group_primary_contact" autocomplete="off" /></label>
+        <label>Email <input name="group_email" type="email" autocomplete="off" /></label>
+        <label>Phone <input name="group_phone" autocomplete="off" /></label>
+        <label>Contact app <input name="group_app_type" autocomplete="off" /></label>
+        <label>Handle <input name="group_app_handle" autocomplete="off" /></label>
+      </fieldset>
+
+      <fieldset class="source-panel" data-source-panel="book" hidden>
+        <legend>Book details</legend>
+        <label>Author <input name="book_author" autocomplete="off" /></label>
+        <label>ISBN <input name="book_isbn" autocomplete="off" /></label>
+        <label>Related links (one per line) <textarea name="book_websites" rows="2"></textarea></label>
+        <label>PDF references (one per line) <textarea name="book_pdfs" rows="2"></textarea></label>
+      </fieldset>
+
+      <fieldset class="source-panel" data-source-panel="website" hidden>
+        <legend>Website details</legend>
+        <label>Related links (one per line) <textarea name="website_websites" rows="2"></textarea></label>
+        <label>Saved docs (one per line) <textarea name="website_pdfs" rows="2"></textarea></label>
+      </fieldset>
+
+      <div class="form-actions">
+        <button type="button" id="source-cancel-btn">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="prompt-dialog">
+    <form id="prompt-form">
+      <h2 id="prompt-title">Enter a value</h2>
+      <label><span id="prompt-label">Value</span>
+        <input name="value" id="prompt-input" autocomplete="off" required />
+      </label>
+      <div class="form-actions">
+        <button type="button" id="prompt-cancel-btn">Cancel</button>
+        <button type="submit" class="primary">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog">
+    <h2 id="confirm-title">Are you sure?</h2>
+    <p id="confirm-message"></p>
+    <div class="form-actions">
+      <button type="button" id="confirm-cancel-btn">Cancel</button>
+      <button type="button" id="confirm-ok-btn" class="danger">Confirm</button>
+    </div>
+  </dialog>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
