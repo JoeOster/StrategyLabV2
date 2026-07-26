@@ -89,7 +89,7 @@ bugs were caught this way and would not have been caught by review alone:
   blocks deleting a security or watchlist still in use, `ON DELETE CASCADE`
   correctly cleans up an account holder's accounts/transactions, and
   `UNIQUE(account_id, external_ref)` makes duplicate CSV import a no-op.
-- `npm run test:offline` (`scripts/test-offline.js`): 170 checks covering
+- `npm run test:offline` (`scripts/test-offline.js`): 215 checks covering
   `isTriggered()` alert-math logic in isolation, DB wiring (holder/security/
   watched-item creation with no network call), watchlist CRUD (default
   "General" list auto-creation, named lists, duplicate-name rejection,
@@ -153,6 +153,13 @@ nothing has clicked a Settings button in a real browser yet.
    first draft called `.quote()` etc. straight on the import, which fails
    for everything. Fixed: `new YahooFinance()`.
 3. The version-pin issue above (2.x vs 3.x module availability).
+4. **Quotes were only refreshed for watchlisted tickers.** `checkAlerts()`
+   built its refresh set from `watched_items` alone, so a ticker you bought
+   but never added to a watchlist never received a quote — its Dashboard card
+   and detail panel permanently showed no price, and the detail panel
+   unhelpfully told you to refresh from the Watchlist tab where it didn't
+   appear. Found by Joe using the app. Fixed: the refresh set is now
+   "watched OR held".
 
 **Pattern worth remembering:** every one of these passed a syntax check
 and looked reasonable on read-through. None of them were caught until the
@@ -260,6 +267,15 @@ specific buy lots":
   BUY that has already been partly sold is refused — it would orphan the sell
   rows pointing at it.
 
+- **Editing** keeps the books consistent rather than just overwriting fields:
+  a BUY's quantity is locked once any of it has been sold; changing a BUY's
+  price or fees **recomputes the cost basis of every sell linked to it**, so
+  correcting a typo'd purchase price also corrects the realized P&L of past
+  sales; changing a SELL's quantity re-allocates against its lot (restore the
+  old draw, take the new one) and is rejected if the lot can't cover it.
+  Transaction type can never change — that would invalidate lot links, so
+  delete and re-enter instead.
+
 All of the above is covered by `test:offline`, including multi-lot splits
 and the exact P&L arithmetic.
 
@@ -317,6 +333,19 @@ picking this back up and something here doesn't match intent:
   when asked): every `watched_item` belongs to exactly one `watchlists`
   row. A holder always has at least one list — "General" — auto-created
   the first time a ticker is added without picking a list.
+- **The "Orders" watchlist is virtual, not a real row.** It lists every
+  ticker currently held (`quantity_remaining > 0`), derived from positions
+  on every read rather than synced into `watched_items`. That means it can
+  never drift out of date and there's nothing to migrate when a position
+  opens or closes. Its id is the string `"orders"` so it can't collide with
+  a numeric list id, and its rows use `order_type: 'HELD'` with
+  `is_virtual: 1` and non-numeric ids. Rename/delete/add are all refused in
+  the service layer, not just hidden in the UI.
+
+  **Caveat for future work:** `listWatchlists()` now returns this virtual
+  entry alongside real ones. Any caller that iterates the result and mutates
+  each entry must skip `is_virtual` rows — this already caught a test that
+  looped and deleted every list.
 - **`order_type` has three values, not two**: `BUY_LIMIT`, `SELL_LIMIT`, and
   `WATCH`. `WATCH` means "just tracking this ticker, no price target, never
   alerts" — `isTriggered()` always returns `false` for it, and the add-form

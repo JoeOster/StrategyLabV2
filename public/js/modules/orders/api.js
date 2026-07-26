@@ -26,6 +26,13 @@ export const recordTransaction = (payload) =>
     body: JSON.stringify(payload),
   }).then(handleResponse);
 
+export const updateTransaction = (id, payload) =>
+  fetch(`/api/transactions/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).then(handleResponse);
+
 export const deleteTransaction = (id) =>
   fetch(`/api/transactions/${id}/delete`, { method: "POST" }).then(handleResponse);
 

@@ -324,6 +324,144 @@ const restoreLot = db.prepare(
   "UPDATE transactions SET quantity_remaining = quantity_remaining + ? WHERE id = ?",
 );
 
+const updateBuyStmt = db.prepare(`
+  UPDATE transactions SET
+    transaction_date = @transactionDate, quantity = @quantity, price = @price,
+    fees = @fees, cost_basis = @costBasis, quantity_remaining = @quantityRemaining,
+    source_id = @sourceId, notes = @notes
+  WHERE id = @id AND holder_id = @holderId
+`);
+
+const updateSellStmt = db.prepare(`
+  UPDATE transactions SET
+    transaction_date = @transactionDate, quantity = @quantity, price = @price,
+    fees = @fees, cost_basis = @costBasis, source_id = @sourceId, notes = @notes
+  WHERE id = @id AND holder_id = @holderId
+`);
+
+const updateDividendStmt = db.prepare(`
+  UPDATE transactions SET
+    transaction_date = @transactionDate, price = @price,
+    source_id = @sourceId, notes = @notes
+  WHERE id = @id AND holder_id = @holderId
+`);
+
+const getLinkedSells = db.prepare(
+  "SELECT id, quantity FROM transactions WHERE linked_buy_id = ? AND transaction_type = 'SELL'",
+);
+const setSellCostBasis = db.prepare("UPDATE transactions SET cost_basis = ? WHERE id = ?");
+
+/**
+ * Edits an existing transaction, keeping lot accounting consistent.
+ *
+ * Rules, and why:
+ *  - **Type can't change.** Turning a BUY into a SELL would invalidate every
+ *    lot link pointing at it. Delete and re-enter instead.
+ *  - **A BUY's quantity can only change while none of it has been sold.**
+ *    Otherwise the shares drawn down by existing sells might no longer exist.
+ *  - **Changing a BUY's price or fees recomputes the cost basis of every sell
+ *    linked to it**, so correcting a typo'd purchase price fixes the realized
+ *    P&L of past sales instead of leaving the books internally inconsistent.
+ *  - **A SELL's quantity re-allocates against its lot**: the old amount is
+ *    returned first, then the new amount is taken, so an increase is rejected
+ *    if the lot can't cover it.
+ *
+ * @param {number} holderId
+ * @param {number} id
+ * @param {object} patch fields to change; omitted fields keep current values
+ */
+export function updateTransaction(holderId, id, patch = {}) {
+  return withTransaction(() => {
+    const txn = getTransaction.get(id, holderId);
+    if (!txn) throw new Error("Transaction not found.");
+
+    if (patch.transactionType && patch.transactionType !== txn.transaction_type) {
+      throw new Error(
+        "A transaction's type can't be changed. Delete it and enter a new one instead.",
+      );
+    }
+
+    const transactionDate = patch.transactionDate ?? txn.transaction_date;
+    const sourceId = patch.sourceId === undefined ? txn.source_id : (patch.sourceId ?? null);
+    const notes = patch.notes === undefined ? txn.notes : (patch.notes ?? null);
+
+    if (txn.transaction_type === "DIVIDEND") {
+      const amount = patch.amount != null ? Number(patch.amount) : Number(patch.price ?? txn.price);
+      if (!(amount > 0)) throw new Error("Dividend amount must be greater than zero.");
+      updateDividendStmt.run({ id, holderId, transactionDate, price: amount, sourceId, notes });
+      return getTransaction.get(id, holderId);
+    }
+
+    const quantity = patch.quantity != null ? Number(patch.quantity) : txn.quantity;
+    const price = patch.price != null ? Number(patch.price) : txn.price;
+    const fees = patch.fees != null ? Number(patch.fees) : txn.fees;
+    if (!(quantity > 0)) throw new Error("Quantity must be greater than zero.");
+    if (!(price >= 0)) throw new Error("Price must be zero or greater.");
+
+    if (txn.transaction_type === "BUY") {
+      const soldSoFar = txn.quantity - txn.quantity_remaining;
+      if (quantity !== txn.quantity && soldSoFar > 0) {
+        throw new Error(
+          `Can't change the quantity: ${soldSoFar} of these shares have already been sold. Delete the matching sell(s) first.`,
+        );
+      }
+
+      const costBasis = quantity * price + fees;
+      updateBuyStmt.run({
+        id,
+        holderId,
+        transactionDate,
+        quantity,
+        price,
+        fees,
+        costBasis,
+        // Untouched by definition when quantity changes; otherwise preserve
+        // whatever has already been drawn down.
+        quantityRemaining: quantity === txn.quantity ? txn.quantity_remaining : quantity,
+        sourceId,
+        notes,
+      });
+
+      // Keep already-recorded sells honest about what these shares cost.
+      const newCostPerShare = costBasis / quantity;
+      for (const sell of getLinkedSells.all(id)) {
+        setSellCostBasis.run(sell.quantity * newCostPerShare, sell.id);
+      }
+      return getTransaction.get(id, holderId);
+    }
+
+    // SELL: re-allocate against the parent lot.
+    const lot = txn.linked_buy_id ? getTransaction.get(txn.linked_buy_id, holderId) : null;
+    if (!lot) throw new Error("This sale's original purchase is missing; delete it instead.");
+
+    if (quantity !== txn.quantity) {
+      const availableAfterRestore = lot.quantity_remaining + txn.quantity;
+      if (quantity > availableAfterRestore) {
+        throw new Error(
+          `Can't sell ${quantity} share(s): that lot only holds ${availableAfterRestore}.`,
+        );
+      }
+      // Restore the old draw, then take the new one.
+      restoreLot.run(txn.quantity, lot.id);
+      reduceLot.run(quantity, lot.id);
+    }
+
+    const lotCostPerShare = lot.cost_basis / lot.quantity;
+    updateSellStmt.run({
+      id,
+      holderId,
+      transactionDate,
+      quantity,
+      price,
+      fees,
+      costBasis: quantity * lotCostPerShare,
+      sourceId,
+      notes,
+    });
+    return getTransaction.get(id, holderId);
+  });
+}
+
 /**
  * Deletes a transaction, restoring lot state so the books stay consistent:
  * removing a SELL puts its shares back on the lot it drew from. Deleting a

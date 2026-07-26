@@ -16,6 +16,9 @@ export const ORDER_TYPE_LABELS = {
   WATCH: "Watching",
   BUY_LIMIT: "Buy Limit",
   SELL_LIMIT: "Sell Limit",
+  // Not a real order_type -- only appears on rows of the virtual Orders list,
+  // which are derived from open positions rather than watched_items.
+  HELD: "Held",
 };
 
 export function orderTypeLabel(orderType) {
@@ -26,7 +29,7 @@ export function renderTabs(watchlists, activeId) {
   const tabs = watchlists
     .map(
       (wl) => `
-      <button type="button" class="tab${wl.id === activeId ? " active" : ""}" data-watchlist-id="${wl.id}">
+      <button type="button" class="tab${String(wl.id) === String(activeId) ? " active" : ""}${wl.is_virtual ? " tab-virtual" : ""}" data-watchlist-id="${wl.id}"${wl.is_virtual ? ' title="Automatic: every ticker you currently hold"' : ""}>
         ${escapeHtml(wl.name)} <span class="tab-count">${wl.item_count}</span>
       </button>`,
     )
@@ -63,7 +66,13 @@ export function renderItemsRows(items) {
           <td class="${changeClass}">${changePct == null ? "—" : `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`}</td>
           <td title="${escapeHtml(buildHistoryTooltip(item))}">${item.history_days ? `${item.history_days}d` : "—"}</td>
           <td><span class="status-pill">${escapeHtml(item.status)}</span></td>
-          <td class="actions-cell"><button type="button" class="delete-btn" data-item-id="${item.id}" title="Remove from watchlist" aria-label="Remove ${escapeHtml(item.symbol)}">✕</button></td>
+          <td class="actions-cell">${
+            // Virtual Orders rows aren't deletable -- they disappear on their
+            // own once the position is sold.
+            item.is_virtual
+              ? `<span class="virtual-hint" title="Managed automatically — sell the position to remove it">auto</span>`
+              : `<button type="button" class="delete-btn" data-item-id="${item.id}" title="Remove from watchlist" aria-label="Remove ${escapeHtml(item.symbol)}">✕</button>`
+          }</td>
         </tr>`;
     })
     .join("");
@@ -143,6 +152,9 @@ function formatPrice(value) {
 }
 
 function renderTargetCell(item) {
+  if (item.order_type === "HELD") {
+    return `${item.quantity} share(s)`;
+  }
   if (item.order_type === "WATCH") return "Watching";
   const target = item.order_type === "BUY_LIMIT" ? item.buy_price_high : item.take_profit_low;
   const label = item.order_type === "BUY_LIMIT" ? "Buy ≤" : "Sell ≥";
@@ -252,8 +264,10 @@ export function renderDeleteChoices(entries, clickedId) {
     .join("");
 }
 
+/** Excludes system-managed lists -- you can't choose to add a ticker to Orders. */
 export function renderWatchlistOptions(watchlists, selectedId) {
   return watchlists
+    .filter((wl) => !wl.is_virtual)
     .map(
       (wl) =>
         `<option value="${wl.id}"${wl.id === selectedId ? " selected" : ""}>${escapeHtml(wl.name)}</option>`,

@@ -20,8 +20,14 @@ import {
 } from "./priceService.js";
 
 // --- Watchlists (named lists: "Tech", "Dip Buys", etc.) ---------------------
-// One list per item, not tags. Every holder gets a "General" list
-// auto-created the first time they add a ticker without picking one.
+// One list per item, not tags. Every holder gets a default list so nothing
+// has to be created before adding a first ticker; `npm run db:init` seeds it
+// up front, and getOrCreateDefaultWatchlist() recreates it if it's missing.
+
+// Defined in lib/constants.js (no DB dependency) and re-exported here so
+// callers can keep importing it from the service.
+export { DEFAULT_WATCHLIST_NAME } from "../lib/constants.js";
+import { DEFAULT_WATCHLIST_NAME } from "../lib/constants.js";
 
 const getWatchlistByName = db.prepare("SELECT * FROM watchlists WHERE holder_id = ? AND name = ?");
 const insertWatchlist = db.prepare(
@@ -36,7 +42,7 @@ export function getOrCreateWatchlistByName(holderId, name, sortOrder = 0) {
 }
 
 export function getOrCreateDefaultWatchlist(holderId) {
-  return getOrCreateWatchlistByName(holderId, "General");
+  return getOrCreateWatchlistByName(holderId, DEFAULT_WATCHLIST_NAME);
 }
 
 /** Not idempotent -- throws (UNIQUE constraint) if the name already exists. */
@@ -53,8 +59,83 @@ const listWatchlistsQuery = db.prepare(`
   ORDER BY wl.sort_order, wl.name
 `);
 
+// --- The virtual "Orders" list ---------------------------------------------
+// A system-managed pseudo-list containing every ticker currently held
+// (quantity_remaining > 0). Deliberately NOT a real `watchlists` row:
+// membership is derived from positions on every read, so it can never drift
+// out of sync the way a synced copy would, and there's nothing to migrate
+// when a position opens or closes. The id is a string so it can't collide
+// with a real numeric watchlist id.
+export { ORDERS_LIST_ID } from "../lib/constants.js";
+import { ORDERS_LIST_ID } from "../lib/constants.js";
+
+const heldSecuritiesQuery = db.prepare(`
+  SELECT
+    s.id AS security_id, s.symbol, s.name AS security_name,
+    SUM(t.quantity_remaining) AS shares_held,
+    MIN(t.transaction_date) AS first_bought,
+    SUM(t.cost_basis * (t.quantity_remaining / t.quantity)) AS cost_basis,
+    q.last_price, q.prev_close, q.fetched_at AS quote_fetched_at,
+    (SELECT COUNT(*) FROM historical_prices hp WHERE hp.security_id = s.id) AS history_days,
+    (SELECT MAX(date) FROM historical_prices hp WHERE hp.security_id = s.id) AS history_latest
+  FROM transactions t
+  JOIN securities s ON s.id = t.security_id
+  LEFT JOIN quotes_cache q ON q.security_id = s.id
+  WHERE t.holder_id = ? AND t.transaction_type = 'BUY'
+    AND t.quantity_remaining > 0 AND t.is_paper_trade = 0
+  GROUP BY s.id
+  ORDER BY s.symbol
+`);
+
+/**
+ * Held tickers, shaped to match watched_items rows so the watchlist table can
+ * render them without a separate code path. Marked `is_virtual` so the UI can
+ * suppress delete buttons and keep the list out of "add to list" dropdowns.
+ */
+export function listOrdersVirtualItems(holderId) {
+  return heldSecuritiesQuery.all(holderId).map((row) => ({
+    // Prefixed string id: these aren't real watched_items rows, and anything
+    // that tries to treat one as a deletable id should fail loudly.
+    id: `virtual-${row.security_id}`,
+    is_virtual: 1,
+    watchlist_id: ORDERS_LIST_ID,
+    watchlist_name: "Orders",
+    security_id: row.security_id,
+    symbol: row.symbol,
+    security_name: row.security_name,
+    order_type: "HELD",
+    status: "OPEN",
+    quantity: row.shares_held,
+    buy_price_low: null,
+    buy_price_high: null,
+    take_profit_low: null,
+    take_profit_high: null,
+    notes: `${row.shares_held} share(s) since ${row.first_bought}`,
+    created_at: row.first_bought,
+    last_price: row.last_price,
+    prev_close: row.prev_close,
+    quote_fetched_at: row.quote_fetched_at,
+    history_days: row.history_days,
+    history_latest: row.history_latest,
+    alert_count: 0,
+    cost_basis: row.cost_basis,
+  }));
+}
+
 export function listWatchlists(holderId) {
-  return listWatchlistsQuery.all(holderId);
+  const real = listWatchlistsQuery.all(holderId);
+  const heldCount = heldSecuritiesQuery.all(holderId).length;
+  // Always present, even when empty, so its purpose stays discoverable.
+  return [
+    ...real,
+    {
+      id: ORDERS_LIST_ID,
+      name: "Orders",
+      item_count: heldCount,
+      is_virtual: 1,
+      sort_order: 9999,
+    },
+  ];
 }
 
 const renameWatchlistStmt = db.prepare(
@@ -72,7 +153,17 @@ const moveItemsToList = db.prepare(
   "UPDATE watched_items SET watchlist_id = @toId WHERE watchlist_id = @fromId AND holder_id = @holderId",
 );
 
+// The Orders list is system-managed: it can't be renamed, reordered,
+// deleted, or added to. Every mutation path checks this so the guarantee
+// holds even if the UI is bypassed.
+function assertNotVirtual(id) {
+  if (String(id) === ORDERS_LIST_ID) {
+    throw new Error("The Orders list is managed automatically and can't be changed.");
+  }
+}
+
 export function renameWatchlist(holderId, id, name) {
+  assertNotVirtual(id);
   const trimmed = String(name || "").trim();
   if (!trimmed) throw new Error("List name is required");
   return { updated: renameWatchlistStmt.run({ id, holderId, name: trimmed }).changes };
@@ -83,6 +174,9 @@ export function reorderWatchlists(holderId, orderedIds) {
   return withTransaction(() => {
     let updated = 0;
     orderedIds.forEach((id, index) => {
+      // Silently skip the virtual list rather than throwing -- it may appear
+      // in an ordering array simply because it was on screen.
+      if (String(id) === ORDERS_LIST_ID) return;
       updated += setWatchlistOrder.run({ id: Number(id), holderId, sortOrder: index }).changes;
     });
     return { updated };
@@ -96,6 +190,7 @@ export function reorderWatchlists(holderId, orderedIds) {
  * them. Refuses to remove a holder's last list, since every item needs one.
  */
 export function deleteWatchlist(holderId, id, opts = {}) {
+  assertNotVirtual(id);
   return withTransaction(() => {
     if (countListsForHolder.get(holderId).n <= 1) {
       throw new Error("Cannot delete your only list.");
@@ -139,15 +234,21 @@ const insertWatchedItem = db.prepare(`
  * @param {string} input.symbol
  * @param {'BUY_LIMIT'|'SELL_LIMIT'|'WATCH'} input.orderType WATCH = just tracking, no target, never alerts
  * @param {number} [input.watchlistId] explicit list to add to
- * @param {string} [input.watchlistName] find-or-create a list by name (ignored if watchlistId given). Defaults to "General".
+ * @param {string} [input.watchlistName] find-or-create a list by name (ignored if watchlistId given). Defaults to DEFAULT_WATCHLIST_NAME.
  * @param {boolean} [input.isPaperTrade=false]
  * @param {number} [input.targetPrice] convenience: sets buy_price_high (BUY_LIMIT) or take_profit_low (SELL_LIMIT). Ignored for WATCH.
  */
 export async function addWatchedItem(input) {
+  // Adding to the virtual Orders list is meaningless -- membership comes from
+  // holding shares, not from a watchlist row. Fall back to the default list.
+  const requestedListId =
+    String(input.watchlistId) === ORDERS_LIST_ID ? undefined : input.watchlistId;
+
   const security = await getOrCreateSecurity(input.symbol, { exchangeCode: input.exchangeCode });
 
   const watchlistId =
-    input.watchlistId ?? getOrCreateWatchlistByName(input.holderId, input.watchlistName || "General").id;
+    requestedListId ??
+    getOrCreateWatchlistByName(input.holderId, input.watchlistName || DEFAULT_WATCHLIST_NAME).id;
 
   const isPaperTrade = input.isPaperTrade ? 1 : 0;
   let buyPriceHigh = input.buyPriceHigh ?? null;
@@ -291,9 +392,28 @@ const listQuery = db.prepare(`
  * @param {{watchlistId?: number, isPaperTrade?: boolean, status?: string}} filters
  */
 export function listWatchedItems(holderId, filters = {}) {
+  // The Orders list isn't backed by watched_items at all -- it's derived
+  // from open positions.
+  if (String(filters.watchlistId) === ORDERS_LIST_ID) {
+    return listOrdersVirtualItems(holderId);
+  }
+
+  // Guard against a filter that was meant to narrow but can't be understood.
+  // SQLite binds NaN as NULL, so `@watchlistId IS NULL` would be true and the
+  // query would quietly return EVERY item instead of none -- which is exactly
+  // how the "watchlist shows all items regardless of list" bug happened.
+  // Failing closed (empty) is far safer than failing open (everything).
+  const requestedId = filters.watchlistId;
+  if (requestedId != null && !Number.isFinite(Number(requestedId))) {
+    // String() not JSON.stringify() -- the latter renders NaN as "null",
+    // which hides the actual problem in the log.
+    console.error(`listWatchedItems: ignoring unrecognised watchlistId "${String(requestedId)}"`);
+    return [];
+  }
+
   return listQuery.all({
     holderId,
-    watchlistId: filters.watchlistId ?? null,
+    watchlistId: requestedId ?? null,
     isPaperTrade: filters.isPaperTrade == null ? null : filters.isPaperTrade ? 1 : 0,
     status: filters.status ?? null,
   });

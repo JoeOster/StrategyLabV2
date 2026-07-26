@@ -59,6 +59,7 @@ export function renderPositionsRows(positions) {
           <td title="Bought ${escapeHtml(p.transaction_date)}${p.source_name ? ` · via ${escapeHtml(p.source_name)}` : ""}">${p.days_held == null ? "—" : `${p.days_held}d`}</td>
           <td class="actions-cell">
             <button type="button" class="sell-lot-btn" data-symbol="${escapeHtml(p.symbol)}" data-lot-id="${p.lot_id}" data-qty="${p.quantity_remaining}" title="Sell from this lot">Sell</button>
+            <button type="button" class="edit-txn-btn" data-id="${p.lot_id}" title="Correct this purchase">Edit</button>
           </td>
         </tr>`;
     })
@@ -84,6 +85,7 @@ export function renderHistoryRows(rows) {
           <td class="${pnlClass}">${signedMoney(t.realized_pnl)}</td>
           <td>${escapeHtml(t.source_name || "—")}</td>
           <td class="actions-cell">
+            <button type="button" class="edit-txn-btn" data-id="${t.id}" title="Edit this transaction">Edit</button>
             <button type="button" class="delete-txn-btn" data-id="${t.id}" title="Delete this transaction">✕</button>
           </td>
         </tr>`;

@@ -175,6 +175,7 @@ async function handleDeleteClick(event) {
   const btn = event.target.closest(".delete-btn");
   if (!btn) return;
   const clickedId = Number(btn.dataset.itemId);
+  if (!Number.isFinite(clickedId)) return; // virtual rows have no real id
   const clicked = state.items.find((i) => i.id === clickedId);
   if (!clicked) return;
 
@@ -307,7 +308,7 @@ export async function reloadWatchlistView() {
   // If the active list was deleted in Settings, fall back to the first
   // remaining one rather than showing an empty table for a dead id.
   await loadWatchlists();
-  if (!state.watchlists.some((w) => w.id === state.activeWatchlistId)) {
+  if (!state.watchlists.some((w) => String(w.id) === String(state.activeWatchlistId))) {
     state.activeWatchlistId = state.watchlists[0]?.id ?? null;
     els.tabs.innerHTML = renderTabs(state.watchlists, state.activeWatchlistId);
   }
@@ -361,7 +362,10 @@ async function handleTabsClick(event) {
   }
   const tab = event.target.closest(".tab[data-watchlist-id]");
   if (!tab) return;
-  state.activeWatchlistId = Number(tab.dataset.watchlistId);
+  // Ids are numeric for real lists but a string for the virtual "orders"
+  // list, so only coerce when it actually is a number.
+  const raw = tab.dataset.watchlistId;
+  state.activeWatchlistId = /^\d+$/.test(raw) ? Number(raw) : raw;
   els.tabs.innerHTML = renderTabs(state.watchlists, state.activeWatchlistId);
   await loadItems();
 }

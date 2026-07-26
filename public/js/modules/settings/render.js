@@ -20,6 +20,9 @@ export function renderListsPanel(watchlists) {
   if (watchlists.length === 0) {
     return `<li class="empty-row">No lists yet.</li>`;
   }
+  // The virtual "Orders" list is system-managed -- show it so its existence
+  // is explained, but offer no actions on it.
+  const realCount = watchlists.filter((wl) => !wl.is_virtual).length;
   return watchlists
     .map(
       (wl, index) => `
@@ -27,13 +30,18 @@ export function renderListsPanel(watchlists) {
         <div class="settings-row">
           <div class="settings-row-main">
             <strong>${escapeHtml(wl.name)}</strong>
-            <span class="settings-row-meta">${wl.item_count} item(s)</span>
+            ${wl.is_virtual ? '<span class="type-pill type-watch">Automatic</span>' : ""}
+            <span class="settings-row-meta">${wl.item_count} item(s)${wl.is_virtual ? " · every ticker you currently hold" : ""}</span>
           </div>
           <div class="settings-row-actions">
-            <button type="button" data-action="move-up" data-id="${wl.id}" ${index === 0 ? "disabled" : ""} title="Move up">↑</button>
-            <button type="button" data-action="move-down" data-id="${wl.id}" ${index === watchlists.length - 1 ? "disabled" : ""} title="Move down">↓</button>
-            <button type="button" data-action="rename" data-id="${wl.id}">Rename</button>
-            <button type="button" data-action="delete" data-id="${wl.id}" class="link-danger">Delete</button>
+            ${
+              wl.is_virtual
+                ? ""
+                : `<button type="button" data-action="move-up" data-id="${wl.id}" ${index === 0 ? "disabled" : ""} title="Move up">↑</button>
+                   <button type="button" data-action="move-down" data-id="${wl.id}" ${index === realCount - 1 ? "disabled" : ""} title="Move down">↓</button>
+                   <button type="button" data-action="rename" data-id="${wl.id}">Rename</button>
+                   <button type="button" data-action="delete" data-id="${wl.id}" class="link-danger">Delete</button>`
+            }
           </div>
         </div>
       </li>`,

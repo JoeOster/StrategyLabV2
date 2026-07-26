@@ -24,6 +24,9 @@ const state = {
   historySort: { key: "transaction_date", dir: "desc" },
   positionsFilter: "",
   sources: [],
+  // Non-null when the order dialog is editing an existing transaction rather
+  // than creating a new one.
+  editingId: null,
 };
 
 const els = {};
@@ -59,6 +62,7 @@ export async function initializeOrdersModule() {
   els.orderQtyLabel = document.getElementById("order-qty-label");
   els.orderFeesLabel = document.getElementById("order-fees-label");
   els.orderHint = document.getElementById("order-hint");
+  els.orderDialogTitle = document.getElementById("order-dialog-title");
   els.orderCancelBtn = document.getElementById("order-cancel-btn");
   els.logOrderBtns = [document.getElementById("log-order-btn"), document.getElementById("log-order-btn-2")];
 
@@ -189,6 +193,9 @@ function handleSort(event, sortStateKey, rerender) {
 }
 
 async function handlePositionsAction(event) {
+  const editBtn = event.target.closest(".edit-txn-btn");
+  if (editBtn) return openEditDialog(Number(editBtn.dataset.id));
+
   const btn = event.target.closest(".sell-lot-btn");
   if (!btn) return;
   // Pre-fill a sell against this specific lot rather than making the user
@@ -202,6 +209,9 @@ async function handlePositionsAction(event) {
 }
 
 async function handleHistoryAction(event) {
+  const editBtn = event.target.closest(".edit-txn-btn");
+  if (editBtn) return openEditDialog(Number(editBtn.dataset.id));
+
   const btn = event.target.closest(".delete-txn-btn");
   if (!btn) return;
   if (!window.confirm("Delete this transaction? Lot quantities will be adjusted to match.")) return;
@@ -212,6 +222,58 @@ async function handleHistoryAction(event) {
   } catch (err) {
     banner(err.message, true);
   }
+}
+
+/**
+ * Opens the order dialog in edit mode, populated from an existing
+ * transaction. The type field is locked: changing a BUY into a SELL would
+ * invalidate the lot links, so the server refuses it anyway.
+ */
+async function openEditDialog(transactionId) {
+  // Look in whichever list is loaded; fall back to fetching history if the
+  // row came from the positions table and history hasn't been loaded yet.
+  let txn = state.transactions.find((t) => t.id === transactionId);
+  if (!txn) {
+    try {
+      state.transactions = await api.fetchTransactions({});
+      txn = state.transactions.find((t) => t.id === transactionId);
+    } catch (err) {
+      return banner(err.message, true);
+    }
+  }
+  if (!txn) return banner("Couldn't find that transaction.", true);
+
+  state.editingId = transactionId;
+  els.orderForm.reset();
+
+  try {
+    state.sources = await api.fetchSources();
+    els.orderSourceSelect.innerHTML = renderSourceOptions(state.sources);
+  } catch {
+    /* a missing source list shouldn't block editing */
+  }
+
+  els.orderTypeSelect.value = txn.transaction_type;
+  els.orderTypeSelect.disabled = true;
+  els.orderForm.elements.symbol.value = txn.symbol;
+  els.orderForm.elements.symbol.readOnly = true; // ticker changes = a different trade
+  els.orderForm.elements.transactionDate.value = txn.transaction_date;
+  els.orderForm.elements.quantity.value = txn.quantity;
+  els.orderForm.elements.price.value = txn.price;
+  els.orderForm.elements.fees.value = txn.fees ?? 0;
+  els.orderForm.elements.notes.value = txn.notes ?? "";
+  if (txn.source_id) els.orderSourceSelect.value = String(txn.source_id);
+
+  els.orderDialogTitle.textContent = `Edit ${txn.transaction_type} — ${txn.symbol}`;
+  updateOrderFormForType();
+  // Lot selection only applies when creating a new sell.
+  els.orderLotLabel.hidden = true;
+  els.orderHint.textContent =
+    txn.transaction_type === "BUY"
+      ? "Correcting the price also updates the realized P&L of any sales from this lot."
+      : "Changing the quantity re-allocates shares against the original purchase.";
+
+  els.orderDialog.showModal();
 }
 
 async function handleRefreshPrices() {
@@ -230,6 +292,12 @@ async function handleRefreshPrices() {
 }
 
 async function openOrderDialog(prefill = {}) {
+  // Clear any leftover edit state so "+ Log Order" always creates.
+  state.editingId = null;
+  els.orderTypeSelect.disabled = false;
+  els.orderForm.elements.symbol.readOnly = false;
+  els.orderDialogTitle.textContent = "Log Order";
+
   els.orderForm.reset();
   els.orderForm.elements.transactionDate.value = new Date().toISOString().slice(0, 10);
   els.orderForm.elements.fees.value = "0";
@@ -287,16 +355,31 @@ function updateOrderFormForType() {
 
 async function handleOrderSubmit(event) {
   event.preventDefault();
-  const payload = orderFormToPayload(new FormData(els.orderForm));
+  // A disabled <select> is omitted from FormData, so in edit mode the type
+  // has to be read back off the element directly.
+  const formData = new FormData(els.orderForm);
+  if (state.editingId && !formData.get("transactionType")) {
+    formData.set("transactionType", els.orderTypeSelect.value);
+  }
+
+  const payload = orderFormToPayload(formData);
   const error = validateOrderPayload(payload);
   if (error) return banner(error, true);
 
   try {
-    await api.recordTransaction(payload);
-    els.orderDialog.close();
-    await reloadOrdersView();
-    banner(`${payload.transactionType} recorded for ${payload.symbol}.`, false);
+    if (state.editingId) {
+      await api.updateTransaction(state.editingId, payload);
+      els.orderDialog.close();
+      await reloadOrdersView();
+      banner(`Updated ${payload.symbol}.`, false);
+    } else {
+      await api.recordTransaction(payload);
+      els.orderDialog.close();
+      await reloadOrdersView();
+      banner(`${payload.transactionType} recorded for ${payload.symbol}.`, false);
+    }
   } catch (err) {
+    // Keep the dialog open so the user can correct and retry.
     banner(err.message, true);
   }
 }

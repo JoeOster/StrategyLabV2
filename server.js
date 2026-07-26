@@ -27,6 +27,7 @@ const {
   renameWatchlist,
   reorderWatchlists,
   deleteWatchlist,
+  refreshSingleTicker,
 } = await import("./services/watchlistService.js");
 const settings = await import("./services/settingsService.js");
 const sources = await import("./services/sourcesService.js");
@@ -66,7 +67,13 @@ app.post("/api/watchlists", (req, res) => {
 
 app.get("/api/watched-items", (req, res) => {
   const holder = getOrCreateDefaultHolder();
-  const watchlistId = req.query.watchlistId ? Number(req.query.watchlistId) : undefined;
+  // Do NOT blindly Number() this: the virtual Orders list uses the string id
+  // "orders", and Number("orders") is NaN -- which SQLite binds as NULL,
+  // turning the filter into "match everything". Keep non-numeric ids as
+  // strings so the service can recognise the sentinel.
+  const raw = req.query.watchlistId;
+  const watchlistId =
+    raw == null || raw === "" ? undefined : /^\d+$/.test(String(raw)) ? Number(raw) : String(raw);
   res.json(listWatchedItems(holder.id, { watchlistId }));
 });
 
@@ -346,12 +353,31 @@ app.post("/api/transactions", async (req, res) => {
   }
 });
 
+app.put("/api/transactions/:id", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(txns.updateTransaction(holder.id, Number(req.params.id), req.body || {}));
+  } catch (err) {
+    // These are user-correctable (oversell, already-sold lot), not faults.
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.post("/api/transactions/:id/delete", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   try {
     res.json(txns.deleteTransaction(holder.id, Number(req.params.id)));
   } catch (err) {
     res.status(409).json({ error: err.message });
+  }
+});
+
+app.post("/api/ticker/:symbol/refresh", async (req, res) => {
+  try {
+    res.json(await refreshSingleTicker(req.params.symbol));
+  } catch (err) {
+    console.error(`Refresh failed for ${req.params.symbol}:`, err);
+    res.status(502).json({ error: err.message });
   }
 });
 

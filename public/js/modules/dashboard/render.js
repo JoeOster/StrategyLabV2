@@ -214,7 +214,7 @@ export function renderTickerDetail(d) {
  */
 export function renderSparkline(series, { width = 620, height = 120 } = {}) {
   if (!series || series.length < 2) {
-    return `<p class="panel-hint">Not enough price history stored to chart. Use "Refresh History" on the Watchlist tab.</p>`;
+    return `<p class="panel-hint">Not enough price history stored to chart yet — click "Refresh Data" below to fetch it for this ticker.</p>`;
   }
   const closes = series.map((s) => s.close);
   const min = Math.min(...closes);

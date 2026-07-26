@@ -20,6 +20,7 @@ const state = {
   exchange: "",
   sortKey: "symbol",
   sortDir: "asc",
+  detailSymbol: null,
 };
 
 const els = {};
@@ -42,6 +43,7 @@ export async function initializeDashboardModule() {
   els.detailBody = document.getElementById("ticker-detail-body");
   els.detailCloseBtn = document.getElementById("ticker-detail-close-btn");
   els.researchBtn = document.getElementById("ticker-research-btn");
+  els.tickerRefreshBtn = document.getElementById("ticker-refresh-btn");
 
   els.filter.addEventListener("input", () => {
     state.filter = els.filter.value;
@@ -75,6 +77,7 @@ export async function initializeDashboardModule() {
   els.theadRow.addEventListener("click", handleTableSort);
 
   els.refreshBtn.addEventListener("click", handleRefresh);
+  els.tickerRefreshBtn.addEventListener("click", handleTickerRefresh);
   els.detailCloseBtn.addEventListener("click", () => els.detailDialog.close());
   els.researchBtn.addEventListener("click", () => {
     window.alert(
@@ -167,8 +170,12 @@ function handleTableSort(event) {
 async function handleOpenDetail(event) {
   const target = event.target.closest("[data-symbol]");
   if (!target) return;
-  const symbol = target.dataset.symbol;
+  await openDetailFor(target.dataset.symbol);
+}
 
+async function openDetailFor(symbol) {
+  // Remembered so the dialog's own Refresh button knows what to refresh.
+  state.detailSymbol = symbol;
   els.detailBody.innerHTML = `<p class="panel-hint">Loading ${symbol}…</p>`;
   els.detailDialog.showModal();
   try {
@@ -176,6 +183,30 @@ async function handleOpenDetail(event) {
     els.detailBody.innerHTML = renderTickerDetail(detail);
   } catch (err) {
     els.detailBody.innerHTML = `<p class="status-banner status-error">${err.message}</p>`;
+  }
+}
+
+/**
+ * Refreshes just this ticker (quote + history) without re-polling the whole
+ * portfolio, then redraws the dialog in place.
+ */
+async function handleTickerRefresh() {
+  if (!state.detailSymbol) return;
+  els.tickerRefreshBtn.disabled = true;
+  els.tickerRefreshBtn.textContent = "Refreshing…";
+  try {
+    await api.refreshTicker(state.detailSymbol);
+    await openDetailFor(state.detailSymbol);
+    // Cards behind the dialog now show a stale price, so refresh those too.
+    await reloadDashboardView();
+  } catch (err) {
+    els.detailBody.insertAdjacentHTML(
+      "afterbegin",
+      `<p class="status-banner status-error">${err.message}</p>`,
+    );
+  } finally {
+    els.tickerRefreshBtn.disabled = false;
+    els.tickerRefreshBtn.textContent = "Refresh Data";
   }
 }
 

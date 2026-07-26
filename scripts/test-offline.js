@@ -99,7 +99,10 @@ check("Watched item starts in WATCHING status", item.status === "WATCHING");
 
 console.log("\n2b. Watchlist (named list) checks");
 const defaultList = getOrCreateDefaultWatchlist(holder.id);
-check('Default "General" list was auto-created by addWatchedItem', defaultList.name === "General");
+check(
+  "Default list was auto-created by addWatchedItem",
+  defaultList.name === "Tickers to Watch",
+);
 check("The item above landed in the General list (no list specified)", item.watchlist_id === defaultList.id);
 
 const techList = createWatchlist(holder.id, "Tech");
@@ -494,10 +497,15 @@ check("List is gone after its items were moved", listWatchlists(holder.id).every
 // Reduce to exactly one list before testing the last-list guard -- earlier
 // sections left a "Tech" list on this holder, so without this the delete
 // below is legitimately allowed and the check would be meaningless.
+// listWatchlists now also returns the virtual "Orders" entry, which is not
+// deletable -- skip it here and when counting.
 for (const wl of listWatchlists(holder.id)) {
-  if (wl.id !== listA.id) deleteWatchlistFn(holder.id, wl.id, { deleteItems: true });
+  if (!wl.is_virtual && wl.id !== listA.id) deleteWatchlistFn(holder.id, wl.id, { deleteItems: true });
 }
-check("Exactly one list remains before the guard test", listWatchlists(holder.id).length === 1);
+check(
+  "Exactly one real list remains before the guard test",
+  listWatchlists(holder.id).filter((w) => !w.is_virtual).length === 1,
+);
 
 let lastListBlocked = false;
 try {
@@ -706,6 +714,133 @@ check(
   tx.deleteTransaction(holder.id, lot2.id).deleted === 0,
 );
 
+console.log("\n6g. Transactions: editing keeps lot accounting consistent");
+const editHolder = db
+  .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Editor', 0) RETURNING *")
+  .get();
+
+// Untouched lot: quantity is freely editable.
+const editLot = await tx.recordBuy({
+  holderId: editHolder.id, symbol: "NVDA", transactionDate: "2026-01-05",
+  quantity: 100, price: 10, fees: 0,
+});
+const editedBuy = tx.updateTransaction(editHolder.id, editLot.id, { quantity: 120, price: 11 });
+check("Untouched BUY quantity can be edited", editedBuy.quantity === 120);
+check("Editing a BUY recomputes cost basis", editedBuy.cost_basis === 120 * 11);
+check("Editing an untouched BUY resets quantity_remaining", editedBuy.quantity_remaining === 120);
+
+check(
+  "Type changes are refused",
+  (() => {
+    try {
+      tx.updateTransaction(editHolder.id, editLot.id, { transactionType: "SELL" });
+      return false;
+    } catch {
+      return true;
+    }
+  })(),
+);
+
+// Sell part of it, then the quantity becomes locked.
+await tx.recordSell({
+  holderId: editHolder.id, symbol: "NVDA", transactionDate: "2026-02-01",
+  quantity: 50, price: 20, fees: 0,
+});
+check(
+  "BUY quantity is locked once shares have been sold",
+  (() => {
+    try {
+      tx.updateTransaction(editHolder.id, editLot.id, { quantity: 200 });
+      return false;
+    } catch (err) {
+      return /already been sold/.test(err.message);
+    }
+  })(),
+);
+
+// Correcting the purchase price must fix past sells too, or the books lie.
+const sellRow = tx.listTransactions(editHolder.id, { type: "SELL" })[0];
+const pnlBefore = sellRow.realized_pnl; // 50*20 - 50*11 = 1000 - 550 = 450
+check("Realized P&L before the correction", Math.abs(pnlBefore - 450) < 1e-9);
+
+tx.updateTransaction(editHolder.id, editLot.id, { price: 12 });
+const sellAfter = tx.listTransactions(editHolder.id, { type: "SELL" })[0];
+check(
+  "Correcting a BUY price recomputes linked sells' cost basis",
+  Math.abs(sellAfter.cost_basis - 50 * 12) < 1e-9,
+);
+check(
+  "...so realized P&L updates to match (50*20 - 50*12 = 400)",
+  Math.abs(sellAfter.realized_pnl - 400) < 1e-9,
+);
+
+// Editing a SELL re-allocates against its lot.
+const lotBeforeEdit = db
+  .prepare("SELECT quantity_remaining FROM transactions WHERE id = ?")
+  .get(editLot.id).quantity_remaining;
+check("Lot shows 70 remaining after selling 50 of 120", lotBeforeEdit === 70);
+
+tx.updateTransaction(editHolder.id, sellAfter.id, { quantity: 30 });
+check(
+  "Reducing a SELL returns shares to the lot",
+  db.prepare("SELECT quantity_remaining FROM transactions WHERE id = ?").get(editLot.id)
+    .quantity_remaining === 90,
+);
+
+tx.updateTransaction(editHolder.id, sellAfter.id, { quantity: 100 });
+check(
+  "Increasing a SELL takes more from the lot",
+  db.prepare("SELECT quantity_remaining FROM transactions WHERE id = ?").get(editLot.id)
+    .quantity_remaining === 20,
+);
+
+check(
+  "A SELL can't be increased beyond what the lot holds",
+  (() => {
+    try {
+      tx.updateTransaction(editHolder.id, sellAfter.id, { quantity: 500 });
+      return false;
+    } catch (err) {
+      return /only holds/.test(err.message);
+    }
+  })(),
+);
+check(
+  "A failed edit leaves the lot untouched",
+  db.prepare("SELECT quantity_remaining FROM transactions WHERE id = ?").get(editLot.id)
+    .quantity_remaining === 20,
+);
+
+check(
+  "Cannot edit another holder's transaction",
+  (() => {
+    try {
+      tx.updateTransaction(holder.id, editLot.id, { price: 999 });
+      return false;
+    } catch (err) {
+      return /not found/i.test(err.message);
+    }
+  })(),
+);
+
+// Dividends edit on amount, not quantity/price-per-share.
+const divRow = await tx.recordDividend({
+  holderId: editHolder.id, symbol: "NVDA", transactionDate: "2026-03-01", amount: 10,
+});
+const editedDiv = tx.updateTransaction(editHolder.id, divRow.id, { amount: 25 });
+check("Dividend amount can be edited", editedDiv.price === 25);
+check(
+  "Dividend amount must stay positive",
+  (() => {
+    try {
+      tx.updateTransaction(editHolder.id, divRow.id, { amount: 0 });
+      return false;
+    } catch {
+      return true;
+    }
+  })(),
+);
+
 console.log("\n6e. Orders: form mapping + validation (pure functions)");
 const { orderFormToPayload, validateOrderPayload } = await import(
   "../public/js/modules/orders/handlers.js"
@@ -871,6 +1006,184 @@ check(
   "Dashboard exchange options are deduped and sorted, with an All entry",
   JSON.stringify(exchangeOptions) === JSON.stringify(["", "NASDAQ", "NYSE"]),
 );
+
+console.log("\n8. Virtual \"Orders\" watchlist");
+const wlSvc = await import("../services/watchlistService.js");
+
+// traderHolder holds NVDA (one open lot) from section 6.
+const traderLists = wlSvc.listWatchlists(traderHolder.id);
+const ordersList = traderLists.find((l) => l.id === "orders");
+check("Orders list always appears in listWatchlists", ordersList != null);
+check("Orders list is flagged virtual", ordersList.is_virtual === 1);
+check("Orders list counts held tickers", ordersList.item_count === 1);
+
+const ordersItems = wlSvc.listWatchedItems(traderHolder.id, { watchlistId: "orders" });
+check("Orders list returns the held ticker", ordersItems.length === 1 && ordersItems[0].symbol === "NVDA");
+check("Orders rows are marked virtual", ordersItems[0].is_virtual === 1);
+check("Orders rows use the HELD pseudo-type", ordersItems[0].order_type === "HELD");
+check("Orders rows carry the share count", ordersItems[0].quantity > 0);
+check(
+  "Orders row ids are non-numeric so they can't be mistaken for real items",
+  Number.isNaN(Number(ordersItems[0].id)),
+);
+
+// A holder with no positions should still see the list, just empty.
+const emptyOrders = wlSvc.listWatchedItems(holder.id, { watchlistId: "orders" });
+check("Holder with no positions sees an empty Orders list", emptyOrders.length === 0);
+
+// The list must be immutable.
+let renameBlocked = false;
+try {
+  wlSvc.renameWatchlist(traderHolder.id, "orders", "Nope");
+} catch {
+  renameBlocked = true;
+}
+check("Orders list cannot be renamed", renameBlocked);
+
+let deleteBlocked = false;
+try {
+  wlSvc.deleteWatchlist(traderHolder.id, "orders");
+} catch {
+  deleteBlocked = true;
+}
+check("Orders list cannot be deleted", deleteBlocked);
+
+// Reorder should skip it silently rather than blowing up the whole call.
+const realListId = traderLists.find((l) => !l.is_virtual)?.id;
+if (realListId) {
+  const reorderResult = wlSvc.reorderWatchlists(traderHolder.id, ["orders", realListId]);
+  check("Reorder ignores the virtual list instead of failing", reorderResult.updated >= 0);
+}
+
+// Adding with watchlistId='orders' must fall back to a real list.
+const fallbackItem = await addWatchedItem({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  orderType: "WATCH",
+  watchlistId: "orders",
+  skipBackfill: true,
+});
+check(
+  "Adding to the Orders list falls back to a real list",
+  fallbackItem.watchlist_id !== "orders" && Number.isFinite(fallbackItem.watchlist_id),
+);
+
+console.log("\n8d. Watchlist filtering fails closed, not open");
+// Regression test for a real bug: the Orders tab sent watchlistId="orders",
+// the server coerced it with Number() -> NaN, SQLite bound NaN as NULL, and
+// `@watchlistId IS NULL` matched EVERY row -- so every tab showed every item.
+const filterHolder = db
+  .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Filter Test', 0) RETURNING *")
+  .get();
+// Uses a dedicated ticker rather than AAPL so this test doesn't disturb the
+// held-but-unwatched state that section 8b asserts on.
+db.prepare(
+  "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('MSFT', ?, 'Microsoft Corp', 'manual')",
+).run(exchangeId);
+
+const fListA = createWatchlist(filterHolder.id, "List A");
+const fListB = createWatchlist(filterHolder.id, "List B");
+await addWatchedItem({
+  holderId: filterHolder.id, symbol: "NVDA", orderType: "WATCH",
+  watchlistId: fListA.id, skipBackfill: true,
+});
+await addWatchedItem({
+  holderId: filterHolder.id, symbol: "MSFT", orderType: "WATCH",
+  watchlistId: fListB.id, skipBackfill: true,
+});
+
+check("No filter returns every item", wlSvc.listWatchedItems(filterHolder.id, {}).length === 2);
+check(
+  "Filtering by list A returns only its item",
+  (() => {
+    const rows = wlSvc.listWatchedItems(filterHolder.id, { watchlistId: fListA.id });
+    return rows.length === 1 && rows[0].symbol === "NVDA";
+  })(),
+);
+check(
+  "Filtering by list B returns only its item",
+  (() => {
+    const rows = wlSvc.listWatchedItems(filterHolder.id, { watchlistId: fListB.id });
+    return rows.length === 1 && rows[0].symbol === "MSFT";
+  })(),
+);
+check(
+  "A NaN watchlistId returns nothing, NOT everything",
+  wlSvc.listWatchedItems(filterHolder.id, { watchlistId: NaN }).length === 0,
+);
+check(
+  "A garbage watchlistId returns nothing, NOT everything",
+  wlSvc.listWatchedItems(filterHolder.id, { watchlistId: "not-a-list" }).length === 0,
+);
+check(
+  "A non-existent numeric watchlistId returns nothing",
+  wlSvc.listWatchedItems(filterHolder.id, { watchlistId: 999999 }).length === 0,
+);
+
+console.log("\n8c. Default watchlist seeding");
+const { DEFAULT_WATCHLIST_NAME } = wlSvc;
+check("Default list name is exported as a constant", DEFAULT_WATCHLIST_NAME === "Tickers to Watch");
+// A brand-new holder should get the default list on first use, so nothing
+// has to be created manually before adding a ticker.
+const freshHolder = db
+  .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Fresh', 0) RETURNING *")
+  .get();
+check(
+  "New holder starts with no real lists",
+  wlSvc.listWatchlists(freshHolder.id).filter((l) => !l.is_virtual).length === 0,
+);
+const autoList = wlSvc.getOrCreateDefaultWatchlist(freshHolder.id);
+check("getOrCreateDefaultWatchlist creates the default list", autoList.name === DEFAULT_WATCHLIST_NAME);
+check(
+  "Calling it again returns the same list rather than duplicating",
+  wlSvc.getOrCreateDefaultWatchlist(freshHolder.id).id === autoList.id,
+);
+
+console.log("\n8b. Quote refresh covers held positions, not just watched ones");
+// A held-but-never-watchlisted ticker is the case that was broken: it never
+// got a quote, so its Dashboard card showed no price.
+const heldOnly = db
+  .prepare("SELECT COUNT(*) AS n FROM securities WHERE symbol = 'AAPL'")
+  .get().n;
+check("AAPL exists as a security", heldOnly === 1);
+const aaplId = db.prepare("SELECT id FROM securities WHERE symbol='AAPL'").get().id;
+const aaplWatched = db
+  .prepare("SELECT COUNT(*) AS n FROM watched_items WHERE security_id = ?")
+  .get(aaplId).n;
+check("AAPL is not on any watchlist (the previously-broken case)", aaplWatched === 0);
+
+console.log("\n9. Frontend wiring: every getElementById target exists in index.html");
+// This suite can't click buttons, but it CAN catch the most common way the UI
+// silently breaks: JS reaching for an element id that the HTML doesn't have
+// (a rename on one side only). Cheap, and covers a real blind spot.
+const indexHtml = fs.readFileSync(path.join(process.cwd(), "public", "index.html"), "utf8");
+const uiModules = [
+  "public/js/main.js",
+  "public/js/modules/orders/index.js",
+  "public/js/modules/dashboard/index.js",
+  "public/js/modules/watchlist/index.js",
+  "public/js/modules/settings/index.js",
+];
+let idsChecked = 0;
+const missingIds = [];
+for (const relPath of uiModules) {
+  const source = fs.readFileSync(path.join(process.cwd(), relPath), "utf8");
+  for (const match of source.matchAll(/getElementById\("([^"]+)"\)/g)) {
+    idsChecked++;
+    if (!indexHtml.includes(`id="${match[1]}"`)) {
+      missingIds.push(`${relPath} -> #${match[1]}`);
+    }
+  }
+}
+check(
+  `All ${idsChecked} element ids referenced by JS exist in index.html`,
+  missingIds.length === 0,
+);
+if (missingIds.length > 0) console.log("      missing:", missingIds.join(", "));
+
+for (const selector of [".settings-panel", ".orders-panel", ".source-panel", ".view-btn"]) {
+  check(`index.html contains elements matching ${selector}`, indexHtml.includes(selector.slice(1)));
+}
 
 console.log("\n4. Sanity: schema constraints still enforced through the app layer");
 try {
