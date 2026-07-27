@@ -2,9 +2,10 @@
 
 Last updated: 2026-07-27 (scheduled alerts bell clicked through live; added
 graceful server shutdown + npm run stop/restart; added webhook auth-header
-support for Home Assistant; project shelved for a few days after this). Read
-this first in any new session before touching code — it's the "external
-brain" for where this project is and why.
+support for Home Assistant; committed and pushed all of the above; decided to
+migrate to the Orchestrator NUC, not yet executed; project shelved for a few
+days after this). Read this first in any new session before touching code —
+it's the "external brain" for where this project is and why.
 
 ## Picking this back up after a break
 
@@ -368,6 +369,34 @@ StrategyLabV2/
 ## Deployment target: Synology NAS, or (better) the Orchestrator NUC
 
 Two candidate hosts. **The NUC is the stronger option** — see below.
+
+### Next step (as of 2026-07-27)
+
+Discussed migrating with Joe. **Decision: yes, migrate to the NUC** — he'll
+continue development there via VS Code + the Claude Code extension (SSH into
+`orchestrator`) rather than this Cowork session, which only has file access
+to Joe's PC. Confirmed prerequisites:
+
+- **The Node-version risk below is resolved, not just assumed.**
+  `ai_orchestrator/scripts/docs-maintenance.sh` pins
+  `$HOME/.nvm/versions/node/v24.18.0/bin/claude` — that's proof the NUC
+  actually has Node v24.18.0 installed via nvm, comfortably clearing the
+  `>=22.5.0` floor `node:sqlite` needs. Not an inference from that project's
+  docs anymore, a fact read directly from a script that runs there today.
+- **Git is clean and pushed** (2026-07-27) — `origin/main` on GitHub
+  (`JoeOster/StrategyLabV2`) now has everything through the HA
+  auth-header work, so a `git clone` on the NUC won't be missing anything.
+
+**Not done yet, deliberately held off**: the actual systemd unit file and a
+step-by-step migration checklist (env setup, `git clone`, `npm install`,
+`DB_PATH`/`.env`, port/firewall, verifying Yahoo/Finnhub egress from that
+network, deciding whether to bring the existing dev DB over or start fresh).
+Joe wanted to hold off on drafting those specifically until he's ready to
+actually do the move — ask him rather than assuming it's time. When he is,
+build from the "Option A: the Ubuntu NUC" section directly below, which
+already has the concrete gotchas (user-level systemd units, no passwordless
+sudo, disk space history, timezone, the `/api/summary` consumption pattern
+for `Prime_Dashboard`) worked out.
 
 ### Option A: the Ubuntu NUC (recommended)
 
