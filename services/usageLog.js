@@ -14,12 +14,24 @@ const countRecentCalls = db.prepare(
    WHERE provider = ? AND called_at >= datetime('now', ?)`,
 );
 
-// Soft per-minute budgets, kept comfortably under each provider's real
-// limit. Finnhub free tier is 60/min; Yahoo is unofficial and has no
-// published limit, but it's still someone else's server, so we self-limit.
+// Soft per-minute budgets. These are deliberately DIFFERENT per provider --
+// an earlier version gave Yahoo the same cap as Finnhub, which meant a
+// nightly history refresh of more than ~30 tickers would trip a limit that
+// only ever applied to Finnhub.
+//
+//   finnhub - a real, enforced quota on the free tier (60/min). Kept at 50
+//             to leave headroom for bursts from the UI while a job runs.
+//   yahoo   - unofficial, no published limit. Still self-limited out of
+//             courtesy (it's someone else's server), but generously: this is
+//             a politeness ceiling, not a quota we're rationing.
+//   openlibrary - free, no key, no documented hard limit -- but these calls
+//                 are user-triggered one at a time (typing an ISBN), never
+//                 batched, so a low budget is plenty and keeps the same
+//                 self-throttling habit even for an API with no stated cap.
 const PROVIDER_BUDGETS = {
   finnhub: { windowSql: "-60 seconds", max: 50 },
-  yahoo: { windowSql: "-60 seconds", max: 60 },
+  yahoo: { windowSql: "-60 seconds", max: 300 },
+  openlibrary: { windowSql: "-60 seconds", max: 20 },
 };
 
 export function assertBudget(provider) {

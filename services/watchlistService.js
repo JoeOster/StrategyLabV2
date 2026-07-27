@@ -17,7 +17,9 @@ import {
   refreshQuote,
   backfillHistorical,
   backfillDividendsSplits,
+  getHistoryCoverage,
 } from "./priceService.js";
+import { deliverAlertWebhook } from "./notifyService.js";
 
 // --- Watchlists (named lists: "Tech", "Dip Buys", etc.) ---------------------
 // One list per item, not tags. Every holder gets a default list so nothing
@@ -291,19 +293,51 @@ export async function addWatchedItem(input) {
   return { ...row, symbol: security.symbol };
 }
 
+// Re-fetch a few days either side of the last stored bar rather than starting
+// exactly at it: providers occasionally restate a recent close, and the
+// insert is idempotent so overlapping costs nothing.
+const INCREMENTAL_OVERLAP_DAYS = 5;
+
 /**
  * Pulls daily OHLCV history (plus dividends/splits) for one security.
  * Idempotent -- safe to re-run; existing rows are ignored, gaps get filled.
+ *
+ * **Incremental by default.** If history is already stored, this fetches only
+ * from a few days before the newest bar. A nightly job re-downloading two
+ * years of bars to gain one new row is ~99% waste, and hammering an
+ * unofficial endpoint that way is how it stops being available.
+ *
  * @param {number} securityId
  * @param {string} symbol
- * @param {{years?: number}} opts how far back to pull. Default 2 years.
+ * @param {object} opts
+ * @param {number} [opts.years=2] how far back on a FIRST fetch (no stored history)
+ * @param {boolean} [opts.full=false] force a complete re-fetch, ignoring what's stored
+ * @param {boolean} [opts.withEvents] fetch dividends/splits too. Defaults to
+ *   true on a full/first fetch, false on an incremental top-up (they change
+ *   rarely, so the nightly job checks them weekly instead).
  */
 export async function backfillSecurityHistory(securityId, symbol, opts = {}) {
-  const years = opts.years ?? 2;
-  const period1 = new Date(Date.now() - years * 365 * 24 * 60 * 60 * 1000);
+  const { lastDate, barCount: storedBars } = getHistoryCoverage(securityId);
+  const isFirstFetch = opts.full || !lastDate || storedBars === 0;
+
+  let period1;
+  if (isFirstFetch) {
+    const years = opts.years ?? 2;
+    period1 = new Date(Date.now() - years * 365 * 24 * 60 * 60 * 1000);
+  } else {
+    period1 = new Date(`${lastDate}T00:00:00Z`);
+    period1.setUTCDate(period1.getUTCDate() - INCREMENTAL_OVERLAP_DAYS);
+  }
+
   const barCount = await backfillHistorical(securityId, symbol, { period1 });
-  const events = await backfillDividendsSplits(securityId, symbol, { period1 });
-  return { symbol, barCount, ...events };
+
+  const withEvents = opts.withEvents ?? isFirstFetch;
+  let events = { dividendCount: 0, splitCount: 0 };
+  if (withEvents) {
+    events = await backfillDividendsSplits(securityId, symbol, { period1 });
+  }
+
+  return { symbol, barCount, incremental: !isFirstFetch, ...events };
 }
 
 const getWatchedSecurities = db.prepare(`
@@ -314,14 +348,18 @@ const getWatchedSecurities = db.prepare(`
 `);
 
 /**
- * Refreshes daily history for every security currently on a watchlist. This
- * is the function a nightly cron job would call. Sequential on purpose --
- * hammering Yahoo in parallel is how you get rate-limited off an unofficial
- * API.
+ * Refreshes daily history for every security currently watched or held.
+ * This is what the nightly job calls. Sequential on purpose -- firing these
+ * in parallel at an unofficial API is how you get blocked.
+ *
+ * @param {object} opts
+ * @param {boolean} [opts.withEvents] force dividends/splits on or off. The
+ *   nightly job passes true once a week and false otherwise.
  */
 export async function refreshAllHistory(opts = {}) {
   const results = [];
-  for (const { security_id, symbol } of getWatchedSecurities.all()) {
+  // Held-but-unwatched tickers need history too -- the Dashboard charts them.
+  for (const { security_id, symbol } of getSecuritiesNeedingQuotes.all()) {
     try {
       results.push(await backfillSecurityHistory(security_id, symbol, opts));
     } catch (err) {
@@ -391,11 +429,37 @@ const listQuery = db.prepare(`
  * @param {number} holderId
  * @param {{watchlistId?: number, isPaperTrade?: boolean, status?: string}} filters
  */
+const recentBarsQuery = db.prepare(`
+  SELECT date, close FROM historical_prices
+  WHERE security_id = ? ORDER BY date DESC LIMIT ?
+`);
+
+/**
+ * Attaches the last N daily closes to each row, oldest-first, for the
+ * watchlist's inline sparkline.
+ *
+ * Done as one small query per distinct security rather than a window
+ * function over the whole table: a personal watchlist is dozens of rows at
+ * most, and this keeps the SQL obvious. Revisit if it ever gets large.
+ */
+function attachRecentSeries(rows, barCount = 10) {
+  const cache = new Map();
+  for (const row of rows) {
+    if (!cache.has(row.security_id)) {
+      // Query returns newest-first (so LIMIT takes the most recent); reverse
+      // for chronological plotting.
+      cache.set(row.security_id, recentBarsQuery.all(row.security_id, barCount).reverse());
+    }
+    row.recent_series = cache.get(row.security_id);
+  }
+  return rows;
+}
+
 export function listWatchedItems(holderId, filters = {}) {
   // The Orders list isn't backed by watched_items at all -- it's derived
   // from open positions.
   if (String(filters.watchlistId) === ORDERS_LIST_ID) {
-    return listOrdersVirtualItems(holderId);
+    return attachRecentSeries(listOrdersVirtualItems(holderId));
   }
 
   // Guard against a filter that was meant to narrow but can't be understood.
@@ -411,12 +475,14 @@ export function listWatchedItems(holderId, filters = {}) {
     return [];
   }
 
-  return listQuery.all({
-    holderId,
-    watchlistId: requestedId ?? null,
-    isPaperTrade: filters.isPaperTrade == null ? null : filters.isPaperTrade ? 1 : 0,
-    status: filters.status ?? null,
-  });
+  return attachRecentSeries(
+    listQuery.all({
+      holderId,
+      watchlistId: requestedId ?? null,
+      isPaperTrade: filters.isPaperTrade == null ? null : filters.isPaperTrade ? 1 : 0,
+      status: filters.status ?? null,
+    }),
+  );
 }
 
 const getItemsForDeletion = db.prepare(`
@@ -536,6 +602,46 @@ export function applyAlertIfTriggered(item, price) {
   return { watchedItemId: item.id, symbol: item.symbol, price };
 }
 
+const listUnacknowledgedAlertsQuery = db.prepare(`
+  SELECT a.id, a.watched_item_id, a.triggered_at, a.trigger_price, a.message, s.symbol
+  FROM alerts a
+  JOIN watched_items w ON w.id = a.watched_item_id
+  JOIN securities s ON s.id = w.security_id
+  WHERE w.holder_id = ? AND a.acknowledged_at IS NULL
+  ORDER BY a.triggered_at DESC
+`);
+
+/** Powers the header bell -- every alert this holder hasn't dismissed yet, newest first. */
+export function listUnacknowledgedAlerts(holderId) {
+  return listUnacknowledgedAlertsQuery.all(holderId);
+}
+
+const acknowledgeAlertStmt = db.prepare(`
+  UPDATE alerts SET acknowledged_at = datetime('now')
+  WHERE id = ? AND acknowledged_at IS NULL
+    AND watched_item_id IN (SELECT id FROM watched_items WHERE holder_id = ?)
+`);
+
+/**
+ * Clearing the bell doesn't touch the watched_item's own `status` -- that
+ * stays 'ALERT' (see markAlerted above) so the item's history is honest
+ * about "this target fired." Acknowledging only silences the notification,
+ * it isn't the same action as re-arming the watch.
+ */
+export function acknowledgeAlert(holderId, alertId) {
+  return { acknowledged: acknowledgeAlertStmt.run(alertId, holderId).changes };
+}
+
+const acknowledgeAllAlertsStmt = db.prepare(`
+  UPDATE alerts SET acknowledged_at = datetime('now')
+  WHERE acknowledged_at IS NULL
+    AND watched_item_id IN (SELECT id FROM watched_items WHERE holder_id = ?)
+`);
+
+export function acknowledgeAllAlerts(holderId) {
+  return { acknowledged: acknowledgeAllAlertsStmt.run(holderId).changes };
+}
+
 /**
  * Refreshes quotes for everything watched OR held, then evaluates each
  * actively-watched item against its target. Returns newly-fired alerts. This
@@ -573,6 +679,11 @@ export async function checkAlerts(opts = {}) {
   // that do `fired.length`; extra detail hangs off named properties.
   firedAlerts.refreshedCount = latestPrices.size;
   firedAlerts.failures = failures;
+
+  // Best-effort, never throws -- see notifyService.js's own comment for why
+  // a webhook failure shouldn't fail this call.
+  await deliverAlertWebhook(firedAlerts);
+
   return firedAlerts;
 }
 
@@ -604,6 +715,8 @@ export async function refreshSingleTicker(symbol, { withHistory = true } = {}) {
     const result = applyAlertIfTriggered(item, quote.price);
     if (result) fired.push(result);
   }
+
+  await deliverAlertWebhook(fired);
 
   return { symbol: security.symbol, price: quote.price, historyBars, firedAlerts: fired };
 }

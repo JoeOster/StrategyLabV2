@@ -58,22 +58,67 @@ STATUS.md).
 
 ---
 
+## Wire the alert webhook up for real (HA + Becca)
+
+The webhook mechanism and its optional auth header are both built (see
+STATUS.md's "Scheduled alerts + webhook delivery" section, "Where this
+webhook is actually headed"). What's left is entirely configuration + a
+separate project, not StrategyLabV2 code:
+
+- **Home Assistant**: Joe needs to type his real HA target
+  (`/api/services/notify/<target>`) and long-lived access token into
+  `Settings > General`'s `Alert webhook URL` / `Alert webhook auth header`
+  fields himself. Nothing to build.
+- **Becca (voice assistant, in `ai_orchestrator`)**: reads alert data for a
+  daily brief and dismisses the bell by voice. The StrategyLabV2 API side is
+  already complete for this (`GET /api/alerts`, `GET /api/summary`,
+  `POST /api/alerts/:id/acknowledge`, `POST /api/alerts/acknowledge-all`) —
+  nothing to build here. What's missing is a persistent NUC-side service in
+  `ai_orchestrator` that Becca's trigger phrases hand off to, which doesn't
+  exist yet per that project's own docs (`projects/becca-orchestrator-voice-
+  delegation.md`). That's a future session in that other project, not this
+  one.
+
+---
+
 ## Other deferred items
 
 - **CSV import** (`import_batches` → `import_raw_rows` → reconciled
   `transactions`). Schema exists and is idempotent-by-construction; no
   parsing code written. Broker formats to support: Fidelity, E-Trade,
   Robinhood.
-- **Journal / Strategy Lab module.** Schema supports it today
-  (`advice_sources`, `strategies`, and `is_paper_trade=1` on both
-  `watched_items` and `transactions`); no service or UI yet. The
-  "execute a paper idea into a real trade" flow is the interesting part.
-- **Scheduled price/alert checks.** `checkAlerts()` and `refreshAllHistory()`
-  exist but only run on a button press. A cron-style timer would make the
-  watchlist actually passive.
-- **Alert delivery.** The `alerts` table records triggers, but nothing sends
-  email/push. Old app had a `notification_cooldown_minutes` setting — that
-  key already exists in General settings, unused.
+- ~~**Journal / Strategy Lab module.**~~ Built -- see `STATUS.md`'s "Journal
+  / Strategy Lab" section for the design and the judgment calls made. Left
+  deliberately narrow for v1, worth revisiting: **executing a paper idea only
+  supports turning it into a BUY** (a paper `SELL_LIMIT` idea just keeps
+  alerting normally; there's no "execute into a real SELL" flow yet, since
+  that would need to target a specific existing real lot rather than open a
+  new one). Also not built: journal-entry column customization (it renders as
+  a plain list, not hooked into the `tableRegistry`/Columns system).
+- ~~**Strategies locked to one source.**~~ Redesigned as many-to-many (schema
+  v5) -- see `STATUS.md`'s "Strategies redesign" section. A strategy can now
+  be tagged with multiple sources (book, person, podcast, ...), each with its
+  own chapter/page/notes, and a Journal idea's displayed chapter/page
+  resolves from the specific source it actually used.
+- ~~**Paper Trade tab.**~~ Built as a full paper-trading simulator (schema
+  v6) -- see `STATUS.md`'s "Paper Trade tab" section. Log paper BUY/SELL/
+  DIVIDEND transactions tagged with a strategy, "Promote" a paper BUY into a
+  real Orders position in place (source/strategy links carry over). v1 is
+  unconstrained (no virtual cash balance) per Joe's choice. **Left
+  deliberately narrow, worth revisiting**: promoting only works on an
+  untouched lot -- a paper position that's already been partly sold (on
+  paper) can't be promoted yet, since that raises a real design question
+  (what happens to the paper SELL rows against it?) that wasn't worth
+  guessing at for v1.
+- ~~**Scheduled price/alert checks.**~~ Built: a market-hours-aware 15-min
+  scheduler (`services/alertScheduler.js`) now calls `checkAlerts()`
+  automatically, no button press needed -- see `STATUS.md`'s "Scheduled
+  alerts + webhook delivery" section.
+- ~~**Alert delivery.**~~ Built: fired alerts now surface in-app via a header
+  bell (badge count, acknowledge/dismiss-all) and fire a generic outbound
+  webhook (`services/notifyService.js`, configurable `alert_webhook_url`
+  setting) so `ai_orchestrator` or anything else can hook in later -- see
+  `STATUS.md`'s "Scheduled alerts + webhook delivery" section.
 - **Real authentication.** Everything currently acts as the one default
   account holder. Settings can create multiple holders but there's no
   per-request holder switching, and no login at all. Required before this

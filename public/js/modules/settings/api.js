@@ -45,3 +45,13 @@ export const fetchSource = (id) => fetch(`/api/sources/${id}`).then(handleRespon
 export const createSource = (payload) => send("/api/sources", "POST", payload);
 export const updateSource = (id, payload) => send(`/api/sources/${id}`, "PUT", payload);
 export const deleteSource = (id) => send(`/api/sources/${id}/delete`, "POST", {});
+
+// --- Book ISBN lookup ---
+// A 404 (no match) is expected, routine behavior here, not an error -- the
+// caller decides how to present that, so this doesn't go through
+// handleResponse's generic throw-on-!ok.
+export async function fetchBookByIsbn(isbn) {
+  const res = await fetch(`/api/book-lookup?isbn=${encodeURIComponent(isbn)}`);
+  if (res.status === 404) return null;
+  return handleResponse(res);
+}

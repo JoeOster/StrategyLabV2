@@ -14,13 +14,20 @@
         <button type="button" class="view-btn active" data-view="dashboard">Dashboard</button>
         <button type="button" class="view-btn" data-view="watchlist">Watchlist</button>
         <button type="button" class="view-btn" data-view="orders">Orders</button>
+        <button type="button" class="view-btn" data-view="journal">Journal</button>
+        <button type="button" class="view-btn" data-view="papertrade">Paper Trade</button>
         <button type="button" class="view-btn" data-view="settings">Settings</button>
       </nav>
     </div>
-    <div class="header-actions" id="watchlist-actions">
-      <button id="refresh-history-btn" type="button">Refresh History</button>
-      <button id="refresh-btn" type="button">Refresh Prices</button>
-      <button id="add-ticker-btn" type="button" class="primary">+ Add Ticker</button>
+    <div class="header-right">
+      <button type="button" id="alerts-bell-btn" class="alerts-bell" title="Alerts">
+        🔔<span id="alerts-bell-count" class="alerts-bell-badge" hidden>0</span>
+      </button>
+      <div class="header-actions" id="watchlist-actions">
+        <button id="refresh-history-btn" type="button">Refresh History</button>
+        <button id="refresh-btn" type="button">Refresh Prices</button>
+        <button id="add-ticker-btn" type="button" class="primary">+ Add Ticker</button>
+      </div>
     </div>
   </header>
 
@@ -83,6 +90,7 @@
           <option value="BUY_LIMIT">Buy Limit</option>
           <option value="SELL_LIMIT">Sell Limit</option>
         </select>
+        <button type="button" id="watchlist-columns-btn" title="Show, hide, or reorder columns">⚙ Columns</button>
         <span id="row-count" class="row-count"></span>
       </div>
       <table class="items-table">
@@ -115,6 +123,7 @@
         </div>
         <div class="table-toolbar">
           <input id="positions-filter" type="search" placeholder="Filter by ticker or name…" autocomplete="off" />
+          <button type="button" id="positions-columns-btn" title="Show, hide, or reorder columns">⚙ Columns</button>
           <span id="positions-count" class="row-count"></span>
         </div>
         <table class="items-table">
@@ -139,12 +148,110 @@
           <input id="history-start" type="date" title="From date" />
           <input id="history-end" type="date" title="To date" />
           <button type="button" id="history-clear-btn">Clear</button>
+          <button type="button" id="history-columns-btn" title="Show, hide, or reorder columns">⚙ Columns</button>
           <span id="history-count" class="row-count"></span>
         </div>
         <table class="items-table">
           <thead><tr id="history-thead-row"></tr></thead>
           <tbody id="history-tbody"></tbody>
         </table>
+      </div>
+    </main>
+  </section>
+
+  <section id="view-papertrade" hidden>
+    <nav id="papertrade-tabs" class="watchlist-tabs">
+      <button type="button" class="tab active" data-panel="positions">Open Positions</button>
+      <button type="button" class="tab" data-panel="history">History</button>
+    </nav>
+
+    <main>
+      <div id="papertrade-banner" class="status-banner" hidden></div>
+
+      <div class="summary-strip" id="paper-portfolio-summary"></div>
+
+      <div class="papertrade-panel" data-panel="positions">
+        <div class="panel-head">
+          <h2>Open Paper Positions</h2>
+          <div>
+            <button type="button" id="paper-refresh-prices-btn">Refresh Prices</button>
+            <button type="button" id="log-paper-trade-btn" class="primary">+ Log Paper Trade</button>
+          </div>
+        </div>
+        <div class="table-toolbar">
+          <input id="paper-positions-filter" type="search" placeholder="Filter by ticker or name…" autocomplete="off" />
+          <button type="button" id="paper-positions-columns-btn" title="Show, hide, or reorder columns">⚙ Columns</button>
+          <span id="paper-positions-count" class="row-count"></span>
+        </div>
+        <table class="items-table">
+          <thead><tr id="paper-positions-thead-row"></tr></thead>
+          <tbody id="paper-positions-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="papertrade-panel" data-panel="history" hidden>
+        <div class="panel-head">
+          <h2>Paper Transaction History</h2>
+          <button type="button" id="log-paper-trade-btn-2" class="primary">+ Log Paper Trade</button>
+        </div>
+        <div class="table-toolbar">
+          <input id="paper-history-symbol" type="search" placeholder="Ticker…" autocomplete="off" />
+          <select id="paper-history-type">
+            <option value="">All types</option>
+            <option value="BUY">Buys</option>
+            <option value="SELL">Sells</option>
+            <option value="DIVIDEND">Dividends</option>
+          </select>
+          <input id="paper-history-start" type="date" title="From date" />
+          <input id="paper-history-end" type="date" title="To date" />
+          <button type="button" id="paper-history-clear-btn">Clear</button>
+          <button type="button" id="paper-history-columns-btn" title="Show, hide, or reorder columns">⚙ Columns</button>
+          <span id="paper-history-count" class="row-count"></span>
+        </div>
+        <table class="items-table">
+          <thead><tr id="paper-history-thead-row"></tr></thead>
+          <tbody id="paper-history-tbody"></tbody>
+        </table>
+      </div>
+    </main>
+  </section>
+
+  <section id="view-journal" hidden>
+    <nav id="journal-tabs" class="watchlist-tabs">
+      <button type="button" class="tab active" data-panel="ideas">Ideas</button>
+      <button type="button" class="tab" data-panel="strategies">Strategies</button>
+    </nav>
+
+    <main>
+      <div id="journal-banner" class="status-banner" hidden></div>
+
+      <div class="journal-panel" data-panel="ideas">
+        <div class="panel-head">
+          <h2>Journal Ideas</h2>
+          <button type="button" id="journal-add-idea-btn" class="primary">+ New Idea</button>
+        </div>
+        <p class="panel-hint">Paper trade ideas linked to a source or strategy. "Execute" turns one into a real trade under Orders once you actually act on it.</p>
+        <div class="table-toolbar">
+          <select id="journal-ideas-source-filter"></select>
+          <select id="journal-ideas-status-filter">
+            <option value="">All statuses</option>
+            <option value="WATCHING">Watching</option>
+            <option value="ALERT">Alert</option>
+            <option value="EXECUTED">Executed</option>
+            <option value="CANCELLED">Cancelled</option>
+            <option value="EXPIRED">Expired</option>
+          </select>
+        </div>
+        <ul id="journal-ideas-list" class="settings-list"></ul>
+      </div>
+
+      <div class="journal-panel" data-panel="strategies" hidden>
+        <div class="panel-head">
+          <h2>Strategies</h2>
+          <button type="button" id="journal-add-strategy-btn" class="primary">+ New Strategy</button>
+        </div>
+        <p class="panel-hint">A strategy is a specific idea from a source -- a chapter, a rule, a specific call -- that ideas can be tagged with.</p>
+        <ul id="journal-strategies-list" class="settings-list"></ul>
       </div>
     </main>
   </section>
@@ -156,6 +263,7 @@
       <button type="button" class="tab" data-panel="holders">Account Holders</button>
       <button type="button" class="tab" data-panel="exchanges">Exchanges</button>
       <button type="button" class="tab" data-panel="general">General</button>
+      <button type="button" class="tab" data-panel="columns">Table Columns</button>
     </nav>
 
     <main>
@@ -212,10 +320,38 @@
           <label>Notification cooldown (minutes)
             <input name="notification_cooldown_minutes" type="number" step="1" />
           </label>
+          <label>Nightly refresh
+            <select name="nightly_refresh_enabled">
+              <option value="1">Enabled</option>
+              <option value="0">Disabled</option>
+            </select>
+          </label>
+          <label>Nightly refresh hour (0–23, local)
+            <input name="nightly_refresh_hour" type="number" min="0" max="23" step="1" />
+          </label>
+          <label>Alert checks (every 15 min, market hours only)
+            <select name="alert_check_enabled">
+              <option value="1">Enabled</option>
+              <option value="0">Disabled</option>
+            </select>
+          </label>
+          <label>Alert webhook URL (optional)
+            <input name="alert_webhook_url" type="url" autocomplete="off" placeholder="https://…" />
+          </label>
+          <label>Alert webhook auth header (optional)
+            <input name="alert_webhook_auth_header" type="password" autocomplete="off" placeholder="Bearer …" />
+          </label>
+          <p class="panel-hint">When the URL is set, a JSON payload is POSTed here every time a price alert fires -- a hook point for external automations (e.g. Home Assistant). If the target needs authentication (e.g. HA's long-lived access token), paste the full header value above, including the scheme -- it's sent as-is in the request's Authorization header. Leave blank if the endpoint doesn't need one.</p>
           <div class="form-actions">
             <button type="submit" class="primary">Save</button>
           </div>
         </form>
+      </div>
+
+      <div class="settings-panel" data-panel="columns" hidden>
+        <div class="panel-head"><h2>Table Columns</h2></div>
+        <p class="panel-hint">Which columns each table shows, and in what order. Any table in the app with a "⚙ Columns" button is listed here too -- this is just a central place to find them, including ones added in future updates.</p>
+        <ul id="settings-columns" class="settings-list"></ul>
       </div>
     </main>
   </section>
@@ -322,6 +458,11 @@
           </select>
         </label>
       </div>
+      <label>Strategy
+        <select name="strategyId" id="order-strategy-select">
+          <option value="">— none —</option>
+        </select>
+      </label>
       <label id="order-lot-label" hidden>Sell from lot
         <select name="lotId" id="order-lot-select">
           <option value="">Oldest first (FIFO)</option>
@@ -332,8 +473,187 @@
       </label>
       <p id="order-hint" class="panel-hint"></p>
       <div class="form-actions">
+        <button type="button" id="order-delete-btn" class="danger" hidden>Delete</button>
+        <span class="form-actions-spacer"></span>
         <button type="button" id="order-cancel-btn">Cancel</button>
         <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="alerts-dialog">
+    <h2>Alerts</h2>
+    <p class="panel-hint">Price targets that have fired. Dismissing one just clears it from this list -- the underlying watchlist item stays marked ALERT.</p>
+    <ul id="alerts-list" class="settings-list"></ul>
+    <div class="form-actions">
+      <button type="button" id="alerts-ack-all-btn">Dismiss All</button>
+      <span class="form-actions-spacer"></span>
+      <button type="button" id="alerts-close-btn" class="primary">Close</button>
+    </div>
+  </dialog>
+
+  <dialog id="paper-order-dialog">
+    <form id="paper-order-form">
+      <h2 id="paper-order-dialog-title">Log Paper Trade</h2>
+      <label>Type
+        <select name="transactionType" id="paper-order-type-select">
+          <option value="BUY">Buy (paper)</option>
+          <option value="SELL">Sell (paper)</option>
+          <option value="DIVIDEND">Dividend received</option>
+        </select>
+      </label>
+      <div class="field-row">
+        <label>Ticker
+          <input name="symbol" required autocomplete="off" placeholder="NVDA" />
+        </label>
+        <label>Date
+          <input name="transactionDate" type="date" required />
+        </label>
+      </div>
+      <div class="field-row" id="paper-order-qty-price-row">
+        <label id="paper-order-qty-label">Quantity
+          <input name="quantity" type="number" step="any" min="0" />
+        </label>
+        <label><span id="paper-order-price-text">Price per share</span>
+          <input name="price" type="number" step="any" min="0" />
+        </label>
+      </div>
+      <div class="field-row">
+        <label id="paper-order-fees-label">Fees
+          <input name="fees" type="number" step="any" min="0" value="0" />
+        </label>
+        <label>Advice source
+          <select name="sourceId" id="paper-order-source-select">
+            <option value="">— none —</option>
+          </select>
+        </label>
+      </div>
+      <label>Strategy
+        <select name="strategyId" id="paper-order-strategy-select">
+          <option value="">— none —</option>
+        </select>
+      </label>
+      <label id="paper-order-lot-label" hidden>Sell from lot
+        <select name="lotId" id="paper-order-lot-select">
+          <option value="">Oldest first (FIFO)</option>
+        </select>
+      </label>
+      <label>Notes
+        <textarea name="notes" rows="2"></textarea>
+      </label>
+      <p id="paper-order-hint" class="panel-hint"></p>
+      <div class="form-actions">
+        <button type="button" id="paper-order-delete-btn" class="danger" hidden>Delete</button>
+        <span class="form-actions-spacer"></span>
+        <button type="button" id="paper-order-cancel-btn">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="idea-dialog">
+    <form id="idea-form">
+      <h2>New Journal Idea</h2>
+      <div class="field-row">
+        <label>Ticker
+          <input name="symbol" required autocomplete="off" placeholder="NVDA" />
+        </label>
+        <label>Idea type
+          <select name="orderType" id="idea-order-type-select">
+            <option value="WATCH">Just watching</option>
+            <option value="BUY_LIMIT">Buy target</option>
+            <option value="SELL_LIMIT">Sell target</option>
+          </select>
+        </label>
+      </div>
+      <label id="idea-target-price-label">Target price
+        <input name="targetPrice" type="number" step="any" min="0" />
+      </label>
+      <div class="field-row">
+        <label>Source
+          <select name="sourceId" id="idea-source-select"></select>
+        </label>
+        <label>Strategy
+          <select name="strategyId" id="idea-strategy-select" disabled>
+            <option value="">— none —</option>
+          </select>
+        </label>
+      </div>
+      <label>Notes
+        <textarea name="notes" rows="2"></textarea>
+      </label>
+      <div class="form-actions">
+        <button type="button" id="idea-cancel-btn">Cancel</button>
+        <button type="submit" class="primary">Save Idea</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="strategy-dialog">
+    <form id="strategy-form">
+      <h2 id="strategy-dialog-title">New Strategy</h2>
+      <label>Title
+        <input name="title" required autocomplete="off" placeholder="e.g. Buy the dip" />
+      </label>
+      <label>Notes
+        <textarea name="notes" rows="2"></textarea>
+      </label>
+
+      <h3>Sources</h3>
+      <p class="panel-hint">The same strategy can come from more than one source -- tag every book, person, or podcast that mentions it.</p>
+      <ul id="strategy-sources-list" class="settings-list"></ul>
+
+      <div class="field-row">
+        <label>Source
+          <select id="strategy-source-add-select"></select>
+        </label>
+        <label>Chapter
+          <input id="strategy-source-add-chapter" autocomplete="off" placeholder="e.g. Chapter 4" />
+        </label>
+        <label>Page
+          <input id="strategy-source-add-page" type="number" step="1" min="0" />
+        </label>
+      </div>
+      <div class="field-row">
+        <label>Source notes
+          <input id="strategy-source-add-notes" autocomplete="off" placeholder="optional" />
+        </label>
+        <button type="button" id="strategy-source-add-btn">+ Add source</button>
+      </div>
+
+      <div class="form-actions">
+        <button type="button" id="strategy-cancel-btn">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="execute-dialog">
+    <form id="execute-form">
+      <h2 id="execute-dialog-title">Execute Idea</h2>
+      <p class="panel-hint">Enter the real fill -- this doesn't need to match the paper target exactly.</p>
+      <div class="field-row">
+        <label>Date
+          <input name="transactionDate" type="date" required />
+        </label>
+        <label>Quantity
+          <input name="quantity" type="number" step="any" min="0" required />
+        </label>
+      </div>
+      <div class="field-row">
+        <label>Price per share
+          <input name="price" type="number" step="any" min="0" required />
+        </label>
+        <label>Fees
+          <input name="fees" type="number" step="any" min="0" value="0" />
+        </label>
+      </div>
+      <label>Notes
+        <textarea name="notes" rows="2"></textarea>
+      </label>
+      <div class="form-actions">
+        <button type="button" id="execute-cancel-btn">Cancel</button>
+        <button type="submit" class="primary">Execute</button>
       </div>
     </form>
   </dialog>
@@ -379,8 +699,9 @@
 
       <fieldset class="source-panel" data-source-panel="book" hidden>
         <legend>Book details</legend>
+        <label>ISBN <input name="book_isbn" autocomplete="off" placeholder="e.g. 9780735201446" /></label>
+        <p id="book-isbn-status" class="panel-hint" hidden></p>
         <label>Author <input name="book_author" autocomplete="off" /></label>
-        <label>ISBN <input name="book_isbn" autocomplete="off" /></label>
         <label>Related links (one per line) <textarea name="book_websites" rows="2"></textarea></label>
         <label>PDF references (one per line) <textarea name="book_pdfs" rows="2"></textarea></label>
       </fieldset>
@@ -417,6 +738,21 @@
     <div class="form-actions">
       <button type="button" id="confirm-cancel-btn">Cancel</button>
       <button type="button" id="confirm-ok-btn" class="danger">Confirm</button>
+    </div>
+  </dialog>
+
+  <!-- Shared by every sortable table (Watchlist, Orders positions, Orders
+       history) -- whichever "⚙ Columns" button was clicked passes its own
+       column list into public/js/modules/shared/columnPrefs.js, which
+       re-renders this same dialog for that table. -->
+  <dialog id="column-dialog">
+    <h2>Columns</h2>
+    <p class="panel-hint">Drag <span aria-hidden="true">⠿</span> to reorder. Uncheck to hide.</p>
+    <ul id="column-dialog-list" class="column-list"></ul>
+    <div class="form-actions">
+      <button type="button" id="column-reset-btn">Reset to Default</button>
+      <div class="form-actions-spacer"></div>
+      <button type="button" id="column-done-btn" class="primary">Done</button>
     </div>
   </dialog>
 

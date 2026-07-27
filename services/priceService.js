@@ -133,6 +133,19 @@ const insertHistorical = db.prepare(`
   VALUES (@securityId, @date, @open, @high, @low, @close, @adjClose, @volume, 'yahoo')
 `);
 
+const getLastBarDate = db.prepare(
+  "SELECT MAX(date) AS last_date, COUNT(*) AS bar_count FROM historical_prices WHERE security_id = ?",
+);
+
+/**
+ * How far back a security's stored history currently goes.
+ * @returns {{lastDate: string|null, barCount: number}}
+ */
+export function getHistoryCoverage(securityId) {
+  const row = getLastBarDate.get(securityId);
+  return { lastDate: row?.last_date ?? null, barCount: row?.bar_count ?? 0 };
+}
+
 /**
  * Backfills daily OHLCV history for charting/backtesting. Idempotent --
  * relies on the UNIQUE(security_id, date) constraint, so re-running it just

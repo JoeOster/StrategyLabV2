@@ -4,7 +4,7 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertSchemaCurrent } from "./lib/db.js";
+import db, { assertSchemaCurrent } from "./lib/db.js";
 
 // The schema check MUST run before the service modules are imported. Service
 // modules call db.prepare() at module scope, and a prepare() against a table
@@ -28,11 +28,19 @@ const {
   reorderWatchlists,
   deleteWatchlist,
   refreshSingleTicker,
+  listUnacknowledgedAlerts,
+  acknowledgeAlert,
+  acknowledgeAllAlerts,
 } = await import("./services/watchlistService.js");
 const settings = await import("./services/settingsService.js");
 const sources = await import("./services/sourcesService.js");
 const txns = await import("./services/transactionsService.js");
 const tickerDetail = await import("./services/tickerDetailService.js");
+const scheduler = await import("./services/scheduler.js");
+const alertScheduler = await import("./services/alertScheduler.js");
+const summary = await import("./services/summaryService.js");
+const journal = await import("./services/journalService.js");
+const bookLookup = await import("./services/providers/openLibraryProvider.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -74,7 +82,12 @@ app.get("/api/watched-items", (req, res) => {
   const raw = req.query.watchlistId;
   const watchlistId =
     raw == null || raw === "" ? undefined : /^\d+$/.test(String(raw)) ? Number(raw) : String(raw);
-  res.json(listWatchedItems(holder.id, { watchlistId }));
+  // Defaults to real items only, so a Journal paper idea (added since the
+  // Journal module went in) never shows up mixed into the regular Watchlist
+  // tabs. ?paper=1 opts into paper items instead -- same query param the
+  // positions/summary/transactions routes already use for this distinction.
+  const isPaperTrade = req.query.paper === "1";
+  res.json(listWatchedItems(holder.id, { watchlistId, isPaperTrade }));
 });
 
 // Checked by the UI before submitting the add form, so the user gets a
@@ -144,6 +157,22 @@ app.post("/api/watched-items/delete", (req, res) => {
   }
 });
 
+// Header bell: everything this holder hasn't dismissed yet.
+app.get("/api/alerts", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  res.json(listUnacknowledgedAlerts(holder.id));
+});
+
+app.post("/api/alerts/:id/acknowledge", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  res.json(acknowledgeAlert(holder.id, Number(req.params.id)));
+});
+
+app.post("/api/alerts/acknowledge-all", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  res.json(acknowledgeAllAlerts(holder.id));
+});
+
 app.post("/api/check-alerts", async (req, res) => {
   try {
     const fired = await checkAlerts();
@@ -203,6 +232,10 @@ app.get("/api/settings/general", (req, res) => {
 app.put("/api/settings/general", (req, res) => {
   try {
     const result = settings.saveGeneralSettings(req.body);
+    // Re-arm with the new hour / enabled flag rather than waiting for the
+    // next run to pick it up.
+    scheduler.startScheduler();
+    alertScheduler.startAlertScheduler();
     res.json({ ...result, settings: settings.getGeneralSettings() });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -295,7 +328,183 @@ app.post("/api/sources/:id/delete", (req, res) => {
   }
 });
 
+// Auto-fill helper for the book source dialog: enter an ISBN, get back a
+// title/author to pre-populate. Purely a convenience -- the form works fine
+// without it, so a miss or a lookup failure is a 404, not a 500.
+app.get("/api/book-lookup", async (req, res) => {
+  try {
+    const result = await bookLookup.lookupBookByIsbn(req.query.isbn || "");
+    if (!result) return res.status(404).json({ error: "No book found for that ISBN." });
+    res.json(result);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// --- Journal / Strategy Lab: strategies --------------------------------------
+// A strategy can be tagged with multiple sources (a book AND a podcast AND a
+// person), each with its own chapter/page/notes via strategy_sources. Listing
+// supports an optional ?sourceId= filter (the Journal UI can narrow the
+// Strategy dropdown to strategies tagged with the currently-selected source).
+
+app.get("/api/strategies", (req, res) => {
+  const sourceId = req.query.sourceId ? Number(req.query.sourceId) : undefined;
+  res.json(journal.listStrategies({ sourceId }));
+});
+
+app.get("/api/strategies/:id", (req, res) => {
+  const strategy = journal.getStrategy(Number(req.params.id));
+  if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+  res.json(strategy);
+});
+
+// Body: { title, notes?, sources: [{ sourceId, chapter?, pageNumber?, notes? }, ...] }
+// At least one source tag is required at creation time.
+app.post("/api/strategies", (req, res) => {
+  try {
+    res.status(201).json(journal.createStrategy(req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Body: { title?, notes? } -- source tags are managed via the dedicated
+// endpoints below, not through this update.
+app.put("/api/strategies/:id", (req, res) => {
+  try {
+    res.json(journal.updateStrategy(Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/strategies/:id/delete", (req, res) => {
+  try {
+    res.json(journal.deleteStrategy(Number(req.params.id)));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Body: { sourceId, chapter?, pageNumber?, notes? } -- tag an additional
+// source onto an existing strategy.
+app.post("/api/strategies/:id/sources", (req, res) => {
+  try {
+    res.status(201).json(journal.addStrategySource(Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put("/api/strategies/:id/sources/:linkId", (req, res) => {
+  try {
+    res.json(journal.updateStrategySource(Number(req.params.linkId), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/strategies/:id/sources/:linkId/delete", (req, res) => {
+  try {
+    res.json(journal.removeStrategySource(Number(req.params.linkId)));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// --- Journal / Strategy Lab: paper ideas -------------------------------------
+// These are watched_items with is_paper_trade=1 under the hood (see
+// journalService.js) -- kept on their own /api/journal/* path rather than
+// reusing /api/watched-items so the Journal UI's fetches are never at risk of
+// silently picking up real watches (or vice versa) through a shared endpoint.
+
+app.get("/api/journal/ideas", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  res.json(
+    journal.listJournalIdeas(holder.id, {
+      sourceId: req.query.sourceId ? Number(req.query.sourceId) : undefined,
+      strategyId: req.query.strategyId ? Number(req.query.strategyId) : undefined,
+      status: req.query.status || undefined,
+    }),
+  );
+});
+
+app.post("/api/journal/ideas", async (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const { symbol, orderType, targetPrice, sourceId, strategyId, notes } = req.body || {};
+
+  if (!symbol || !symbol.trim()) {
+    return res.status(400).json({ error: "symbol is required" });
+  }
+  if (!["BUY_LIMIT", "SELL_LIMIT", "WATCH"].includes(orderType)) {
+    return res.status(400).json({ error: "orderType must be BUY_LIMIT, SELL_LIMIT, or WATCH" });
+  }
+  if (orderType !== "WATCH" && (targetPrice == null || targetPrice === "")) {
+    return res.status(400).json({ error: "targetPrice is required for BUY_LIMIT/SELL_LIMIT" });
+  }
+  if (!sourceId) {
+    return res.status(400).json({ error: "sourceId is required" });
+  }
+
+  try {
+    const item = await journal.recordJournalIdea({
+      holderId: holder.id,
+      symbol: symbol.trim(),
+      orderType,
+      targetPrice: targetPrice != null ? Number(targetPrice) : undefined,
+      sourceId: Number(sourceId),
+      strategyId: strategyId ? Number(strategyId) : undefined,
+      notes,
+    });
+    res.status(201).json(item);
+  } catch (err) {
+    console.error("Failed to add journal idea:", err);
+    res.status(502).json({ error: `Could not resolve "${symbol}": ${err.message}` });
+  }
+});
+
+app.post("/api/journal/ideas/:id/execute", async (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const { transactionDate, quantity, price, fees, accountId, notes } = req.body || {};
+
+  if (!transactionDate) return res.status(400).json({ error: "transactionDate is required" });
+  if (quantity == null || quantity === "") return res.status(400).json({ error: "quantity is required" });
+  if (price == null || price === "") return res.status(400).json({ error: "price is required" });
+
+  try {
+    const result = await journal.executeJournalIdea(holder.id, Number(req.params.id), {
+      transactionDate,
+      quantity: Number(quantity),
+      price: Number(price),
+      fees: fees != null && fees !== "" ? Number(fees) : 0,
+      accountId: accountId ? Number(accountId) : undefined,
+      notes,
+    });
+    res.status(201).json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // --- Orders: executed transactions & positions ------------------------------
+
+// Compact snapshot for external consumers (Prime_Dashboard on the
+// Orchestrator NUC). Read-only and stored-data-only, so it's safe to poll
+// frequently -- it never triggers a provider call.
+app.get("/api/summary", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(
+      summary.getDashboardSummary(holder.id, {
+        moverLimit: req.query.movers ? Number(req.query.movers) : undefined,
+        alertLimit: req.query.alerts ? Number(req.query.alerts) : undefined,
+      }),
+    );
+  } catch (err) {
+    console.error("Summary failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.get("/api/positions", (req, res) => {
   const holder = getOrCreateDefaultHolder();
@@ -339,6 +548,7 @@ app.post("/api/transactions", async (req, res) => {
     holderId: holder.id,
     symbol: String(symbol).trim(),
     sourceId: body.sourceId ? Number(body.sourceId) : null,
+    strategyId: body.strategyId ? Number(body.strategyId) : null,
     accountId: body.accountId ? Number(body.accountId) : null,
   };
 
@@ -372,6 +582,18 @@ app.post("/api/transactions/:id/delete", (req, res) => {
   }
 });
 
+// Paper Trade tab: promotes a paper BUY into a real one in place (flips
+// is_paper_trade, keeps everything else -- see promotePaperTrade's own
+// comment in transactionsService.js for why that's enough).
+app.post("/api/transactions/:id/promote", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(txns.promotePaperTrade(holder.id, Number(req.params.id)));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.post("/api/ticker/:symbol/refresh", async (req, res) => {
   try {
     res.json(await refreshSingleTicker(req.params.symbol));
@@ -390,6 +612,46 @@ app.get("/api/ticker/:symbol", (req, res) => {
   res.json(detail);
 });
 
+// Manual trigger, so the nightly job can be exercised without waiting for
+// 01:00 or changing the clock.
+app.post("/api/scheduler/run-now", async (req, res) => {
+  try {
+    await scheduler.runNightlyJob();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Strategy Lab V2 listening on http://localhost:${PORT}`);
+  scheduler.startScheduler();
+  alertScheduler.startAlertScheduler();
 });
+
+// Graceful shutdown. Both schedulers' timers are already .unref()'d so they
+// wouldn't hold the process open on their own, but stopping them explicitly
+// (rather than just letting process.exit tear everything down) avoids a
+// scheduled check firing mid-shutdown and writing to a database connection
+// that's in the middle of closing. Mirrors the pattern from the old
+// Strategy_Lab project's server.js.
+//
+// Note (Windows): Ctrl+C in the same terminal reliably delivers SIGINT, so
+// this handler runs in the common case. A signal sent from *outside* that
+// terminal (e.g. `taskkill /PID <pid>` without `/F`) is not guaranteed to
+// reach a Windows console app the same way -- see scripts/stop-server.ps1's
+// comments for what that means for restarting after a detached process.
+function shutdown(signal) {
+  console.log(`\n[server] ${signal} received, shutting down...`);
+  scheduler.stopScheduler();
+  alertScheduler.stopAlertScheduler();
+  try {
+    db.close();
+  } catch (err) {
+    console.error("[server] Error closing database:", err.message);
+  }
+  process.exit(0);
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));

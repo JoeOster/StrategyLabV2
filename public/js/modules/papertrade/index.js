@@ -1,5 +1,8 @@
-// The "Conductor" for the Orders view. Owns panel/sort/filter state and
-// wires listeners; markup comes from render.js, server calls from api.js.
+// The "Conductor" for the Paper Trade view. Mirrors orders/index.js almost
+// exactly (same positions/history split, same column-prefs wiring), plus a
+// Strategy field on the log/edit dialog and a Promote action that turns a
+// paper BUY into a real one in place -- see promotePaperTrade in
+// transactionsService.js for what that does under the hood.
 import * as api from "./api.js";
 import {
   POSITION_COLUMNS,
@@ -14,15 +17,12 @@ import {
   sortRows,
   filterPositions,
 } from "./render.js";
-import { orderFormToPayload, validateOrderPayload } from "./handlers.js";
+import { paperOrderFormToPayload, validateOrderPayload } from "./handlers.js";
 import { loadColumnPrefs, visibleColumnsInOrder, openColumnDialog } from "../shared/columnPrefs.js";
 import { COLUMN_STORAGE_KEYS } from "../shared/tableRegistry.js";
 
-// Single source of truth for these keys lives in tableRegistry.js --
-// Settings' "Table Columns" panel reads/writes the exact same keys, so they
-// can never silently drift apart.
-const POSITIONS_COLUMN_KEY = COLUMN_STORAGE_KEYS.ordersPositions;
-const HISTORY_COLUMN_KEY = COLUMN_STORAGE_KEYS.ordersHistory;
+const POSITIONS_COLUMN_KEY = COLUMN_STORAGE_KEYS.paperPositions;
+const HISTORY_COLUMN_KEY = COLUMN_STORAGE_KEYS.paperHistory;
 
 const state = {
   activePanel: "positions",
@@ -34,11 +34,7 @@ const state = {
   positionsFilter: "",
   sources: [],
   strategies: [],
-  // Non-null when the order dialog is editing an existing transaction rather
-  // than creating a new one.
   editingId: null,
-  // Recomputed from localStorage on init and whenever a Columns dialog
-  // changes something -- see refreshPositionColumns/refreshHistoryColumns.
   positionColumns: visibleColumnsInOrder(
     POSITION_COLUMNS,
     loadColumnPrefs(POSITIONS_COLUMN_KEY, POSITION_COLUMNS),
@@ -51,49 +47,52 @@ const state = {
 
 const els = {};
 
-export async function initializeOrdersModule() {
-  els.tabs = document.getElementById("orders-tabs");
-  els.panels = [...document.querySelectorAll(".orders-panel")];
-  els.banner = document.getElementById("orders-banner");
-  els.summary = document.getElementById("portfolio-summary");
+export async function initializePaperTradeModule() {
+  els.tabs = document.getElementById("papertrade-tabs");
+  els.panels = [...document.querySelectorAll(".papertrade-panel")];
+  els.banner = document.getElementById("papertrade-banner");
+  els.summary = document.getElementById("paper-portfolio-summary");
 
-  els.positionsThead = document.getElementById("positions-thead-row");
-  els.positionsTbody = document.getElementById("positions-tbody");
-  els.positionsFilter = document.getElementById("positions-filter");
-  els.positionsCount = document.getElementById("positions-count");
-  els.refreshPricesBtn = document.getElementById("orders-refresh-prices-btn");
-  els.positionsColumnsBtn = document.getElementById("positions-columns-btn");
+  els.positionsThead = document.getElementById("paper-positions-thead-row");
+  els.positionsTbody = document.getElementById("paper-positions-tbody");
+  els.positionsFilter = document.getElementById("paper-positions-filter");
+  els.positionsCount = document.getElementById("paper-positions-count");
+  els.refreshPricesBtn = document.getElementById("paper-refresh-prices-btn");
+  els.positionsColumnsBtn = document.getElementById("paper-positions-columns-btn");
 
-  els.historyThead = document.getElementById("history-thead-row");
-  els.historyTbody = document.getElementById("history-tbody");
-  els.historyCount = document.getElementById("history-count");
-  els.historySymbol = document.getElementById("history-symbol");
-  els.historyType = document.getElementById("history-type");
-  els.historyStart = document.getElementById("history-start");
-  els.historyEnd = document.getElementById("history-end");
-  els.historyClearBtn = document.getElementById("history-clear-btn");
-  els.historyColumnsBtn = document.getElementById("history-columns-btn");
+  els.historyThead = document.getElementById("paper-history-thead-row");
+  els.historyTbody = document.getElementById("paper-history-tbody");
+  els.historyCount = document.getElementById("paper-history-count");
+  els.historySymbol = document.getElementById("paper-history-symbol");
+  els.historyType = document.getElementById("paper-history-type");
+  els.historyStart = document.getElementById("paper-history-start");
+  els.historyEnd = document.getElementById("paper-history-end");
+  els.historyClearBtn = document.getElementById("paper-history-clear-btn");
+  els.historyColumnsBtn = document.getElementById("paper-history-columns-btn");
 
+  // The Columns dialog is shared across every table in the app (see
+  // tableRegistry.js) -- Paper Trade just points the same shared dialog
+  // elements at its own storage keys, exactly as orders/index.js does.
   els.columnDialog = document.getElementById("column-dialog");
   els.columnDialogList = document.getElementById("column-dialog-list");
   els.columnResetBtn = document.getElementById("column-reset-btn");
   els.columnDoneBtn = document.getElementById("column-done-btn");
 
-  els.orderDialog = document.getElementById("order-dialog");
-  els.orderForm = document.getElementById("order-form");
-  els.orderTypeSelect = document.getElementById("order-type-select");
-  els.orderSourceSelect = document.getElementById("order-source-select");
-  els.orderStrategySelect = document.getElementById("order-strategy-select");
-  els.orderLotSelect = document.getElementById("order-lot-select");
-  els.orderLotLabel = document.getElementById("order-lot-label");
-  els.orderPriceText = document.getElementById("order-price-text");
-  els.orderQtyLabel = document.getElementById("order-qty-label");
-  els.orderFeesLabel = document.getElementById("order-fees-label");
-  els.orderHint = document.getElementById("order-hint");
-  els.orderDialogTitle = document.getElementById("order-dialog-title");
-  els.orderDeleteBtn = document.getElementById("order-delete-btn");
-  els.orderCancelBtn = document.getElementById("order-cancel-btn");
-  els.logOrderBtns = [document.getElementById("log-order-btn"), document.getElementById("log-order-btn-2")];
+  els.orderDialog = document.getElementById("paper-order-dialog");
+  els.orderForm = document.getElementById("paper-order-form");
+  els.orderTypeSelect = document.getElementById("paper-order-type-select");
+  els.orderSourceSelect = document.getElementById("paper-order-source-select");
+  els.orderStrategySelect = document.getElementById("paper-order-strategy-select");
+  els.orderLotSelect = document.getElementById("paper-order-lot-select");
+  els.orderLotLabel = document.getElementById("paper-order-lot-label");
+  els.orderPriceText = document.getElementById("paper-order-price-text");
+  els.orderQtyLabel = document.getElementById("paper-order-qty-label");
+  els.orderFeesLabel = document.getElementById("paper-order-fees-label");
+  els.orderHint = document.getElementById("paper-order-hint");
+  els.orderDialogTitle = document.getElementById("paper-order-dialog-title");
+  els.orderDeleteBtn = document.getElementById("paper-order-delete-btn");
+  els.orderCancelBtn = document.getElementById("paper-order-cancel-btn");
+  els.logOrderBtns = [document.getElementById("log-paper-trade-btn"), document.getElementById("log-paper-trade-btn-2")];
 
   els.tabs.addEventListener("click", handleTabClick);
   els.positionsThead.addEventListener("click", (e) => handleSort(e, "positionsSort", renderPositions));
@@ -144,16 +143,15 @@ export async function initializeOrdersModule() {
   els.logOrderBtns.forEach((btn) => btn?.addEventListener("click", () => openOrderDialog()));
   els.orderCancelBtn.addEventListener("click", () => els.orderDialog.close());
   els.orderTypeSelect.addEventListener("change", updateOrderFormForType);
-  // Which lots are available depends on the ticker, so re-derive as it's typed.
   els.orderForm.elements.symbol.addEventListener("input", debounce(updateOrderFormForType, 250));
   els.orderForm.addEventListener("submit", handleOrderSubmit);
   els.orderDeleteBtn.addEventListener("click", handleDeleteFromDialog);
   els.refreshPricesBtn.addEventListener("click", handleRefreshPrices);
 
-  await reloadOrdersView();
+  await reloadPaperTradeView();
 }
 
-export async function reloadOrdersView() {
+export async function reloadPaperTradeView() {
   await loadPositions();
   if (state.activePanel === "history") await loadHistory();
 }
@@ -207,7 +205,6 @@ function renderPositions() {
       : `${visible.length} of ${state.positions.length} lot(s)`;
 }
 
-/** Re-reads column prefs from localStorage and re-renders -- called after every Columns dialog change. */
 function refreshPositionColumns() {
   state.positionColumns = visibleColumnsInOrder(
     POSITION_COLUMNS,
@@ -241,7 +238,6 @@ function renderHistory() {
   els.historyCount.textContent = `${visible.length} transaction(s)`;
 }
 
-/** Re-reads column prefs from localStorage and re-renders -- called after every Columns dialog change. */
 function refreshHistoryColumns() {
   state.historyColumns = visibleColumnsInOrder(
     HISTORY_COLUMNS,
@@ -264,13 +260,14 @@ function handleSort(event, sortStateKey, rerender) {
 }
 
 async function handlePositionsAction(event) {
+  const promoteBtn = event.target.closest(".promote-txn-btn");
+  if (promoteBtn) return handlePromote(Number(promoteBtn.dataset.id), promoteBtn.dataset.symbol);
+
   const editBtn = event.target.closest(".edit-txn-btn");
   if (editBtn) return openEditDialog(Number(editBtn.dataset.id));
 
   const btn = event.target.closest(".sell-lot-btn");
   if (!btn) return;
-  // Pre-fill a sell against this specific lot rather than making the user
-  // re-type what they're already looking at.
   openOrderDialog({
     type: "SELL",
     symbol: btn.dataset.symbol,
@@ -279,81 +276,43 @@ async function handlePositionsAction(event) {
   });
 }
 
+/**
+ * Flips a paper BUY to a real one in place. The row then belongs to Orders,
+ * not here -- see promotePaperTrade's own comment in transactionsService.js
+ * for why cost basis, source, and strategy links all carry over untouched.
+ */
+async function handlePromote(lotId, symbol) {
+  if (
+    !window.confirm(
+      `Promote this paper ${symbol} position to a real purchase?\n\n` +
+        "It will move from Paper Trade into Orders, keeping its journal source and strategy links. This can't be undone.",
+    )
+  ) {
+    return;
+  }
+  try {
+    await api.promoteTransaction(lotId);
+    await reloadPaperTradeView();
+    banner(`${symbol} promoted to a real purchase -- see it under Orders.`, false);
+  } catch (err) {
+    banner(err.message, true);
+  }
+}
+
 async function handleHistoryAction(event) {
   const editBtn = event.target.closest(".edit-txn-btn");
   if (editBtn) return openEditDialog(Number(editBtn.dataset.id));
 
   const btn = event.target.closest(".delete-txn-btn");
   if (!btn) return;
-  if (!window.confirm("Delete this transaction? Lot quantities will be adjusted to match.")) return;
+  if (!window.confirm("Delete this paper transaction? Lot quantities will be adjusted to match.")) return;
   try {
     await api.deleteTransaction(Number(btn.dataset.id));
-    await reloadOrdersView();
+    await reloadPaperTradeView();
     banner("Transaction deleted.", false);
   } catch (err) {
     banner(err.message, true);
   }
-}
-
-/**
- * Opens the order dialog in edit mode, populated from an existing
- * transaction. The type field is locked: changing a BUY into a SELL would
- * invalidate the lot links, so the server refuses it anyway.
- */
-async function openEditDialog(transactionId) {
-  // Look in whichever list is loaded; fall back to fetching history if the
-  // row came from the positions table and history hasn't been loaded yet.
-  let txn = state.transactions.find((t) => t.id === transactionId);
-  if (!txn) {
-    try {
-      state.transactions = await api.fetchTransactions({});
-      txn = state.transactions.find((t) => t.id === transactionId);
-    } catch (err) {
-      return banner(err.message, true);
-    }
-  }
-  if (!txn) return banner("Couldn't find that transaction.", true);
-
-  state.editingId = transactionId;
-  els.orderForm.reset();
-
-  try {
-    state.sources = await api.fetchSources();
-    els.orderSourceSelect.innerHTML = renderSourceOptions(state.sources);
-  } catch {
-    /* a missing source list shouldn't block editing */
-  }
-  try {
-    state.strategies = await api.fetchStrategies();
-    els.orderStrategySelect.innerHTML = renderStrategyOptions(state.strategies);
-  } catch {
-    /* a missing strategy list shouldn't block editing */
-  }
-
-  els.orderTypeSelect.value = txn.transaction_type;
-  els.orderTypeSelect.disabled = true;
-  els.orderForm.elements.symbol.value = txn.symbol;
-  els.orderForm.elements.symbol.readOnly = true; // ticker changes = a different trade
-  els.orderForm.elements.transactionDate.value = txn.transaction_date;
-  els.orderForm.elements.quantity.value = txn.quantity;
-  els.orderForm.elements.price.value = txn.price;
-  els.orderForm.elements.fees.value = txn.fees ?? 0;
-  els.orderForm.elements.notes.value = txn.notes ?? "";
-  if (txn.source_id) els.orderSourceSelect.value = String(txn.source_id);
-  if (txn.strategy_id) els.orderStrategySelect.value = String(txn.strategy_id);
-
-  els.orderDialogTitle.textContent = `Edit ${txn.transaction_type} — ${txn.symbol}`;
-  // Delete is only meaningful when editing something that already exists.
-  els.orderDeleteBtn.hidden = false;
-  updateOrderFormForType();
-  // Lot selection only applies when creating a new sell.
-  els.orderLotLabel.hidden = true;
-  els.orderHint.textContent =
-    txn.transaction_type === "BUY"
-      ? "Correcting the price also updates the realized P&L of any sales from this lot."
-      : "Changing the quantity re-allocates shares against the original purchase.";
-
-  els.orderDialog.showModal();
 }
 
 async function handleRefreshPrices() {
@@ -371,30 +330,74 @@ async function handleRefreshPrices() {
   }
 }
 
+async function openEditDialog(transactionId) {
+  let txn = state.transactions.find((t) => t.id === transactionId);
+  if (!txn) {
+    try {
+      state.transactions = await api.fetchTransactions({});
+      txn = state.transactions.find((t) => t.id === transactionId);
+    } catch (err) {
+      return banner(err.message, true);
+    }
+  }
+  if (!txn) return banner("Couldn't find that transaction.", true);
+
+  state.editingId = transactionId;
+  els.orderForm.reset();
+
+  await loadSourcesAndStrategies();
+
+  els.orderTypeSelect.value = txn.transaction_type;
+  els.orderTypeSelect.disabled = true;
+  els.orderForm.elements.symbol.value = txn.symbol;
+  els.orderForm.elements.symbol.readOnly = true;
+  els.orderForm.elements.transactionDate.value = txn.transaction_date;
+  els.orderForm.elements.quantity.value = txn.quantity;
+  els.orderForm.elements.price.value = txn.price;
+  els.orderForm.elements.fees.value = txn.fees ?? 0;
+  els.orderForm.elements.notes.value = txn.notes ?? "";
+  if (txn.source_id) els.orderSourceSelect.value = String(txn.source_id);
+  if (txn.strategy_id) els.orderStrategySelect.value = String(txn.strategy_id);
+
+  els.orderDialogTitle.textContent = `Edit Paper ${txn.transaction_type} — ${txn.symbol}`;
+  els.orderDeleteBtn.hidden = false;
+  updateOrderFormForType();
+  els.orderLotLabel.hidden = true;
+  els.orderHint.textContent =
+    txn.transaction_type === "BUY"
+      ? "Correcting the price also updates the realized P&L of any paper sales from this lot."
+      : "Changing the quantity re-allocates shares against the original paper purchase.";
+
+  els.orderDialog.showModal();
+}
+
+async function loadSourcesAndStrategies() {
+  try {
+    state.sources = await api.fetchSources();
+    els.orderSourceSelect.innerHTML = renderSourceOptions(state.sources);
+  } catch {
+    /* a missing source list shouldn't block logging a paper trade */
+  }
+  try {
+    state.strategies = await api.fetchStrategies();
+    els.orderStrategySelect.innerHTML = renderStrategyOptions(state.strategies);
+  } catch {
+    /* a missing strategy list shouldn't block logging a paper trade */
+  }
+}
+
 async function openOrderDialog(prefill = {}) {
-  // Clear any leftover edit state so "+ Log Order" always creates.
   state.editingId = null;
   els.orderTypeSelect.disabled = false;
   els.orderForm.elements.symbol.readOnly = false;
-  els.orderDialogTitle.textContent = "Log Order";
+  els.orderDialogTitle.textContent = "Log Paper Trade";
   els.orderDeleteBtn.hidden = true;
 
   els.orderForm.reset();
   els.orderForm.elements.transactionDate.value = new Date().toISOString().slice(0, 10);
   els.orderForm.elements.fees.value = "0";
 
-  try {
-    state.sources = await api.fetchSources();
-    els.orderSourceSelect.innerHTML = renderSourceOptions(state.sources);
-  } catch {
-    // A missing source list shouldn't block logging a trade.
-  }
-  try {
-    state.strategies = await api.fetchStrategies();
-    els.orderStrategySelect.innerHTML = renderStrategyOptions(state.strategies);
-  } catch {
-    // A missing strategy list shouldn't block logging a trade.
-  }
+  await loadSourcesAndStrategies();
 
   if (prefill.type) els.orderTypeSelect.value = prefill.type;
   if (prefill.symbol) els.orderForm.elements.symbol.value = prefill.symbol;
@@ -420,8 +423,10 @@ function updateOrderFormForType() {
 
   if (isSell) {
     const symbol = els.orderForm.elements.symbol.value.trim().toUpperCase();
+    // Only ever offers PAPER lots -- state.positions is already paper-scoped
+    // (fetched via ?paper=1), so a paper sell can never accidentally match a
+    // real lot.
     const lots = state.positions.filter((p) => p.symbol === symbol);
-    // Preserve an explicitly chosen lot across re-renders of the dropdown.
     const previous = els.orderLotSelect.value;
     els.orderLotSelect.innerHTML = renderLotOptions(lots);
     if (previous && [...els.orderLotSelect.options].some((o) => o.value === previous)) {
@@ -430,26 +435,21 @@ function updateOrderFormForType() {
     const held = lots.reduce((sum, l) => sum + l.quantity_remaining, 0);
     els.orderHint.textContent = symbol
       ? lots.length
-        ? `You hold ${held} share(s) of ${symbol} across ${lots.length} lot(s).`
-        : `No open lots found for ${symbol}.`
-      : "Enter a ticker to see which lots you hold.";
+        ? `You hold ${held} paper share(s) of ${symbol} across ${lots.length} lot(s).`
+        : `No open paper lots found for ${symbol}.`
+      : "Enter a ticker to see which paper lots you hold.";
   } else {
     els.orderHint.textContent = isDividend
-      ? "Dividends are recorded as income and don't affect your share count."
+      ? "Paper dividends are recorded as income and don't affect your share count."
       : "";
   }
 }
 
-/**
- * Deletes the transaction currently open in the edit dialog. Lives here as
- * well as on History rows so it's reachable from Open Positions, which is
- * where you'd look right after entering a bad order.
- */
 async function handleDeleteFromDialog() {
   if (!state.editingId) return;
   if (
     !window.confirm(
-      "Delete this transaction?\n\nIf it's a sale, the shares go back to the lot it came from. " +
+      "Delete this paper transaction?\n\nIf it's a sale, the shares go back to the lot it came from. " +
         "A purchase can't be deleted once any of it has been sold.",
     )
   ) {
@@ -458,25 +458,21 @@ async function handleDeleteFromDialog() {
   try {
     await api.deleteTransaction(state.editingId);
     els.orderDialog.close();
-    await reloadOrdersView();
+    await reloadPaperTradeView();
     banner("Transaction deleted.", false);
   } catch (err) {
-    // Keep the dialog open -- the usual failure is "already partly sold",
-    // which the user may want to act on straight away.
     banner(err.message, true);
   }
 }
 
 async function handleOrderSubmit(event) {
   event.preventDefault();
-  // A disabled <select> is omitted from FormData, so in edit mode the type
-  // has to be read back off the element directly.
   const formData = new FormData(els.orderForm);
   if (state.editingId && !formData.get("transactionType")) {
     formData.set("transactionType", els.orderTypeSelect.value);
   }
 
-  const payload = orderFormToPayload(formData);
+  const payload = paperOrderFormToPayload(formData);
   const error = validateOrderPayload(payload);
   if (error) return banner(error, true);
 
@@ -484,21 +480,19 @@ async function handleOrderSubmit(event) {
     if (state.editingId) {
       await api.updateTransaction(state.editingId, payload);
       els.orderDialog.close();
-      await reloadOrdersView();
+      await reloadPaperTradeView();
       banner(`Updated ${payload.symbol}.`, false);
     } else {
       await api.recordTransaction(payload);
       els.orderDialog.close();
-      await reloadOrdersView();
-      banner(`${payload.transactionType} recorded for ${payload.symbol}.`, false);
+      await reloadPaperTradeView();
+      banner(`Paper ${payload.transactionType} recorded for ${payload.symbol}.`, false);
     }
   } catch (err) {
-    // Keep the dialog open so the user can correct and retry.
     banner(err.message, true);
   }
 }
 
-// Symbol field is free text, so re-query lots only after typing settles.
 function debounce(fn, ms) {
   let timer;
   return (...args) => {

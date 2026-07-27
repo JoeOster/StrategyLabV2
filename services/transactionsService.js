@@ -16,11 +16,11 @@ import { getOrCreateSecurity } from "./priceService.js";
 
 const insertTransaction = db.prepare(`
   INSERT INTO transactions (
-    holder_id, account_id, security_id, watched_item_id, source_id, is_paper_trade,
+    holder_id, account_id, security_id, watched_item_id, source_id, strategy_id, is_paper_trade,
     transaction_type, transaction_date, quantity, price, fees, cost_basis,
     quantity_remaining, linked_buy_id, external_ref, notes
   ) VALUES (
-    @holderId, @accountId, @securityId, @watchedItemId, @sourceId, @isPaperTrade,
+    @holderId, @accountId, @securityId, @watchedItemId, @sourceId, @strategyId, @isPaperTrade,
     @transactionType, @transactionDate, @quantity, @price, @fees, @costBasis,
     @quantityRemaining, @linkedBuyId, @externalRef, @notes
   ) RETURNING *
@@ -51,6 +51,7 @@ export async function recordBuy(input) {
     securityId: security.id,
     watchedItemId: input.watchedItemId ?? null,
     sourceId: input.sourceId ?? null,
+    strategyId: input.strategyId ?? null,
     isPaperTrade: input.isPaperTrade ? 1 : 0,
     transactionType: "BUY",
     transactionDate: input.transactionDate,
@@ -140,6 +141,7 @@ export async function recordSell(input) {
         securityId: security.id,
         watchedItemId: input.watchedItemId ?? null,
         sourceId: input.sourceId ?? lot.source_id ?? null,
+        strategyId: input.strategyId ?? lot.strategy_id ?? null,
         isPaperTrade,
         transactionType: "SELL",
         transactionDate: input.transactionDate,
@@ -175,6 +177,7 @@ export async function recordDividend(input) {
     securityId: security.id,
     watchedItemId: null,
     sourceId: input.sourceId ?? null,
+    strategyId: input.strategyId ?? null,
     isPaperTrade: input.isPaperTrade ? 1 : 0,
     transactionType: "DIVIDEND",
     transactionDate: input.transactionDate,
@@ -193,16 +196,17 @@ const openPositionsQuery = db.prepare(`
   SELECT
     t.id AS lot_id, t.transaction_date, t.quantity AS original_quantity,
     t.quantity_remaining, t.price AS entry_price, t.cost_basis AS original_cost_basis,
-    t.fees, t.notes, t.account_id,
+    t.fees, t.notes, t.account_id, t.is_paper_trade,
     s.id AS security_id, s.symbol, s.name AS security_name,
     e.code AS exchange_code,
     q.last_price, q.prev_close, q.fetched_at AS quote_fetched_at,
-    src.name AS source_name
+    src.name AS source_name, strat.title AS strategy_title
   FROM transactions t
   JOIN securities s ON s.id = t.security_id
   LEFT JOIN exchanges e ON e.id = s.exchange_id
   LEFT JOIN quotes_cache q ON q.security_id = t.security_id
   LEFT JOIN advice_sources src ON src.id = t.source_id
+  LEFT JOIN strategies strat ON strat.id = t.strategy_id
   WHERE t.holder_id = @holderId
     AND t.transaction_type = 'BUY'
     AND t.quantity_remaining > 0
@@ -244,13 +248,14 @@ function daysBetween(dateStr, now) {
 const transactionsQuery = db.prepare(`
   SELECT
     t.*, s.symbol, s.name AS security_name, e.code AS exchange_code,
-    src.name AS source_name,
+    src.name AS source_name, strat.title AS strategy_title,
     buy.price AS linked_buy_price, buy.transaction_date AS linked_buy_date,
     buy.cost_basis AS linked_buy_cost_basis, buy.quantity AS linked_buy_quantity
   FROM transactions t
   JOIN securities s ON s.id = t.security_id
   LEFT JOIN exchanges e ON e.id = s.exchange_id
   LEFT JOIN advice_sources src ON src.id = t.source_id
+  LEFT JOIN strategies strat ON strat.id = t.strategy_id
   LEFT JOIN transactions buy ON buy.id = t.linked_buy_id
   WHERE t.holder_id = @holderId
     AND (@isPaperTrade IS NULL OR t.is_paper_trade = @isPaperTrade)
@@ -328,21 +333,22 @@ const updateBuyStmt = db.prepare(`
   UPDATE transactions SET
     transaction_date = @transactionDate, quantity = @quantity, price = @price,
     fees = @fees, cost_basis = @costBasis, quantity_remaining = @quantityRemaining,
-    source_id = @sourceId, notes = @notes
+    source_id = @sourceId, strategy_id = @strategyId, notes = @notes
   WHERE id = @id AND holder_id = @holderId
 `);
 
 const updateSellStmt = db.prepare(`
   UPDATE transactions SET
     transaction_date = @transactionDate, quantity = @quantity, price = @price,
-    fees = @fees, cost_basis = @costBasis, source_id = @sourceId, notes = @notes
+    fees = @fees, cost_basis = @costBasis, source_id = @sourceId,
+    strategy_id = @strategyId, notes = @notes
   WHERE id = @id AND holder_id = @holderId
 `);
 
 const updateDividendStmt = db.prepare(`
   UPDATE transactions SET
     transaction_date = @transactionDate, price = @price,
-    source_id = @sourceId, notes = @notes
+    source_id = @sourceId, strategy_id = @strategyId, notes = @notes
   WHERE id = @id AND holder_id = @holderId
 `);
 
@@ -383,12 +389,13 @@ export function updateTransaction(holderId, id, patch = {}) {
 
     const transactionDate = patch.transactionDate ?? txn.transaction_date;
     const sourceId = patch.sourceId === undefined ? txn.source_id : (patch.sourceId ?? null);
+    const strategyId = patch.strategyId === undefined ? txn.strategy_id : (patch.strategyId ?? null);
     const notes = patch.notes === undefined ? txn.notes : (patch.notes ?? null);
 
     if (txn.transaction_type === "DIVIDEND") {
       const amount = patch.amount != null ? Number(patch.amount) : Number(patch.price ?? txn.price);
       if (!(amount > 0)) throw new Error("Dividend amount must be greater than zero.");
-      updateDividendStmt.run({ id, holderId, transactionDate, price: amount, sourceId, notes });
+      updateDividendStmt.run({ id, holderId, transactionDate, price: amount, sourceId, strategyId, notes });
       return getTransaction.get(id, holderId);
     }
 
@@ -419,6 +426,7 @@ export function updateTransaction(holderId, id, patch = {}) {
         // whatever has already been drawn down.
         quantityRemaining: quantity === txn.quantity ? txn.quantity_remaining : quantity,
         sourceId,
+        strategyId,
         notes,
       });
 
@@ -456,6 +464,7 @@ export function updateTransaction(holderId, id, patch = {}) {
       fees,
       costBasis: quantity * lotCostPerShare,
       sourceId,
+      strategyId,
       notes,
     });
     return getTransaction.get(id, holderId);
@@ -484,5 +493,40 @@ export function deleteTransaction(holderId, id) {
     }
 
     return { deleted: deleteTransactionStmt.run(id, holderId).changes, transaction: txn };
+  });
+}
+
+const setRealStmt = db.prepare("UPDATE transactions SET is_paper_trade = 0 WHERE id = ?");
+
+/**
+ * "Promotes" a paper BUY into a real one -- the Paper Trade tab's version of
+ * Journal's executeJournalIdea(), but simpler: a paper trade here already IS
+ * a fully-specified transaction (real quantity/price/date), not just a
+ * target-price watch, so there's no separate fill to collect. Promoting is
+ * just flipping is_paper_trade 1 -> 0 on the same row -- cost_basis,
+ * quantity_remaining, source_id, and strategy_id all carry over untouched,
+ * which is exactly what "leaves the Paper Trade tab and joins Orders,
+ * retaining the journal links" means in practice.
+ *
+ * v1 deliberately only supports promoting an untouched lot (nothing sold
+ * against it yet, on paper or otherwise) -- promoting a partially-realized
+ * paper position would mean deciding what happens to its paper SELL rows
+ * too, which is a real design question left for later. See STATUS.md.
+ */
+export function promotePaperTrade(holderId, id) {
+  return withTransaction(() => {
+    const txn = getTransaction.get(id, holderId);
+    if (!txn) throw new Error("Transaction not found.");
+    if (!txn.is_paper_trade) throw new Error("This is already a real transaction, not a paper trade.");
+    if (txn.transaction_type !== "BUY") {
+      throw new Error("Only a paper BUY can be promoted -- it's what opens the position.");
+    }
+    if (txn.quantity_remaining < txn.quantity) {
+      throw new Error(
+        "This paper position has already been partly or fully sold on paper. Promoting a partially-realized position isn't supported yet -- delete the paper sell(s) first if you want to promote the whole lot.",
+      );
+    }
+    setRealStmt.run(id);
+    return getTransaction.get(id, holderId);
   });
 }

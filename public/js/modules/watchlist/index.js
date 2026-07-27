@@ -4,6 +4,7 @@
 // render.js, handlers.js) but they never import each other directly.
 import * as api from "./api.js";
 import {
+  ALL_COLUMNS,
   renderTabs,
   renderHeaderRow,
   renderItemsRows,
@@ -21,6 +22,13 @@ import {
   makeRefreshHandler,
   makeRefreshHistoryHandler,
 } from "./handlers.js";
+import { loadColumnPrefs, visibleColumnsInOrder, openColumnDialog } from "../shared/columnPrefs.js";
+import { COLUMN_STORAGE_KEYS } from "../shared/tableRegistry.js";
+
+// Single source of truth for this key lives in tableRegistry.js -- Settings'
+// "Table Columns" panel reads/writes the exact same key, so they can never
+// silently drift apart.
+const COLUMN_STORAGE_KEY = COLUMN_STORAGE_KEYS.watchlist;
 
 const state = {
   watchlists: [],
@@ -32,6 +40,9 @@ const state = {
   sortDir: "asc",
   filterQuery: "",
   typeFilter: "",
+  // Recomputed from localStorage on init and whenever the Columns dialog
+  // changes something -- see refreshColumns() below.
+  columns: visibleColumnsInOrder(ALL_COLUMNS, loadColumnPrefs(COLUMN_STORAGE_KEY, ALL_COLUMNS)),
 };
 
 const els = {};
@@ -60,6 +71,11 @@ export async function initializeWatchlistModule() {
   els.addBtn = document.getElementById("add-ticker-btn");
   els.refreshBtn = document.getElementById("refresh-btn");
   els.refreshHistoryBtn = document.getElementById("refresh-history-btn");
+  els.columnsBtn = document.getElementById("watchlist-columns-btn");
+  els.columnDialog = document.getElementById("column-dialog");
+  els.columnDialogList = document.getElementById("column-dialog-list");
+  els.columnResetBtn = document.getElementById("column-reset-btn");
+  els.columnDoneBtn = document.getElementById("column-done-btn");
   els.addDialog = document.getElementById("add-ticker-dialog");
   els.addForm = document.getElementById("add-ticker-form");
   els.addFormWatchlistSelect = document.getElementById("add-form-watchlist");
@@ -87,6 +103,17 @@ export async function initializeWatchlistModule() {
     state.typeFilter = els.typeFilter.value;
     renderTable();
   });
+  els.columnsBtn.addEventListener("click", () =>
+    openColumnDialog({
+      dialog: els.columnDialog,
+      listEl: els.columnDialogList,
+      resetBtn: els.columnResetBtn,
+      doneBtn: els.columnDoneBtn,
+      allColumns: ALL_COLUMNS,
+      storageKey: COLUMN_STORAGE_KEY,
+      onChange: refreshColumns,
+    }),
+  );
 
   els.addBtn.addEventListener("click", () => {
     els.addFormWatchlistSelect.innerHTML = renderWatchlistOptions(state.watchlists, state.activeWatchlistId);
@@ -334,12 +361,18 @@ function renderTable() {
     state.sortKey,
     state.sortDir,
   );
-  els.theadRow.innerHTML = renderHeaderRow(state.sortKey, state.sortDir);
-  els.tbody.innerHTML = renderItemsRows(visible);
+  els.theadRow.innerHTML = renderHeaderRow(state.columns, state.sortKey, state.sortDir);
+  els.tbody.innerHTML = renderItemsRows(visible, state.columns);
   els.rowCount.textContent =
     visible.length === state.items.length
       ? `${state.items.length} item(s)`
       : `${visible.length} of ${state.items.length} item(s)`;
+}
+
+/** Re-reads column prefs from localStorage and re-renders -- called after every Columns dialog change. */
+function refreshColumns() {
+  state.columns = visibleColumnsInOrder(ALL_COLUMNS, loadColumnPrefs(COLUMN_STORAGE_KEY, ALL_COLUMNS));
+  renderTable();
 }
 
 function handleSortClick(event) {

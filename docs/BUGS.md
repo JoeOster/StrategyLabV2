@@ -1,6 +1,7 @@
-# Open bugs / next session
+# Bugs — all three FIXED 2026-07-25
 
-Captured 2026-07-25 at the end of a session. Nothing here is fixed yet.
+Kept for the record. Nothing below is outstanding; see `STATUS.md` for
+current state.
 
 ---
 

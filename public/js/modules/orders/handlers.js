@@ -13,6 +13,7 @@ export function orderFormToPayload(formData) {
     symbol: String(formData.get("symbol") || "").trim().toUpperCase(),
     transactionDate: formData.get("transactionDate"),
     sourceId: emptyToNull(formData.get("sourceId")),
+    strategyId: emptyToNull(formData.get("strategyId")),
     notes: emptyToNull(formData.get("notes")),
   };
 

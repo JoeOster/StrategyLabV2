@@ -117,6 +117,28 @@ export function renderExchangesPanel(exchanges) {
     .join("");
 }
 
+/**
+ * @param {Array<{id: string, label: string, visibleCount: number, totalCount: number}>} tables
+ */
+export function renderColumnsPanel(tables) {
+  return tables
+    .map(
+      (t) => `
+      <li data-table-id="${t.id}">
+        <div class="settings-row">
+          <div class="settings-row-main">
+            <strong>${escapeHtml(t.label)}</strong>
+            <span class="settings-row-meta">${t.visibleCount} of ${t.totalCount} columns shown</span>
+          </div>
+          <div class="settings-row-actions">
+            <button type="button" data-action="configure-columns" data-table-id="${t.id}">Configure Columns</button>
+          </div>
+        </div>
+      </li>`,
+    )
+    .join("");
+}
+
 function truncate(str, max) {
   const s = String(str);
   return s.length > max ? `${s.slice(0, max)}…` : s;

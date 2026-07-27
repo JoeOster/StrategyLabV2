@@ -203,17 +203,31 @@ CREATE TABLE source_subscriptions (
   UNIQUE (holder_id, source_id)
 );
 
--- A named strategy/rule pulled from a source (chapter/page reference today;
--- Phase 2 AI extraction can populate a future `rules_json` column here
--- without changing this table's shape).
+-- A named strategy/rule (e.g. "Buy the dip"). Source-independent: the same
+-- strategy can be mentioned by multiple sources (a book AND a podcast AND a
+-- person), each with its own chapter/page/notes -- see strategy_sources
+-- below. Phase 2 AI extraction can populate a future `rules_json` column here
+-- without changing this table's shape.
 CREATE TABLE strategies (
   id            INTEGER PRIMARY KEY,
-  source_id     INTEGER NOT NULL REFERENCES advice_sources(id) ON DELETE CASCADE,
   title         TEXT NOT NULL,
+  notes         TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Many-to-many: which source(s) mention/teach this strategy, and the
+-- source-specific pointer to it (a book's chapter/page, a podcast episode
+-- note, etc. -- lives here, not on strategies, since it's only meaningful in
+-- the context of one particular source).
+CREATE TABLE strategy_sources (
+  id            INTEGER PRIMARY KEY,
+  strategy_id   INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  source_id     INTEGER NOT NULL REFERENCES advice_sources(id) ON DELETE CASCADE,
   chapter       TEXT,
   page_number   INTEGER,
   notes         TEXT,
-  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (strategy_id, source_id)
 );
 
 -- ============================================================================
@@ -286,6 +300,7 @@ CREATE TABLE transactions (
   security_id         INTEGER NOT NULL REFERENCES securities(id) ON DELETE RESTRICT,
   watched_item_id     INTEGER REFERENCES watched_items(id) ON DELETE SET NULL,
   source_id           INTEGER REFERENCES advice_sources(id) ON DELETE SET NULL,
+  strategy_id         INTEGER REFERENCES strategies(id) ON DELETE SET NULL,
   is_paper_trade      INTEGER NOT NULL DEFAULT 0 CHECK (is_paper_trade IN (0,1)),
   transaction_type    TEXT NOT NULL CHECK (transaction_type IN ('BUY','SELL','DIVIDEND','SPLIT_ADJ')),
   transaction_date    TEXT NOT NULL,
@@ -353,6 +368,8 @@ CREATE INDEX idx_transactions_holder          ON transactions(holder_id);
 CREATE INDEX idx_transactions_security        ON transactions(security_id);
 CREATE INDEX idx_transactions_account_date    ON transactions(account_id, transaction_date);
 CREATE INDEX idx_import_raw_rows_batch        ON import_raw_rows(batch_id, reconciliation_status);
+CREATE INDEX idx_strategy_sources_strategy    ON strategy_sources(strategy_id);
+CREATE INDEX idx_strategy_sources_source      ON strategy_sources(source_id);
 
 -- ============================================================================
 -- SECTION 7: updated_at triggers (SQLite has no ON UPDATE clause like MySQL)

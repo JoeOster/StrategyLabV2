@@ -33,7 +33,7 @@ const deleteSourceStmt = db.prepare("DELETE FROM advice_sources WHERE id = ?");
 
 const listSourcesQuery = db.prepare(`
   SELECT s.*,
-    (SELECT COUNT(*) FROM strategies st WHERE st.source_id = s.id) AS strategy_count,
+    (SELECT COUNT(*) FROM strategy_sources ss WHERE ss.source_id = s.id) AS strategy_count,
     (SELECT COUNT(*) FROM watched_items w WHERE w.source_id = s.id) AS watched_count
   FROM advice_sources s
   ORDER BY s.name
@@ -127,8 +127,10 @@ export function updateSourceById(id, input) {
 }
 
 /**
- * Deleting a source CASCADEs to its strategies, and NULLs the source_id on
- * any watched items that referenced it (the items themselves survive).
+ * Deleting a source CASCADEs to strategy_sources (any strategy tagged with
+ * this source just loses that one tag -- the strategy itself survives, see
+ * journalService.js), and NULLs the source_id on any watched items that
+ * referenced it (the items themselves survive).
  */
 export function deleteSource(id) {
   return { deleted: deleteSourceStmt.run(id).changes };

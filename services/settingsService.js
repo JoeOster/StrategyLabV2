@@ -15,6 +15,26 @@ export const GENERAL_SETTING_DEFAULTS = {
   default_stop_loss_percent: "5",
   notification_cooldown_minutes: "30",
   theme: "light",
+  // Nightly maintenance job (services/scheduler.js). "1" = on.
+  nightly_refresh_enabled: "1",
+  nightly_refresh_hour: "1", // 24h local time
+  // Market-hours alert polling (services/alertScheduler.js). "1" = on.
+  // Interval is a fixed 15 minutes, not user-configurable -- see
+  // alertScheduler.js's own comment for why.
+  alert_check_enabled: "1",
+  // Empty = disabled. When set, every checkAlerts()/refreshSingleTicker()
+  // call that fires at least one alert POSTs a JSON payload here -- see
+  // services/notifyService.js. A generic hook so an external automation
+  // (e.g. Joe's ai_orchestrator) can pick this up later without this app
+  // needing to know anything about how that side works.
+  alert_webhook_url: "",
+  // Optional. Sent verbatim as the request's Authorization header when set
+  // (e.g. "Bearer <home-assistant-long-lived-token>" for HA's
+  // /api/services/notify/<target> endpoint, which requires one). Stored in
+  // plain text in app_settings like every other setting here -- fine for a
+  // single-user local app, but this is a real credential, so don't reuse
+  // this field for anything beyond this one webhook.
+  alert_webhook_auth_header: "",
 };
 
 const getAllSettings = db.prepare("SELECT key, value FROM app_settings");

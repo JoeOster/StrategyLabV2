@@ -29,6 +29,9 @@ const {
   renameWatchlist: renameWatchlistFn,
   reorderWatchlists: reorderWatchlistsFn,
   deleteWatchlist: deleteWatchlistFn,
+  listUnacknowledgedAlerts,
+  acknowledgeAlert,
+  acknowledgeAllAlerts,
 } = await import("../services/watchlistService.js");
 
 let passed = 0;
@@ -359,6 +362,154 @@ check(
   "Historical price data survives item deletion",
   db.prepare("SELECT COUNT(*) AS n FROM historical_prices").get().n === 3,
 );
+
+console.log("\n3f. Scheduled alerts: market hours, webhook, acknowledge");
+const { isMarketOpen } = await import("../services/alertScheduler.js");
+check(
+  "Market closed just before 9:30am ET (Monday)",
+  isMarketOpen(new Date("2026-07-27T13:29:00Z")) === false,
+);
+check(
+  "Market open right at 9:30am ET (Monday)",
+  isMarketOpen(new Date("2026-07-27T13:30:00Z")) === true,
+);
+check(
+  "Market open mid-afternoon ET (Monday)",
+  isMarketOpen(new Date("2026-07-27T19:59:00Z")) === true,
+);
+check(
+  "Market closed right at 4:00pm ET (Monday)",
+  isMarketOpen(new Date("2026-07-27T20:00:00Z")) === false,
+);
+check("Market closed on Saturday", isMarketOpen(new Date("2026-08-01T16:00:00Z")) === false);
+check("Market closed on Sunday", isMarketOpen(new Date("2026-07-26T16:00:00Z")) === false);
+
+const { deliverAlertWebhook } = await import("../services/notifyService.js");
+const fakeFiredAlerts = [{ watchedItemId: 1, symbol: "NVDA", price: 123.45 }];
+
+check(
+  "deliverAlertWebhook no-ops with an empty fired list",
+  (await deliverAlertWebhook([])).reason === "no-alerts",
+);
+check(
+  "deliverAlertWebhook no-ops when no URL is configured (default)",
+  (await deliverAlertWebhook(fakeFiredAlerts)).reason === "not-configured",
+);
+
+const settingsSvcEarly = await import("../services/settingsService.js");
+settingsSvcEarly.saveGeneralSettings({ alert_webhook_url: "https://example.invalid/hook" });
+
+const originalFetch = globalThis.fetch;
+let capturedRequest = null;
+globalThis.fetch = async (url, opts) => {
+  capturedRequest = { url, opts };
+  return { ok: true, status: 200, statusText: "OK" };
+};
+const webhookResult = await deliverAlertWebhook(fakeFiredAlerts);
+check("deliverAlertWebhook sends when a URL is configured", webhookResult.sent === true);
+check("...to the configured URL", capturedRequest?.url === "https://example.invalid/hook");
+check(
+  "...with the fired alerts in the JSON body",
+  JSON.parse(capturedRequest.opts.body).alerts[0].symbol === "NVDA",
+);
+check(
+  "...with no Authorization header when none is configured",
+  capturedRequest.opts.headers.Authorization === undefined,
+);
+
+// Home Assistant's REST API (the ai_orchestrator integration this hook is
+// actually for) requires a bearer token -- confirm it rides along verbatim.
+settingsSvcEarly.saveGeneralSettings({ alert_webhook_auth_header: "Bearer test-token-123" });
+capturedRequest = null;
+await deliverAlertWebhook(fakeFiredAlerts);
+check(
+  "deliverAlertWebhook sends the configured Authorization header verbatim",
+  capturedRequest?.opts.headers.Authorization === "Bearer test-token-123",
+);
+
+globalThis.fetch = async () => {
+  throw new Error("simulated network failure");
+};
+const webhookFailResult = await deliverAlertWebhook(fakeFiredAlerts);
+check(
+  "deliverAlertWebhook swallows a network failure instead of throwing",
+  webhookFailResult.sent === false && webhookFailResult.reason === "network-error",
+);
+
+globalThis.fetch = originalFetch;
+settingsSvcEarly.saveGeneralSettings({ alert_webhook_url: "", alert_webhook_auth_header: "" }); // reset for later sections
+
+// --- Acknowledge flow ---
+// Reuses `holder` and `otherHolder` from earlier sections rather than
+// creating fresh ones -- section 5c's "listHolders returns both holders"
+// check counts every account_holders row, so adding new ones here would
+// silently break an assertion two sections down.
+const alertHolder = holder;
+const alertList = createWatchlist(alertHolder.id, "Alert Test List");
+const alertItem = await addWatchedItem({
+  holderId: alertHolder.id,
+  symbol: "NVDA",
+  orderType: "BUY_LIMIT",
+  buyPriceHigh: 100,
+  watchlistId: alertList.id,
+  skipBackfill: true,
+});
+const alertItem2 = await addWatchedItem({
+  holderId: alertHolder.id,
+  symbol: "NVDA", // reuses the already-seeded NVDA security (section 2) --
+  // AAPL/MSFT aren't seeded yet at this point in the file, and this section
+  // must stay offline-safe, so no new symbol should be introduced here.
+  orderType: "SELL_LIMIT",
+  takeProfitLow: 200,
+  watchlistId: alertList.id,
+  skipBackfill: true,
+});
+applyAlertIfTriggered(
+  { id: alertItem.id, symbol: "NVDA", order_type: "BUY_LIMIT", buy_price_high: 100, buy_price_low: null },
+  95,
+);
+applyAlertIfTriggered(
+  { id: alertItem2.id, symbol: "NVDA", order_type: "SELL_LIMIT", take_profit_low: 200, take_profit_high: null },
+  210,
+);
+
+const unacked = listUnacknowledgedAlerts(alertHolder.id);
+check("listUnacknowledgedAlerts returns both fresh alerts", unacked.length === 2);
+check(
+  "Alerts are ordered newest first",
+  new Date(unacked[0].triggered_at) >= new Date(unacked[1].triggered_at),
+);
+
+check(
+  "Acknowledging another holder's alert is a no-op",
+  acknowledgeAlert(otherHolder.id, unacked[0].id).acknowledged === 0,
+);
+check(
+  "...the alert is still unacknowledged after that no-op",
+  listUnacknowledgedAlerts(alertHolder.id).length === 2,
+);
+
+const ackResult = acknowledgeAlert(alertHolder.id, unacked[0].id);
+check("acknowledgeAlert reports one row acknowledged", ackResult.acknowledged === 1);
+check(
+  "Acknowledged alert no longer appears in the unacknowledged list",
+  listUnacknowledgedAlerts(alertHolder.id).length === 1,
+);
+check(
+  "Re-acknowledging the same alert is a no-op the second time",
+  acknowledgeAlert(alertHolder.id, unacked[0].id).acknowledged === 0,
+);
+
+const ackAllResult = acknowledgeAllAlerts(alertHolder.id);
+check("acknowledgeAllAlerts acknowledges the one remaining alert", ackAllResult.acknowledged === 1);
+check("Nothing left unacknowledged after Acknowledge All", listUnacknowledgedAlerts(alertHolder.id).length === 0);
+
+// Cleanup: this section reused `holder`, whose watchlist state later
+// sections (5e in particular) make specific assumptions about. Remove the
+// list and items this section added so it leaves things exactly as it
+// found them.
+deleteWatchedItems(alertHolder.id, [alertItem.id, alertItem2.id]);
+deleteWatchlistFn(alertHolder.id, alertList.id, { deleteItems: true });
 
 console.log("\n5. Settings: general key/value");
 const settingsSvc = await import("../services/settingsService.js");
@@ -841,6 +992,178 @@ check(
   })(),
 );
 
+console.log("\n6h. Transactions: strategy_id threading + Paper Trade promote");
+// Fresh holder + a strategy to tag lots with, so this section is independent
+// of whatever the strategies suite (section 11) does to the same tables.
+const paperHolder = db
+  .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Paper Trader', 0) RETURNING *")
+  .get();
+const journalSvcForPaper = await import("../services/journalService.js");
+const bookSourceForPaper = db
+  .prepare("INSERT INTO advice_sources (name, type) VALUES ('Paper Trade Test Source', 'book') RETURNING *")
+  .get();
+const paperStrategy = journalSvcForPaper.createStrategy({
+  title: "Breakout Test Strategy",
+  sources: [{ sourceId: bookSourceForPaper.id }],
+});
+
+const paperBuy = await tx.recordBuy({
+  holderId: paperHolder.id,
+  symbol: "NVDA",
+  transactionDate: "2026-06-01",
+  quantity: 10,
+  price: 50,
+  fees: 0,
+  isPaperTrade: true,
+  strategyId: paperStrategy.id,
+});
+check("A paper BUY is tagged with is_paper_trade", paperBuy.is_paper_trade === 1);
+check("A paper BUY carries the given strategy_id", paperBuy.strategy_id === paperStrategy.id);
+
+const paperPositions = tx.listOpenPositions(paperHolder.id, { isPaperTrade: true });
+check("Paper positions are scoped separately from real ones", paperPositions.length === 1);
+check(
+  "Paper position resolves strategy_title via the join",
+  paperPositions[0].strategy_title === "Breakout Test Strategy",
+);
+check(
+  "Real positions for the same holder don't see the paper lot",
+  tx.listOpenPositions(paperHolder.id, { isPaperTrade: false }).length === 0,
+);
+
+const paperSell = await tx.recordSell({
+  holderId: paperHolder.id,
+  symbol: "NVDA",
+  transactionDate: "2026-06-15",
+  quantity: 4,
+  price: 60,
+  isPaperTrade: true,
+});
+check(
+  "A paper SELL without an explicit strategyId inherits it from the lot",
+  paperSell.sells[0].strategy_id === paperStrategy.id,
+);
+
+// A second, untouched paper lot for the actual promote tests.
+const promoteLot = await tx.recordBuy({
+  holderId: paperHolder.id,
+  symbol: "AAPL",
+  transactionDate: "2026-06-01",
+  quantity: 5,
+  price: 100,
+  fees: 0,
+  isPaperTrade: true,
+});
+const promoted = tx.promotePaperTrade(paperHolder.id, promoteLot.id);
+check("Promoting flips is_paper_trade to 0", promoted.is_paper_trade === 0);
+check("Promoting preserves cost basis", promoted.cost_basis === 5 * 100);
+check("Promoting preserves quantity_remaining", promoted.quantity_remaining === 5);
+check(
+  "The promoted lot now shows up as a real position",
+  tx.listOpenPositions(paperHolder.id, { isPaperTrade: false }).some((p) => p.lot_id === promoteLot.id),
+);
+check(
+  "...and no longer appears among paper positions",
+  !tx.listOpenPositions(paperHolder.id, { isPaperTrade: true }).some((p) => p.lot_id === promoteLot.id),
+);
+
+check(
+  "Promoting an already-real transaction is refused",
+  (() => {
+    try {
+      tx.promotePaperTrade(paperHolder.id, promoteLot.id);
+      return false;
+    } catch (err) {
+      return /already a real transaction/.test(err.message);
+    }
+  })(),
+);
+
+const nonBuyPaper = await tx.recordDividend({
+  holderId: paperHolder.id, symbol: "NVDA", transactionDate: "2026-06-20", amount: 5, isPaperTrade: true,
+});
+check(
+  "Promoting a non-BUY (e.g. a dividend) is refused",
+  (() => {
+    try {
+      tx.promotePaperTrade(paperHolder.id, nonBuyPaper.id);
+      return false;
+    } catch (err) {
+      return /Only a paper BUY/.test(err.message);
+    }
+  })(),
+);
+
+// Pre-seed AMZN (not used elsewhere in this suite) so getOrCreateSecurity
+// doesn't try a live Yahoo lookup.
+db.prepare(
+  "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('AMZN', ?, 'Amazon.com Inc', 'manual')",
+).run(exchangeId);
+const partlySoldPaperLot = await tx.recordBuy({
+  holderId: paperHolder.id,
+  symbol: "AMZN",
+  transactionDate: "2026-06-01",
+  quantity: 10,
+  price: 200,
+  fees: 0,
+  isPaperTrade: true,
+});
+await tx.recordSell({
+  holderId: paperHolder.id, symbol: "AMZN", transactionDate: "2026-06-10", quantity: 3, price: 210,
+  isPaperTrade: true,
+});
+check(
+  "Promoting a partly-sold paper lot is refused",
+  (() => {
+    try {
+      tx.promotePaperTrade(paperHolder.id, partlySoldPaperLot.id);
+      return false;
+    } catch (err) {
+      return /partly or fully sold/.test(err.message);
+    }
+  })(),
+);
+
+console.log("\n6i. Paper Trade: handlers + render (pure functions)");
+const { paperOrderFormToPayload } = await import("../public/js/modules/papertrade/handlers.js");
+const { renderPositionsRows: renderOrdersPositionsRows } = await import(
+  "../public/js/modules/orders/render.js"
+);
+const { renderPositionsRows: renderPaperPositionsRows } = await import(
+  "../public/js/modules/papertrade/render.js"
+);
+
+const paperPayload = paperOrderFormToPayload(
+  fakeFormData({
+    transactionType: "BUY",
+    symbol: "nvda",
+    transactionDate: "2026-07-01",
+    quantity: "10",
+    price: "50",
+    fees: "0",
+    sourceId: "",
+    strategyId: "3",
+    notes: "",
+  }),
+);
+check("paperOrderFormToPayload forces isPaperTrade true", paperPayload.isPaperTrade === true);
+check("paperOrderFormToPayload still coerces strategyId through", paperPayload.strategyId === "3");
+
+const fakeLot = { lot_id: 7, symbol: "NVDA", quantity_remaining: 10 };
+const fakeCols = [{ key: "symbol", label: "Ticker" }];
+check(
+  "Orders' own renderPositionsRows omits Promote by default (real Orders table)",
+  !renderOrdersPositionsRows([fakeLot], fakeCols).includes("promote-txn-btn"),
+);
+check(
+  "Paper Trade's renderPositionsRows always includes Promote",
+  renderPaperPositionsRows([fakeLot], fakeCols).includes("promote-txn-btn"),
+);
+check(
+  "Paper Trade's empty-state message is paper-specific",
+  renderPaperPositionsRows([], fakeCols).includes("Log Paper Trade"),
+);
+
 console.log("\n6e. Orders: form mapping + validation (pure functions)");
 const { orderFormToPayload, validateOrderPayload } = await import(
   "../public/js/modules/orders/handlers.js"
@@ -1152,6 +1475,559 @@ const aaplWatched = db
   .get(aaplId).n;
 check("AAPL is not on any watchlist (the previously-broken case)", aaplWatched === 0);
 
+console.log("\n8e. Watchlist 10-day trend series + sparkline");
+const seriesRows = wlSvc.listWatchedItems(filterHolder.id, { watchlistId: fListA.id });
+check("Watchlist rows carry a recent_series array", Array.isArray(seriesRows[0].recent_series));
+check(
+  "recent_series is chronological (oldest first)",
+  (() => {
+    const s = seriesRows[0].recent_series;
+    return s.length < 2 || s[0].date <= s[s.length - 1].date;
+  })(),
+);
+check(
+  "recent_series is capped at 10 bars",
+  seriesRows[0].recent_series.length <= 10,
+);
+
+const { renderTrendSparkline } = await import("../public/js/modules/watchlist/render.js");
+check(
+  "Sparkline degrades to a dash with no series",
+  renderTrendSparkline(undefined).includes("trend-empty"),
+);
+check(
+  "Sparkline degrades to a dash with a single bar",
+  renderTrendSparkline([{ date: "2026-01-01", close: 10 }]).includes("trend-empty"),
+);
+
+const risingSpark = renderTrendSparkline([
+  { date: "2026-01-01", close: 10 },
+  { date: "2026-01-02", close: 11 },
+  { date: "2026-01-03", close: 13 },
+]);
+check("Sparkline renders an SVG polyline", risingSpark.includes("<polyline") && risingSpark.includes("<svg"));
+check("Rising series uses the success colour", risingSpark.includes("var(--success)"));
+check(
+  "Sparkline labels the net $ change, not the price",
+  risingSpark.includes("+$3.00"),
+);
+
+const fallingSpark = renderTrendSparkline([
+  { date: "2026-01-01", close: 20 },
+  { date: "2026-01-02", close: 18 },
+]);
+check("Falling series uses the danger colour", fallingSpark.includes("var(--danger)"));
+check("Falling series labels a negative change", fallingSpark.includes("-$2.00"));
+
+const flatSpark = renderTrendSparkline([
+  { date: "2026-01-01", close: 5 },
+  { date: "2026-01-02", close: 5 },
+]);
+check("Flat series produces no NaN coordinates", !flatSpark.includes("NaN"));
+
+// Sorting by the trend column should use the net move the line depicts.
+const trendSorted = sortItems(
+  [
+    { symbol: "A", recent_series: [{ close: 10 }, { close: 12 }] }, // +2
+    { symbol: "B", recent_series: [{ close: 10 }, { close: 5 }] }, // -5
+    { symbol: "C", recent_series: [] }, // no data
+  ],
+  "trend_10d",
+  "desc",
+);
+check(
+  "Trend column sorts by net change with no-data last",
+  JSON.stringify(trendSorted.map((r) => r.symbol)) === JSON.stringify(["A", "B", "C"]),
+);
+
+console.log("\n8f. Incremental history refresh");
+const priceSvc = await import("../services/priceService.js");
+const covered = priceSvc.getHistoryCoverage(item.security_id);
+check("getHistoryCoverage reports stored bar count", covered.barCount === 3);
+check("getHistoryCoverage reports the newest date", covered.lastDate === "2026-07-22");
+
+const noHistorySec = db
+  .prepare("INSERT INTO securities (symbol, name, data_source) VALUES ('ZZZZ','Test Co','manual') RETURNING *")
+  .get();
+const emptyCoverage = priceSvc.getHistoryCoverage(noHistorySec.id);
+check("Coverage of an unfetched security is empty", emptyCoverage.barCount === 0 && emptyCoverage.lastDate === null);
+
+console.log("\n8g. Scheduler timing math");
+const sched = await import("../services/scheduler.js");
+// 22:00 -> next 01:00 is 3h away, tomorrow.
+check(
+  "Schedules to the next occurrence when the hour has passed today",
+  sched.msUntilNextRun(1, new Date("2026-07-25T22:00:00")) === 3 * 3600000,
+);
+// 00:00 -> 01:00 today is 1h away.
+check(
+  "Schedules later today when the hour is still ahead",
+  sched.msUntilNextRun(1, new Date("2026-07-25T00:00:00")) === 3600000,
+);
+// Exactly at the hour should go to tomorrow, not fire in a zero-delay loop.
+check(
+  "Exactly at the target hour schedules for tomorrow, not immediately",
+  sched.msUntilNextRun(1, new Date("2026-07-25T01:00:00")) === 24 * 3600000,
+);
+check(
+  "A different hour is honoured",
+  sched.msUntilNextRun(6, new Date("2026-07-25T00:00:00")) === 6 * 3600000,
+);
+check(
+  "Delay is always positive",
+  [0, 1, 6, 13, 23].every((h) => sched.msUntilNextRun(h, new Date("2026-07-25T13:37:00")) > 0),
+);
+
+check(
+  "Scheduler settings have defaults",
+  settingsSvc.getGeneralSettings().nightly_refresh_enabled === "1" &&
+    settingsSvc.getGeneralSettings().nightly_refresh_hour === "1",
+);
+check(
+  "Scheduler settings are whitelisted (saveable)",
+  settingsSvc.saveGeneralSettings({ nightly_refresh_hour: "3" }).saved.includes("nightly_refresh_hour"),
+);
+
+console.log("\n10. Summary endpoint (Prime_Dashboard consumer)");
+const summarySvc = await import("../services/summaryService.js");
+
+// Give the trader holder a quote so day-change math has something to work on.
+const nvdaSecId = db.prepare("SELECT id FROM securities WHERE symbol='NVDA'").get().id;
+db.prepare(
+  `INSERT INTO quotes_cache (security_id, last_price, prev_close, source)
+   VALUES (?, 110, 100, 'yahoo')
+   ON CONFLICT(security_id) DO UPDATE SET last_price=110, prev_close=100`,
+).run(nvdaSecId);
+
+const snap = summarySvc.getDashboardSummary(traderHolder.id);
+check("Summary has an asOf timestamp", typeof snap.asOf === "string");
+check("Summary reports portfolio headline numbers", snap.portfolio.positionCount >= 1);
+check("Summary rolls lots up to a ticker count", snap.portfolio.tickerCount >= 1);
+// Derived from actual holdings rather than hardcoded -- earlier sections
+// buy and sell against this holder, so the share count isn't fixed.
+const heldNvda = tx
+  .listOpenPositions(traderHolder.id)
+  .filter((p) => p.symbol === "NVDA")
+  .reduce((sum, p) => sum + p.quantity_remaining, 0);
+check(
+  "Day change is computed from prev close, not cost basis",
+  Math.abs(snap.portfolio.dayChange - heldNvda * (110 - 100)) < 1e-6,
+);
+check(
+  "Day change percent is relative to prev close",
+  Math.abs(snap.portfolio.dayChangePercent - 10) < 1e-6,
+);
+check("Top movers are returned", snap.topMovers.length >= 1);
+check("Top movers carry symbol and day change", snap.topMovers[0].symbol === "NVDA");
+check("Summary includes alert counts", typeof snap.alerts.activeCount === "number");
+check("Summary includes watchlist count", typeof snap.watchlist.activeCount === "number");
+check("Summary reports quote freshness", "newestFetchedAt" in snap.quotes);
+
+check("moverLimit is honoured", summarySvc.getDashboardSummary(traderHolder.id, { moverLimit: 1 }).topMovers.length <= 1);
+
+// A holder with nothing shouldn't blow up or emit misleading zeros-as-facts.
+const emptySnap = summarySvc.getDashboardSummary(freshHolder.id);
+check("Empty portfolio returns a valid snapshot", emptySnap.portfolio.positionCount === 0);
+check("Empty portfolio reports null day change, not 0", emptySnap.portfolio.dayChange === null);
+check("Empty portfolio has no movers", emptySnap.topMovers.length === 0);
+
+// Movers sort by absolute move, so a big drop ranks alongside a big gain.
+const msftSecId = db.prepare("SELECT id FROM securities WHERE symbol='MSFT'").get().id;
+db.prepare(
+  `INSERT INTO quotes_cache (security_id, last_price, prev_close, source)
+   VALUES (?, 50, 100, 'yahoo')
+   ON CONFLICT(security_id) DO UPDATE SET last_price=50, prev_close=100`,
+).run(msftSecId);
+await tx.recordBuy({
+  holderId: traderHolder.id, symbol: "MSFT", transactionDate: "2026-01-01",
+  quantity: 10, price: 100, fees: 0,
+});
+const withLoser = summarySvc.getDashboardSummary(traderHolder.id);
+check(
+  "A -50% mover outranks a +10% mover",
+  withLoser.topMovers[0].symbol === "MSFT" && withLoser.topMovers[0].dayChangePercent < 0,
+);
+
+console.log("\n11. Journal / Strategy Lab");
+const journalSvc = await import("../services/journalService.js");
+
+// A second, unrelated source for the many-to-many tests below -- NOT
+// personSource, which section 5d already deleted as part of its own
+// retype/delete coverage (see line ~460).
+const podcastSource = sourcesSvc.createSource({ name: "Some Podcast", type: "website" });
+
+let missingTitleRejected = false;
+try {
+  journalSvc.createStrategy({ sources: [{ sourceId: bookSource.id }] });
+} catch {
+  missingTitleRejected = true;
+}
+check("createStrategy rejects a missing title", missingTitleRejected);
+
+let missingSourcesRejected = false;
+try {
+  journalSvc.createStrategy({ title: "No sources" });
+} catch {
+  missingSourcesRejected = true;
+}
+check("createStrategy rejects zero sources (a strategy must start tagged to at least one)", missingSourcesRejected);
+
+const strategy = journalSvc.createStrategy({
+  title: "Buy the dip",
+  notes: "wait for a 10% pullback",
+  sources: [{ sourceId: bookSource.id, chapter: "Chapter 4", pageNumber: 42 }],
+});
+check("createStrategy returns the new row", strategy.id != null && strategy.title === "Buy the dip");
+check("createStrategy returns the tagged source", strategy.sources.length === 1 && strategy.sources[0].source_name === bookSource.name);
+check(
+  "The initial source tag carries its chapter/page",
+  strategy.sources[0].chapter === "Chapter 4" && strategy.sources[0].page_number === 42,
+);
+
+// The whole point of the redesign: the same strategy tagged with a second,
+// unrelated source (a podcast, not the book) -- with its own notes, no
+// chapter/page since that's a book-only concept.
+const strategyWithSecondTag = journalSvc.addStrategySource(strategy.id, {
+  sourceId: podcastSource.id,
+  notes: "also recommends this on their show",
+});
+check("addStrategySource returns the new tag row", strategyWithSecondTag.source_id === podcastSource.id);
+check(
+  "getStrategy now shows both tagged sources",
+  journalSvc.getStrategy(strategy.id).sources.length === 2,
+);
+
+let duplicateTagRejected = false;
+try {
+  journalSvc.addStrategySource(strategy.id, { sourceId: bookSource.id });
+} catch (err) {
+  duplicateTagRejected = /already tagged/.test(err.message);
+}
+check("addStrategySource rejects tagging the same source twice", duplicateTagRejected);
+
+let addSourceOnMissingStrategyRejected = false;
+try {
+  journalSvc.addStrategySource(999999, { sourceId: bookSource.id });
+} catch (err) {
+  addSourceOnMissingStrategyRejected = /not found/i.test(err.message);
+}
+check("addStrategySource rejects an unknown strategy id", addSourceOnMissingStrategyRejected);
+
+const strategiesForBookSource = journalSvc.listStrategies({ sourceId: bookSource.id });
+const strategiesForPodcastSource = journalSvc.listStrategies({ sourceId: podcastSource.id });
+check(
+  "listStrategies({sourceId}) finds a strategy tagged with that source, regardless of which other sources it's also tagged with",
+  strategiesForBookSource.some((s) => s.id === strategy.id) && strategiesForPodcastSource.some((s) => s.id === strategy.id),
+);
+check(
+  // source_names is alphabetical ("Some Podcast" sorts before "Trading in the Zone").
+  "listStrategies aggregates both tagged source names",
+  strategiesForBookSource.find((s) => s.id === strategy.id)?.source_names === `${podcastSource.name}, ${bookSource.name}`,
+);
+check(
+  "A fresh strategy starts with zero linked ideas",
+  strategiesForBookSource.find((s) => s.id === strategy.id)?.idea_count === 0,
+);
+check(
+  "listStrategies with an unrelated sourceId excludes it",
+  !journalSvc.listStrategies({ sourceId: 999999 }).some((s) => s.id === strategy.id),
+);
+
+const updatedStrategy = journalSvc.updateStrategy(strategy.id, { title: "Buy the dip (revised)" });
+check("updateStrategy persists the title change", updatedStrategy.title === "Buy the dip (revised)");
+check("updateStrategy leaves source tags alone", updatedStrategy.sources.length === 2);
+
+const bookTagId = journalSvc.getStrategy(strategy.id).sources.find((s) => s.source_id === bookSource.id).id;
+const editedTag = journalSvc.updateStrategySource(bookTagId, { chapter: "Chapter 5", pageNumber: 88 });
+check("updateStrategySource changes that tag's chapter/page", editedTag.chapter === "Chapter 5" && editedTag.page_number === 88);
+check(
+  "updateStrategySource doesn't touch the other tag",
+  journalSvc.getStrategy(strategy.id).sources.find((s) => s.source_id === podcastSource.id).chapter === null,
+);
+
+const podcastTagId = journalSvc.getStrategy(strategy.id).sources.find((s) => s.source_id === podcastSource.id).id;
+const removeFirstTag = journalSvc.removeStrategySource(podcastTagId);
+check("removeStrategySource removes exactly one tag", removeFirstTag.deleted === 1);
+check(
+  "The strategy survives with just the remaining tag",
+  journalSvc.getStrategy(strategy.id).sources.length === 1,
+);
+// Removing the LAST tag is permitted too -- a strategy isn't force-deleted
+// just because it's (temporarily) untagged from every source.
+const lastTagId = journalSvc.getStrategy(strategy.id).sources[0].id;
+journalSvc.removeStrategySource(lastTagId);
+check(
+  "Removing the last tag leaves the strategy itself intact, just source-less",
+  journalSvc.getStrategy(strategy.id) != null && journalSvc.getStrategy(strategy.id).sources.length === 0,
+);
+check("getStrategy returns null for an unknown id", journalSvc.getStrategy(999999) === null);
+
+// Re-tag with both sources for the rest of the ideas/execute tests below --
+// the book keeps its chapter/page, the podcast tag has none (that's only a
+// book concept), which is exactly the per-source distinction this redesign
+// exists to support.
+journalSvc.addStrategySource(strategy.id, { sourceId: bookSource.id, chapter: "Chapter 4", pageNumber: 42 });
+journalSvc.addStrategySource(strategy.id, { sourceId: podcastSource.id });
+
+let ideaMissingSourceRejected = false;
+try {
+  await journalSvc.recordJournalIdea({
+    holderId: traderHolder.id,
+    symbol: "NVDA",
+    orderType: "WATCH",
+    skipBackfill: true,
+  });
+} catch {
+  ideaMissingSourceRejected = true;
+}
+check("recordJournalIdea rejects a missing sourceId", ideaMissingSourceRejected);
+
+const idea = await journalSvc.recordJournalIdea({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  orderType: "BUY_LIMIT",
+  targetPrice: 50,
+  sourceId: bookSource.id,
+  strategyId: strategy.id,
+  notes: "book says buy under $50",
+  skipBackfill: true,
+});
+check("recordJournalIdea creates a watched_item", idea.id != null && idea.buy_price_high === 50);
+check("recordJournalIdea forces is_paper_trade regardless of caller input", idea.is_paper_trade === 1);
+check("A new idea starts WATCHING", idea.status === "WATCHING");
+
+const ideasList = journalSvc.listJournalIdeas(traderHolder.id, {});
+const listedIdea = ideasList.find((i) => i.id === idea.id);
+check("listJournalIdeas returns the new idea", listedIdea != null);
+check("listJournalIdeas joins the source name", listedIdea?.source_name === bookSource.name);
+check("listJournalIdeas joins the strategy title", listedIdea?.strategy_title === "Buy the dip (revised)");
+check(
+  "listJournalIdeas resolves the chapter/page from THIS idea's specific (strategy, source) tag",
+  listedIdea?.strategy_chapter === "Chapter 4" && listedIdea?.strategy_page_number === 42,
+);
+
+// Same strategy, but sourced from the podcast instead of the book -- the
+// per-source join should surface that tag's (empty) chapter/page instead of
+// leaking the book's. This is the actual payoff of the many-to-many redesign.
+const ideaViaPodcast = await journalSvc.recordJournalIdea({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  orderType: "WATCH",
+  sourceId: podcastSource.id,
+  strategyId: strategy.id,
+  skipBackfill: true,
+});
+const listedIdeaViaPodcast = journalSvc
+  .listJournalIdeas(traderHolder.id, {})
+  .find((i) => i.id === ideaViaPodcast.id);
+check(
+  "The same strategy via a different source resolves that source's own (null) chapter/page, not the book's",
+  listedIdeaViaPodcast?.strategy_title === "Buy the dip (revised)" &&
+    listedIdeaViaPodcast?.strategy_chapter === null &&
+    listedIdeaViaPodcast?.strategy_page_number === null,
+);
+
+check(
+  "listJournalIdeas can filter by strategyId",
+  journalSvc.listJournalIdeas(traderHolder.id, { strategyId: strategy.id }).length === 2,
+);
+check(
+  "listJournalIdeas can filter by an unrelated strategyId (returns nothing)",
+  journalSvc.listJournalIdeas(traderHolder.id, { strategyId: 999999 }).length === 0,
+);
+
+// The regular Watchlist view must never show this paper idea mixed in with
+// real watches -- this is the specific gap closed alongside the Journal
+// module (see server.js's GET /api/watched-items, which now defaults to
+// isPaperTrade=false for exactly this reason).
+check(
+  "The paper idea is invisible to a real-only watched-items query",
+  wlSvc.listWatchedItems(traderHolder.id, { isPaperTrade: false }).every((w) => w.id !== idea.id),
+);
+check(
+  "The paper idea IS visible when isPaperTrade=true is requested",
+  wlSvc.listWatchedItems(traderHolder.id, { isPaperTrade: true }).some((w) => w.id === idea.id),
+);
+
+// executeJournalIdea must refuse a real (non-paper) watched item -- reusing
+// it on the wrong kind of row would be a silent logic error, not a crash.
+const realWatch = await addWatchedItem({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  orderType: "WATCH",
+  skipBackfill: true,
+});
+let realItemExecuteRejected = false;
+try {
+  await journalSvc.executeJournalIdea(traderHolder.id, realWatch.id, {
+    transactionDate: "2026-07-01",
+    quantity: 10,
+    price: 45,
+  });
+} catch (err) {
+  realItemExecuteRejected = /already a real watched item/.test(err.message);
+}
+check("executeJournalIdea refuses a non-paper watched item", realItemExecuteRejected);
+
+const openPositionsBeforeExecute = tx.listOpenPositions(traderHolder.id).length;
+const executed = await journalSvc.executeJournalIdea(traderHolder.id, idea.id, {
+  transactionDate: "2026-07-15",
+  quantity: 25,
+  price: 48.5,
+  fees: 1,
+  notes: "actually pulled the trigger",
+});
+check("executeJournalIdea returns the new transaction", executed.transaction.transaction_type === "BUY");
+check("Executed transaction is real, not paper", executed.transaction.is_paper_trade === 0);
+check("Executed transaction links back to the idea", executed.transaction.watched_item_id === idea.id);
+check("Executed transaction carries the idea's source", executed.transaction.source_id === bookSource.id);
+check(
+  "Execution does NOT reuse the paper target price -- the real fill (48.5) is what's stored",
+  executed.transaction.price === 48.5,
+);
+check("The idea itself is marked EXECUTED", executed.item.status === "EXECUTED");
+check(
+  "Executing opens a real, tracked open position",
+  tx.listOpenPositions(traderHolder.id).length === openPositionsBeforeExecute + 1,
+);
+
+let doubleExecuteRejected = false;
+try {
+  await journalSvc.executeJournalIdea(traderHolder.id, idea.id, {
+    transactionDate: "2026-07-16",
+    quantity: 5,
+    price: 49,
+  });
+} catch (err) {
+  doubleExecuteRejected = /Cannot execute an idea with status EXECUTED/.test(err.message);
+}
+check("An already-executed idea cannot be executed again", doubleExecuteRejected);
+
+check(
+  "executeJournalIdea rejects an unknown idea id",
+  await journalSvc
+    .executeJournalIdea(traderHolder.id, 999999, { transactionDate: "2026-07-16", quantity: 1, price: 1 })
+    .then(() => false)
+    .catch((err) => /not found/i.test(err.message)),
+);
+
+// Abandoning a paper idea that was never executed just deletes it -- reuses
+// deleteWatchedItems, so cascade rules (alerts, etc.) are already covered.
+const abandonedIdea = await journalSvc.recordJournalIdea({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  orderType: "WATCH",
+  sourceId: bookSource.id,
+  skipBackfill: true,
+});
+const abandonResult = journalSvc.deleteJournalIdeas(traderHolder.id, [abandonedIdea.id]);
+check("Abandoning an idea removes it", abandonResult.deleted === 1);
+
+// Deleting a strategy should not take its ideas down with it -- the schema's
+// ON DELETE SET NULL means the idea survives, just loses the strategy tag.
+const throwawayStrategy = journalSvc.createStrategy({
+  title: "Throwaway",
+  sources: [{ sourceId: bookSource.id }],
+});
+const strategyIdea = await journalSvc.recordJournalIdea({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  orderType: "WATCH",
+  sourceId: bookSource.id,
+  strategyId: throwawayStrategy.id,
+  skipBackfill: true,
+});
+journalSvc.deleteStrategy(throwawayStrategy.id);
+check(
+  "Deleting a strategy leaves its ideas intact with strategy_id cleared",
+  db.prepare("SELECT strategy_id FROM watched_items WHERE id = ?").get(strategyIdea.id).strategy_id === null,
+);
+check(
+  "The orphaned idea is still listed",
+  journalSvc.listJournalIdeas(traderHolder.id, {}).some((i) => i.id === strategyIdea.id),
+);
+check(
+  "Deleting a strategy CASCADEs its strategy_sources tag rows (no orphans left behind)",
+  db.prepare("SELECT COUNT(*) AS n FROM strategy_sources WHERE strategy_id = ?").get(throwawayStrategy.id).n === 0,
+);
+
+// Deleting a SOURCE (not a strategy) should only remove that one tag, not the
+// strategy -- exercising strategy_sources.source_id's own ON DELETE CASCADE,
+// which is new in schema v5.
+const throwawaySource = sourcesSvc.createSource({ name: "Throwaway Podcast", type: "website" });
+const multiTaggedStrategy = journalSvc.createStrategy({
+  title: "Tagged with a soon-to-be-deleted source",
+  sources: [{ sourceId: bookSource.id }, { sourceId: throwawaySource.id }],
+});
+sourcesSvc.deleteSource(throwawaySource.id);
+const afterSourceDelete = journalSvc.getStrategy(multiTaggedStrategy.id);
+check(
+  "Deleting a source removes only that source's tag",
+  afterSourceDelete.sources.length === 1 && afterSourceDelete.sources[0].source_id === bookSource.id,
+);
+check("The strategy itself survives the source deletion", afterSourceDelete != null);
+
+console.log("\n12. Book ISBN lookup (pure functions -- see openLibraryProvider.js)");
+const { normalizeIsbn, parseBookLookupResponse } = await import(
+  "../services/providers/openLibraryProvider.js"
+);
+
+check("normalizeIsbn accepts a clean ISBN-13", normalizeIsbn("9780735201446") === "9780735201446");
+check(
+  "normalizeIsbn strips hyphens and spaces",
+  normalizeIsbn("978-0-7352-0144-6") === "9780735201446",
+);
+check("normalizeIsbn accepts ISBN-10 with a trailing X", normalizeIsbn("080442957X") === "080442957X");
+check("normalizeIsbn upper-cases a lowercase x", normalizeIsbn("080442957x") === "080442957X");
+check("normalizeIsbn rejects too-short input", normalizeIsbn("12345") === null);
+check("normalizeIsbn rejects non-numeric junk", normalizeIsbn("not-an-isbn") === null);
+check("normalizeIsbn rejects empty/undefined input", normalizeIsbn("") === null && normalizeIsbn(undefined) === null);
+
+// Sample shape of Open Library's actual jscmd=data response.
+const sampleResponse = {
+  "ISBN:9780735201446": {
+    title: "Trading in the Zone",
+    authors: [{ name: "Mark Douglas", url: "https://openlibrary.org/authors/OL123A" }],
+    publish_date: "2000",
+  },
+};
+check(
+  "parseBookLookupResponse extracts title and author",
+  (() => {
+    const r = parseBookLookupResponse("9780735201446", sampleResponse);
+    return r?.title === "Trading in the Zone" && r?.author === "Mark Douglas";
+  })(),
+);
+check(
+  "parseBookLookupResponse joins multiple authors",
+  (() => {
+    const multi = {
+      "ISBN:111": { title: "Co-Written Book", authors: [{ name: "A" }, { name: "B" }] },
+    };
+    return parseBookLookupResponse("111", multi).author === "A, B";
+  })(),
+);
+check(
+  "parseBookLookupResponse handles no authors listed",
+  (() => {
+    const noAuthor = { "ISBN:222": { title: "Anonymous Work" } };
+    return parseBookLookupResponse("222", noAuthor).author === null;
+  })(),
+);
+check(
+  "parseBookLookupResponse returns null when the ISBN isn't in the response (no match)",
+  parseBookLookupResponse("9999999999999", sampleResponse) === null,
+);
+check(
+  "parseBookLookupResponse returns null for a malformed/empty response",
+  parseBookLookupResponse("9780735201446", {}) === null &&
+    parseBookLookupResponse("9780735201446", null) === null,
+);
+check(
+  "parseBookLookupResponse returns null for an entry with no title",
+  parseBookLookupResponse("333", { "ISBN:333": { authors: [{ name: "Ghost" }] } }) === null,
+);
+
 console.log("\n9. Frontend wiring: every getElementById target exists in index.html");
 // This suite can't click buttons, but it CAN catch the most common way the UI
 // silently breaks: JS reaching for an element id that the HTML doesn't have
@@ -1163,6 +2039,9 @@ const uiModules = [
   "public/js/modules/dashboard/index.js",
   "public/js/modules/watchlist/index.js",
   "public/js/modules/settings/index.js",
+  "public/js/modules/journal/index.js",
+  "public/js/modules/papertrade/index.js",
+  "public/js/modules/alerts/index.js",
 ];
 let idsChecked = 0;
 const missingIds = [];
@@ -1181,7 +2060,7 @@ check(
 );
 if (missingIds.length > 0) console.log("      missing:", missingIds.join(", "));
 
-for (const selector of [".settings-panel", ".orders-panel", ".source-panel", ".view-btn"]) {
+for (const selector of [".settings-panel", ".orders-panel", ".source-panel", ".journal-panel", ".papertrade-panel", ".alerts-bell", ".view-btn"]) {
   check(`index.html contains elements matching ${selector}`, indexHtml.includes(selector.slice(1)));
 }
 

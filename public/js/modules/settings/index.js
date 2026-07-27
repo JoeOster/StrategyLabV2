@@ -6,9 +6,12 @@ import {
   renderSourcesPanel,
   renderHoldersPanel,
   renderExchangesPanel,
+  renderColumnsPanel,
   SOURCE_NAME_LABELS,
 } from "./render.js";
 import { sourceFormToPayload, sourceToFormValues, generalFormToPayload } from "./handlers.js";
+import { loadColumnPrefs, openColumnDialog } from "../shared/columnPrefs.js";
+import { TABLE_REGISTRY } from "../shared/tableRegistry.js";
 
 const state = {
   activePanel: "lists",
@@ -29,6 +32,12 @@ export async function initializeSettingsModule({ onChange } = {}) {
   els.holders = document.getElementById("settings-holders");
   els.exchanges = document.getElementById("settings-exchanges");
   els.generalForm = document.getElementById("general-settings-form");
+  els.columns = document.getElementById("settings-columns");
+
+  els.columnDialog = document.getElementById("column-dialog");
+  els.columnDialogList = document.getElementById("column-dialog-list");
+  els.columnResetBtn = document.getElementById("column-reset-btn");
+  els.columnDoneBtn = document.getElementById("column-done-btn");
 
   els.addListBtn = document.getElementById("settings-add-list-btn");
   els.addSourceBtn = document.getElementById("settings-add-source-btn");
@@ -42,6 +51,7 @@ export async function initializeSettingsModule({ onChange } = {}) {
   els.sourceDialogTitle = document.getElementById("source-dialog-title");
   els.sourceCancelBtn = document.getElementById("source-cancel-btn");
   els.sourcePanels = [...document.querySelectorAll(".source-panel")];
+  els.bookIsbnStatus = document.getElementById("book-isbn-status");
 
   els.promptDialog = document.getElementById("prompt-dialog");
   els.promptForm = document.getElementById("prompt-form");
@@ -61,6 +71,7 @@ export async function initializeSettingsModule({ onChange } = {}) {
   els.sources.addEventListener("click", handleSourcesAction);
   els.holders.addEventListener("click", handleHoldersAction);
   els.exchanges.addEventListener("click", handleExchangesAction);
+  els.columns.addEventListener("click", handleColumnsAction);
 
   els.addListBtn.addEventListener("click", handleAddList);
   els.addSourceBtn.addEventListener("click", () => openSourceDialog(null));
@@ -70,6 +81,7 @@ export async function initializeSettingsModule({ onChange } = {}) {
   els.sourceTypeSelect.addEventListener("change", updateSourcePanels);
   els.sourceCancelBtn.addEventListener("click", () => els.sourceDialog.close());
   els.sourceForm.addEventListener("submit", handleSourceSubmit);
+  els.sourceForm.elements.book_isbn.addEventListener("input", debounce(handleIsbnLookup, 500));
   els.generalForm.addEventListener("submit", handleGeneralSubmit);
 
   await refreshActivePanel();
@@ -125,6 +137,9 @@ async function refreshActivePanel() {
         }
         break;
       }
+      case "columns":
+        renderColumnsSummary();
+        break;
     }
   } catch (err) {
     banner(err.message, true);
@@ -183,9 +198,43 @@ function updateSourcePanels() {
   els.sourceNameLabel.textContent = SOURCE_NAME_LABELS[type] || "Name";
 }
 
+/**
+ * Debounced on the ISBN field's `input` event. A convenience only -- never
+ * overwrites a field the user has already typed something into, and any
+ * failure (no match, network hiccup) just falls back to silent manual entry
+ * rather than a blocking error banner.
+ */
+async function handleIsbnLookup() {
+  const isbn = els.sourceForm.elements.book_isbn.value.replace(/[\s-]/g, "");
+  if (!/^\d{9}[\dXx]$/.test(isbn) && !/^\d{13}$/.test(isbn)) {
+    els.bookIsbnStatus.hidden = true;
+    return;
+  }
+  els.bookIsbnStatus.hidden = false;
+  els.bookIsbnStatus.textContent = "Looking up…";
+  try {
+    const result = await api.fetchBookByIsbn(isbn);
+    if (!result) {
+      els.bookIsbnStatus.textContent = "No match found — enter details manually.";
+      return;
+    }
+    els.bookIsbnStatus.textContent = `Found: ${result.title}${result.author ? ` by ${result.author}` : ""}`;
+    if (!els.sourceForm.elements.name.value.trim()) {
+      els.sourceForm.elements.name.value = result.title;
+    }
+    if (result.author && !els.sourceForm.elements.book_author.value.trim()) {
+      els.sourceForm.elements.book_author.value = result.author;
+    }
+  } catch {
+    els.bookIsbnStatus.textContent = "Lookup unavailable right now — enter details manually.";
+  }
+}
+
 async function openSourceDialog(sourceId) {
   els.sourceForm.reset();
   els.sourceForm.elements.id.value = "";
+  els.bookIsbnStatus.hidden = true;
+  els.bookIsbnStatus.textContent = "";
   els.sourceDialogTitle.textContent = sourceId ? "Edit Source" : "New Source";
 
   if (sourceId) {
@@ -286,6 +335,40 @@ async function handleExchangesAction(event) {
   await run(() => api.deleteExchange(Number(btn.dataset.id)), "Exchange deleted.");
 }
 
+// --- Table Columns ------------------------------------------------------------
+// Reads TABLE_REGISTRY (shared/tableRegistry.js) so this list -- and the
+// dialog it opens -- automatically covers any table added there later,
+// without needing new Settings code per table.
+
+function renderColumnsSummary() {
+  const tables = TABLE_REGISTRY.map((t) => {
+    const prefs = loadColumnPrefs(t.storageKey, t.columns);
+    return { id: t.id, label: t.label, visibleCount: prefs.visible.length, totalCount: t.columns.length };
+  });
+  els.columns.innerHTML = renderColumnsPanel(tables);
+}
+
+function handleColumnsAction(event) {
+  const btn = event.target.closest('button[data-action="configure-columns"]');
+  if (!btn) return;
+  const table = TABLE_REGISTRY.find((t) => t.id === btn.dataset.tableId);
+  if (!table) return;
+
+  openColumnDialog({
+    dialog: els.columnDialog,
+    listEl: els.columnDialogList,
+    resetBtn: els.columnResetBtn,
+    doneBtn: els.columnDoneBtn,
+    allColumns: table.columns,
+    storageKey: table.storageKey,
+    // The dialog itself lives outside this panel and can be opened from a
+    // table's own "⚙ Columns" button too -- re-reading from localStorage
+    // (rather than trusting in-memory state) keeps the "N of M shown" count
+    // correct regardless of which entry point last changed it.
+    onChange: renderColumnsSummary,
+  });
+}
+
 // --- General ----------------------------------------------------------------
 
 async function handleGeneralSubmit(event) {
@@ -364,4 +447,14 @@ function confirmAction(title, message) {
     els.confirmDialog.addEventListener("close", onCancel);
     els.confirmDialog.showModal();
   });
+}
+
+// ISBN lookup shouldn't fire on every keystroke -- mirrors the same
+// debounce pattern orders/index.js uses for its symbol-driven lot lookup.
+function debounce(fn, ms) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
 }
