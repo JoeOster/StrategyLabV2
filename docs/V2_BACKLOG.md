@@ -45,6 +45,73 @@ points here. That's the placeholder to replace.
 
 ---
 
+## Backtesting / AI trade evaluation — multi-agent design (scoped 2026-08-09)
+
+**Where this came from:** evaluated a paid product, AlphaAgents.ai ("AI
+Trading Floor" — 4 Claude Code agents wrapping public strategies like
+Minervini VCP / CANSLIM, sold via a Facebook-ad funnel). Verdict: skip
+buying it — anonymous seller, no refunds above $7, an aggressive perpetual
+license grab on any strategy you submit to their "custom build" service, no
+independent reviews. But the underlying pattern (researcher → backtester →
+auditor → chart agents) is a reasonable design, worth building against this
+app's own schema for free when Phase 2 actually starts. Full writeup of the
+product evaluation exists outside this repo if it's ever needed again — the
+short version is above.
+
+**Still gated by STATUS.md's Phase 2 rule** ("AI-assisted trade evaluation
+and strategy backtesting... deferred on purpose until the core app is
+solid") — this section is a design to pick up cold later, not a plan to
+start now.
+
+### How the 4-agent pattern maps onto this app
+
+1. **Strategy Agent (Researcher)** — the structured-extraction sibling of
+   the "Ticker research skill" above: instead of researching a *ticker*, it
+   extracts entry/exit/position-sizing rules from a source (book, video,
+   podcast) into a brief. Today `strategies` is just `title` + `notes`
+   (free text) tied to sources via `strategy_sources` — nothing structured
+   enough for a script to execute. Open question: a `rules_json` column on
+   `strategies`, or a new 1:1 extension table (`strategy_backtest_rules`)
+   matching the pattern already used for `advice_source_*_details`? The
+   extension-table shape fits this schema's existing conventions better
+   than a JSON blob.
+2. **Backtesting Agent (Quant)** — not really an LLM job. A script (that an
+   agent writes, or a fixed one an agent calls) reads `historical_prices` +
+   `dividends`/`splits` for the strategy's securities and simulates the
+   rule set day-by-day. Needs somewhere to land results — new
+   `backtest_runs` / `backtest_trades` tables (same shape as
+   `transactions`, flagged synthetic) so runs are queryable/comparable
+   later, not just chat output that evaporates.
+3. **Auditor Agent (Risk Manager)** — the highest value-to-effort piece, and
+   the one to prototype first, independent of the rest. A separate subagent
+   context (deliberately not the one that ran the backtest — an agent
+   shouldn't grade its own work) reviewing a `backtest_run` for lookahead
+   bias, curve-fitting, single-outlier dependency, and regime-only
+   performance. Usable standalone against even one hand-built backtest,
+   before the Strategy/Chart agents exist.
+4. **Chart Agent (Visual Analyst)** — lowest priority. Plots
+   `backtest_trades` over `historical_prices` candles so a strategy's
+   numbers can be sanity-checked visually (e.g. a 60% win rate that's
+   secretly just catching one regime). Straightforward once
+   `backtest_trades` exists.
+
+### Suggested build order, whenever this gets picked up
+
+1. `strategy_backtest_rules` extension table + a way to hand-enter one
+   strategy's rules — skip the "extract from source" automation at first;
+   prove the backtest engine on one manually-encoded strategy.
+2. Backtest engine consuming `historical_prices`/`dividends`/`splits`,
+   writing `backtest_runs`/`backtest_trades`.
+3. Auditor agent reviewing a `backtest_run` — usable on its own before step
+   4 or 5 exist.
+4. Strategy Agent automation (source → structured rules) — same shape as
+   the Ticker research skill above; worth sharing conventions between the
+   two rather than solving "skill output: saved to DB vs. printed in chat"
+   twice.
+5. Chart agent last.
+
+---
+
 ## Finnhub-powered news in the detail panel
 
 Separate from the skill above and complementary to it: Finnhub's free tier
@@ -127,6 +194,8 @@ separate project, not StrategyLabV2 code:
   changes currently mean rebuild-and-lose-data (guarded by the version
   check). Once there's data worth keeping, this needs numbered migration
   files.
-- **Backtesting / AI trade evaluation.** The original Phase 2. The data it
-  needs (`historical_prices`, `dividends`, `splits`) is already being
-  collected.
+- ~~**Backtesting / AI trade evaluation.**~~ The original Phase 2, still not
+  started (deliberately — see STATUS.md). Design scoped as a 4-agent
+  pipeline -- see "Backtesting / AI trade evaluation — multi-agent design"
+  above for the researcher/backtester/auditor/chart-agent breakdown and
+  suggested build order.
