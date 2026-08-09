@@ -45,6 +45,74 @@ points here. That's the placeholder to replace.
 
 ---
 
+## Fidelity ledger sync via browser automation (idea captured 2026-08-09)
+
+**What Joe described:** the manual process of keeping "what's currently
+owned" up to date is a real pain point. Idea: Claude in Chrome could click
+Fidelity's own "update"/refresh control, navigate to the activity/ledger
+page, and capture the transaction data directly from the rendered page —
+sidestepping the fact that "Fidelity has a poor and undocumented API."
+
+**Why this beats hand-writing a Fidelity CSV parser:** the existing **CSV
+import** item (see "Other deferred items" below) assumed someone would
+export a CSV and write a parser for Fidelity's specific format. Reading the
+ledger page directly with browser automation skips needing to reverse-engineer
+that format or any undocumented API at all — it reads exactly what a human
+would see, using the session you're already logged into. **This is a
+different shape of feature than CSV import, not just a different data
+source**: it's chat-invoked (you ask for a sync in a session with the Chrome
+extension connected), not a server-side file upload — same shape as the
+Ticker research skill above, not a new API endpoint.
+
+**The useful design insight:** `import_raw_rows.raw_data` is already just
+"JSON blob of the original CSV row" (`schema.sql`) — nothing about that
+staging table actually requires the JSON to have come from a CSV file. A
+scraped ledger row can land in `import_raw_rows` exactly the same way,
+reusing the whole existing reconciliation pipeline (`import_batches` →
+`import_raw_rows` → matched/flagged/reconciled into `transactions`) —
+**this becomes the second producer for a pipeline the CSV import item
+already needs to build**, not a separate mechanism. Whichever gets built
+first (CSV parsing or the scrape) should design `import_raw_rows`'
+consumption side to not care which one wrote the row.
+
+**Sketch, if built as a Claude Code skill** (mirrors Ticker research skill's
+shape — `.claude/skills/fidelity-sync/SKILL.md`):
+
+1. Use the Chrome extension tools against the user's own already-logged-in
+   Fidelity session — reading a page you're already authenticated into is
+   fine; typing a Fidelity password never is (session rule, not specific to
+   this feature).
+2. Click through to trigger a refresh, then to the activity/transaction
+   ledger view; extract rows (`get_page_text`/`read_page`, not a screenshot
+   — need structured text, not pixels).
+3. Turn each extracted row into the same shape a CSV row would produce, and
+   insert into `import_raw_rows` under a new `import_batches` row
+   (`broker='fidelity'`, no `filename` — or a synthetic one noting it was
+   scraped, not uploaded).
+4. From there it's the CSV-import reconciliation flow, unmodified: match
+   against existing `transactions` (via `external_ref` — Fidelity's own
+   transaction id if the ledger page exposes one, otherwise the same
+   fingerprint approach CSV import already calls for:
+   `(account, ticker, date, type, qty, price)`), flag genuinely new rows,
+   let the user confirm before anything promotes into `transactions`. Don't
+   auto-commit scraped rows straight through — a page-structure change on
+   Fidelity's end should fail loudly (unexpected/missing fields), not
+   silently import garbage.
+
+**Open questions before building:**
+
+- Does Fidelity's ledger page expose its own transaction id anywhere in the
+  DOM, or is the fingerprint approach the only option? Changes how reliable
+  dedup is.
+- This only works in a session with Claude in Chrome connected and Fidelity
+  already logged in — worth being explicit that it's an on-demand chat
+  action ("sync my Fidelity ledger"), not something that runs unattended.
+- Whether to build the `import_raw_rows` → `transactions` reconciliation UI
+  (needed either way) before or alongside the scraping half — the
+  reconciliation side has value on its own once real CSV parsing exists too.
+
+---
+
 ## Backtesting / AI trade evaluation — multi-agent design (scoped 2026-08-09)
 
 **Where this came from:** evaluated a paid product, AlphaAgents.ai ("AI
@@ -287,7 +355,9 @@ separate project, not StrategyLabV2 code:
 - **CSV import** (`import_batches` → `import_raw_rows` → reconciled
   `transactions`). Schema exists and is idempotent-by-construction; no
   parsing code written. Broker formats to support: Fidelity, E-Trade,
-  Robinhood.
+  Robinhood. See "Fidelity ledger sync via browser automation" above —
+  browser-scraped rows and parsed-CSV rows can share this same
+  `import_raw_rows` reconciliation pipeline rather than needing two.
 - ~~**Journal / Strategy Lab module.**~~ Built -- see `STATUS.md`'s "Journal
   / Strategy Lab" section for the design and the judgment calls made. Left
   deliberately narrow for v1, worth revisiting: **executing a paper idea only
