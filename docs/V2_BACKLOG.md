@@ -415,12 +415,22 @@ none.
 
 **Open questions:**
 
-- **How are the 5-10 candidates chosen?** The realistic v1 answer: from the
-  user's own existing watchlist/held securities, not a fresh market-wide
-  screen -- this app doesn't have, and free-tier Yahoo/Finnhub don't cheaply
-  support, a "scan the whole market" capability, only what's already being
-  watched. A future index-constituent table would be new scope, not assumed
-  here.
+- **How are the 5-10 candidates chosen?** **Refined by Joe (2026-08-09,
+  later the same day): scoped by the technique/strategy itself, and never
+  the whole market -- exact mechanism still TBD.** He floated market
+  sectors/themes (tech, AI, space, etc.) as one shape this could take, not
+  a final decision. Worth flagging for whoever builds this: `securities`
+  already has `sector`/`industry` columns (standard GICS-style categories
+  from Yahoo's profile data), but "AI" and "Space" aren't GICS sectors --
+  they're cross-cutting investment themes (a stock can be Technology sector
+  *and* tagged AI *and* tagged Space simultaneously). If theme-based scoping
+  is the direction this ends up going, it likely needs its own many-to-many
+  tag concept, not a reuse of the single `sector` column as-is. Either way,
+  this app doesn't have, and free-tier Yahoo/Finnhub don't cheaply support,
+  a "scan the whole market" capability -- whatever the scoping mechanism
+  turns out to be, it has to work from what's already being tracked
+  (watched/held securities) or a small curated list, not a fresh universe
+  scan.
 - **Selection-bias risk, specific to forward-testing:** picking candidates
   *because* they already look like they're about to trigger the entry
   signal is the live-trading cousin of curve-fitting -- it flatters results
