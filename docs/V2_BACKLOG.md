@@ -347,6 +347,103 @@ Agent has real content to chew on:
    field) holds. Noted so a future session doesn't try to make the Chart
    Agent ingest course screenshots.
 
+### Forward-test validation: paper trading a backtested strategy for real (requested 2026-08-09)
+
+**What Joe asked for:** once a strategy has been backtested, automatically
+start a live paper-trading validation -- 5-10 real stocks, running for a
+configurable window (he suggested ~3 weeks), sized against a configurable
+starting capital (he suggested $10,000 default) -- so backtested performance
+gets checked against what actually happens going forward, not just historical
+simulation. "This will allow us to see actual usage."
+
+This is the piece that makes every disclaimer already threaded through this
+design mean something in practice: adj_close double-counting, curve-fitting,
+"hypothetical performance... does not reflect execution latency" are all
+really saying "a backtest can't prove a strategy works live." This is the
+mechanism that actually tests that, spending the app's paper money instead of
+real money.
+
+**Where this reuses existing infrastructure, and where it genuinely doesn't:**
+
+- Paper trades themselves need nothing new. `transactions` already supports
+  `is_paper_trade = 1` tagged to a `strategy_id` -- the same mechanism the
+  Journal/Strategy Lab tab already uses for one manually-entered paper idea,
+  just automated and running across several tickers at once.
+- **Entry/exit triggering does need something new.** `watched_items` /
+  `isTriggered()` today only understand a fixed price bound
+  (`buy_price_high`, `take_profit_low`, ...), not an arbitrary `rules_json`
+  condition (`close crosses_above sma_50`, etc.). This is the same
+  evaluation engine the Backtesting Agent needs to walk `rules_json`
+  day-by-day against historical data -- build it once as a shared
+  `evaluateRules(rulesJson, priceContext)` function, and it serves both: the
+  Backtesting Agent loops it over `historical_prices`, this feature calls it
+  once per scheduler tick against *current* data.
+- The existing 15-min market-hours scheduler (`alertScheduler.js`) is the
+  natural home for the live-checking half, not a new cron path. `BUGS.md`
+  items #7 and #8 (no re-entrancy guard on that scheduler; an uncaught error
+  can silently stop it rescheduling) get more important once it's also
+  carrying live paper-trade evaluation, not just price alerts -- worth fixing
+  those before this ships, not just noting they exist.
+
+**New tables:**
+```sql
+CREATE TABLE forward_test_runs (
+  id               INTEGER PRIMARY KEY,
+  strategy_id      INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+  backtest_run_id  INTEGER REFERENCES backtest_runs(id) ON DELETE SET NULL,
+  holder_id        INTEGER NOT NULL REFERENCES account_holders(id) ON DELETE CASCADE,
+  starting_capital REAL NOT NULL DEFAULT 10000,
+  start_date       TEXT NOT NULL,
+  end_date         TEXT NOT NULL,   -- start_date + configurable duration, default 3 weeks
+  status           TEXT NOT NULL DEFAULT 'running'
+                      CHECK (status IN ('running','completed','cancelled')),
+  created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE forward_test_candidates (
+  id                   INTEGER PRIMARY KEY,
+  forward_test_run_id  INTEGER NOT NULL REFERENCES forward_test_runs(id) ON DELETE CASCADE,
+  security_id          INTEGER NOT NULL REFERENCES securities(id) ON DELETE CASCADE,
+  allocated_capital    REAL NOT NULL,
+  UNIQUE (forward_test_run_id, security_id)
+);
+```
+`transactions` needs one new nullable column, `forward_test_run_id`, so
+paper trades this mechanism opens are traceable back to the batch that
+opened them -- distinct from a manually-logged Journal paper idea, which has
+none.
+
+**Open questions:**
+
+- **How are the 5-10 candidates chosen?** The realistic v1 answer: from the
+  user's own existing watchlist/held securities, not a fresh market-wide
+  screen -- this app doesn't have, and free-tier Yahoo/Finnhub don't cheaply
+  support, a "scan the whole market" capability, only what's already being
+  watched. A future index-constituent table would be new scope, not assumed
+  here.
+- **Selection-bias risk, specific to forward-testing:** picking candidates
+  *because* they already look like they're about to trigger the entry
+  signal is the live-trading cousin of curve-fitting -- it flatters results
+  the same way. Candidates should be chosen independent of current signal
+  state (e.g. "the N most liquid names already on the watchlist," fixed
+  before checking whether they currently qualify), not cherry-picked after
+  peeking. Worth its own audit-style check here too, not just for backtests.
+- **"3 weeks" is the run's total window, not each trade's hold time** --
+  individual trades open and close within it per the strategy's own
+  `exit_conditions.max_hold_days` (already in `rules_json`); a day-trading
+  strategy might cycle through many trades per candidate in that window, a
+  swing strategy far fewer. Worth being explicit so it isn't read as "hold
+  every position for exactly 3 weeks."
+- **What triggers a run starting?** User-confirmed after reviewing a
+  backtest (ideally after the Auditor hasn't flagged anything major),
+  matching the same human-approval-gate pattern already used for the
+  Strategy Agent's brief -- not automatic on every backtest, which would
+  burn through watchlist/scheduler capacity on every experimental run.
+- **Resolves, and depends on, the position-sizing concern logged above:**
+  `starting_capital` here is exactly the capital model that was missing for
+  backtested position-sizing to mean anything (concern #3 above) -- this
+  feature is what actually needs it built, not backtesting itself.
+
 ### Suggested build order, whenever this gets picked up
 
 1. `rules_json` column on `strategies` + a way to hand-enter one strategy's
@@ -361,6 +458,11 @@ Agent has real content to chew on:
    rather than solving "skill output: saved to DB vs. printed in chat"
    twice.
 5. Chart agent last.
+6. Forward-test validation (`forward_test_runs`/`forward_test_candidates` +
+   the shared `evaluateRules()` engine) — after the backtest engine exists,
+   since it reuses that same rule-evaluation logic rather than duplicating
+   it. Fix `BUGS.md` #7/#8 (scheduler re-entrancy + crash-on-error) before
+   this ships, since it adds real load to the same scheduler.
 
 ---
 
