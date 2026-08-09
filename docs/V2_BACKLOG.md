@@ -297,6 +297,56 @@ start now.
    secretly just catching one regime). Straightforward once
    `backtest_trades` exists.
 
+### Concerns raised once a real, incremental course is the source (not just a book)
+
+Raised 2026-08-09 once the actual first source material became concrete:
+Joe's paid StockNavigators.com membership (Money Zone Method + Expert Trader
+Program), captured via private Plaud transcripts/notes module by module over
+time — not a single static book chapter, which is what the design above
+implicitly assumed. Four things worth designing around before the Strategy
+Agent has real content to chew on:
+
+1. **The Strategy Agent needs its own fidelity check, not just the
+   backtest.** The Auditor above only reviews the *backtest*. The more
+   consequential failure mode is upstream: the Strategy Agent drifting from
+   what the source notes actually said while extracting `rules_json` --
+   inventing a threshold, dropping a condition, smoothing over an ambiguous
+   instruction. Real risk when the source is paid course content being
+   translated into money-affecting rules, not an abstract one. The existing
+   human-approval gate ("produces a clean brief for your approval before
+   testing") helps but isn't a fidelity check by itself -- worth adding an
+   explicit second layer, the same adversarial-verify pattern already
+   planned for the Auditor (a check whose only job is "does every claim in
+   this brief trace back to the source notes"), applied one step earlier in
+   the pipeline.
+2. **`rules_json` needs a revision story, not just a snapshot story.**
+   `backtest_runs.rules_snapshot` handles reproducibility *after* the fact,
+   but there's no design yet for what happens when a later module's notes
+   refine or contradict an earlier one -- expected, not edge-case, when a
+   13-module course is recorded over several weeks and understanding
+   deepens as it goes. Open question, not yet answered: does a revised
+   `rules_json` just overwrite in place (relying on `rules_snapshot` to
+   preserve old backtest history), or does the strategy itself need an
+   explicit version/revision concept?
+3. **Position sizing can be recorded before it can be backtested.**
+   `rules_json.position_sizing` (e.g. `risk_pct_of_equity`) only means
+   something against total capital and current exposure across *all* open
+   positions -- and Paper Trade is explicitly "unconstrained, no virtual
+   cash balance" per `STATUS.md`. Matters more now specifically because risk
+   management is StockNavigators' stated core teaching, not an incidental
+   detail. Sharpens the "portfolio-level backtests are out of scope for v1"
+   note above into something more exact: v1 can *store* a position-sizing
+   rule, but can't *meaningfully backtest* it until a capital model exists --
+   otherwise a backtest will silently report as if sizing worked when it was
+   never actually modeled.
+4. **Don't conflate two different kinds of chart image.** The Chart Agent's
+   job (#4 above) is plotting *your* backtested trades over real price data.
+   StockNavigators' own annotated screenshots (captured via Plaud's notes
+   feature) are teaching reference material, not backtest output -- closer
+   to what `strategy_sources.notes` (or a future `advice_sources` image
+   field) holds. Noted so a future session doesn't try to make the Chart
+   Agent ingest course screenshots.
+
 ### Suggested build order, whenever this gets picked up
 
 1. `rules_json` column on `strategies` + a way to hand-enter one strategy's
