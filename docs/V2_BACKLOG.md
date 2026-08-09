@@ -69,26 +69,160 @@ start now.
    the "Ticker research skill" above: instead of researching a *ticker*, it
    extracts entry/exit/position-sizing rules from a source (book, video,
    podcast) into a brief. Today `strategies` is just `title` + `notes`
-   (free text) tied to sources via `strategy_sources` — nothing structured
-   enough for a script to execute. Open question: a `rules_json` column on
-   `strategies`, or a new 1:1 extension table (`strategy_backtest_rules`)
-   matching the pattern already used for `advice_source_*_details`? The
-   extension-table shape fits this schema's existing conventions better
-   than a JSON blob.
+   (free text) — nothing structured enough for a script to execute.
+   **Correction to this doc's first draft:** `schema.sql`'s own comment on
+   `strategies` and `DB_ARCHITECTURE.md`'s "What this deliberately leaves
+   out (Phase 2)" section already answer the "extension table vs. JSON
+   column" question — the plan on record is a **`rules_json` column added
+   directly to `strategies`**, not a new extension table. The
+   `advice_source_*_details` extension-table pattern is for mutually
+   exclusive subtypes (a source is a person *or* a book, never both);
+   `rules_json` is closer to "one more optional attribute every strategy
+   row can eventually have," which is exactly what that column was already
+   reserved for. Sketch of its shape (illustrative, not final):
+   ```json
+   {
+     "version": 1,
+     "entry_conditions": [
+       {"indicator": "close", "op": "crosses_above", "value": "sma_50"},
+       {"indicator": "volume", "op": ">", "value": "avg_volume_20 * 1.5"}
+     ],
+     "exit_conditions": {
+       "take_profit_pct": 20,
+       "stop_loss_pct": 8,
+       "max_hold_days": 90
+     },
+     "position_sizing": { "method": "fixed_risk_pct", "risk_pct_of_equity": 1.0 },
+     "regime_filter": { "market_index": "SPY", "condition": "close > sma_200" }
+   }
+   ```
 2. **Backtesting Agent (Quant)** — not really an LLM job. A script (that an
    agent writes, or a fixed one an agent calls) reads `historical_prices` +
-   `dividends`/`splits` for the strategy's securities and simulates the
-   rule set day-by-day. Needs somewhere to land results — new
-   `backtest_runs` / `backtest_trades` tables (same shape as
-   `transactions`, flagged synthetic) so runs are queryable/comparable
-   later, not just chat output that evaporates.
+   `dividends`/`splits` for one security and simulates a strategy's
+   `rules_json` day-by-day. New tables to hold results, following this
+   schema's existing conventions (real FKs, CHECK'd enums, `created_at`):
+   ```sql
+   CREATE TABLE backtest_runs (
+     id              INTEGER PRIMARY KEY,
+     strategy_id     INTEGER NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+     security_id     INTEGER NOT NULL REFERENCES securities(id) ON DELETE CASCADE,
+     rules_snapshot  TEXT NOT NULL,   -- JSON copy of rules_json AT RUN TIME --
+                                       -- strategies.rules_json can change later;
+                                       -- this keeps a run reproducible regardless
+     date_range_start TEXT NOT NULL,
+     date_range_end   TEXT NOT NULL,
+     status          TEXT NOT NULL DEFAULT 'completed'
+                        CHECK (status IN ('completed','failed')),
+     total_trades    INTEGER,
+     win_rate        REAL,
+     avg_r_multiple  REAL,
+     sharpe_ratio    REAL,
+     max_drawdown_pct REAL,
+     total_return_pct REAL,
+     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+
+   CREATE TABLE backtest_trades (
+     id              INTEGER PRIMARY KEY,
+     backtest_run_id INTEGER NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+     entry_date      TEXT NOT NULL,
+     entry_price     REAL NOT NULL,
+     exit_date       TEXT,
+     exit_price      REAL,
+     quantity        REAL NOT NULL,
+     r_multiple      REAL,
+     exit_reason     TEXT CHECK (exit_reason IN
+                        ('take_profit','stop_loss','signal_exit','end_of_backtest'))
+   );
+   ```
+   Open question deliberately left open: the equity curve itself (a
+   date→value series per run) — a JSON blob column on `backtest_runs`, or a
+   normalized `backtest_equity_points` table matching how `historical_prices`
+   treats OHLCV as real rows rather than a blob? The normalized version is
+   more consistent with this schema's own stated philosophy but is a lot
+   more rows across many runs — worth deciding against real usage patterns,
+   not guessing now. Also out of scope for v1: multi-security/portfolio-level
+   backtests (the AlphaAgents pitch's "Portfolio Builder" stacked several
+   strategies together) — `backtest_runs` above is deliberately one
+   strategy × one security × one date range, matching how `historical_prices`
+   itself is keyed.
+
+   **A real correctness trap to design around, not just an auditor's job to
+   catch after the fact:** `historical_prices.adj_close` already bakes in
+   both dividends *and* splits (standard Yahoo/Finnhub convention), while
+   `dividends` and `splits` also exist as their own tables. Computing
+   `total_return_pct` from `adj_close` deltas **and** separately adding back
+   `dividends` amounts during the hold period would double-count — this is
+   exactly the "made a losing strategy look like a 40% annual winner" class
+   of bug the AlphaAgents pitch used as its hook. Rule to write into the
+   engine itself, not just hope the auditor notices: use `adj_close` alone
+   for the equity curve / total-return math; use raw `close` only where the
+   backtest needs to simulate an actual fill price (e.g. `entry_price` /
+   `exit_price` on `backtest_trades`, so trade-level numbers read like real
+   prices a human would recognize on a chart).
 3. **Auditor Agent (Risk Manager)** — the highest value-to-effort piece, and
    the one to prototype first, independent of the rest. A separate subagent
    context (deliberately not the one that ran the backtest — an agent
    shouldn't grade its own work) reviewing a `backtest_run` for lookahead
    bias, curve-fitting, single-outlier dependency, and regime-only
-   performance. Usable standalone against even one hand-built backtest,
-   before the Strategy/Chart agents exist.
+   performance. Following this schema's own "alerts are a durable log, not
+   just a status flag" principle (`DB_ARCHITECTURE.md` point 6) rather than
+   bolting an `audit_verdict` column onto `backtest_runs`:
+   ```sql
+   CREATE TABLE backtest_audits (
+     id              INTEGER PRIMARY KEY,
+     backtest_run_id INTEGER NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+     check_type      TEXT NOT NULL CHECK (check_type IN
+                        ('lookahead_bias','curve_fitting','outlier_dependency',
+                         'regime_dependency','data_leak')),
+     verdict         TEXT NOT NULL CHECK (verdict IN ('pass','flagged','failed')),
+     notes           TEXT,
+     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   ```
+   One row per check per run keeps it queryable ("show every run ever
+   flagged for lookahead bias") and supports re-running the audit later
+   (e.g. after tightening the auditor's own prompt) without losing history —
+   usable standalone against even one hand-built backtest, before the
+   Strategy/Chart agents exist.
+
+   **What each `check_type` actually looks for** — worth pinning down now,
+   since "the auditor agent checks for X" was doing a lot of unexamined work
+   in the original pitch. Most of these are deterministic computation, not
+   LLM judgment — the agent's real job is running the check and writing the
+   human-readable verdict/notes, not eyeballing numbers and guessing:
+   - **`lookahead_bias`** — best caught structurally, not after the fact:
+     the backtest engine should only ever be *able* to query
+     `historical_prices WHERE date <= as_of_date` while simulating a given
+     day (never the whole table at once). The auditor's job then becomes
+     either a code-level check that the engine respects that boundary, or a
+     spot-replay of a sample of `backtest_trades` rows — re-derive whether
+     the entry condition in `rules_snapshot` is actually computable using
+     only rows dated on/before that trade's `entry_date`.
+   - **`curve_fitting`** — needs a comparison, not a single run: split
+     `date_range_start`/`date_range_end` into an in-sample slice (e.g. first
+     70%) and out-of-sample slice, run the backtest engine on each
+     separately (this is just two `backtest_runs` rows), and flag a sharp
+     drop in `sharpe_ratio`/`win_rate` out-of-sample. A cheap first-pass
+     heuristic that doesn't need a second run at all: count the tunable
+     values in `rules_snapshot` against `total_trades` — very few trades per
+     free parameter is itself a red flag.
+   - **`outlier_dependency`** — pure arithmetic on `backtest_trades`:
+     recompute `total_return_pct`/`win_rate` with the single best trade
+     excluded; flag if removing one trade flips the run from profitable to
+     not, or accounts for an outsized share of total return.
+   - **`regime_dependency`** — needs a benchmark to compare against (SPY is
+     the obvious default — worth an `app_settings` key rather than a
+     hardcode, matching how `app_settings` already stores things like
+     default take-profit percentage). Flag if `backtest_trades.entry_date`
+     values cluster almost entirely inside one favorable stretch of the
+     benchmark's own `historical_prices` trend rather than spreading across
+     multiple regimes/years.
+   - **`data_leak`** — mostly a `rules_json` validation problem: reject (at
+     Strategy Agent output time, ideally, not just audit time) any
+     entry/exit condition referencing a field that isn't actually knowable
+     as of the bar in question (e.g. a rule written against "next day's
+     open").
 4. **Chart Agent (Visual Analyst)** — lowest priority. Plots
    `backtest_trades` over `historical_prices` candles so a strategy's
    numbers can be sanity-checked visually (e.g. a 60% win rate that's
@@ -97,16 +231,16 @@ start now.
 
 ### Suggested build order, whenever this gets picked up
 
-1. `strategy_backtest_rules` extension table + a way to hand-enter one
-   strategy's rules — skip the "extract from source" automation at first;
-   prove the backtest engine on one manually-encoded strategy.
-2. Backtest engine consuming `historical_prices`/`dividends`/`splits`,
-   writing `backtest_runs`/`backtest_trades`.
-3. Auditor agent reviewing a `backtest_run` — usable on its own before step
-   4 or 5 exist.
-4. Strategy Agent automation (source → structured rules) — same shape as
-   the Ticker research skill above; worth sharing conventions between the
-   two rather than solving "skill output: saved to DB vs. printed in chat"
+1. `rules_json` column on `strategies` + a way to hand-enter one strategy's
+   rules — skip the "extract from source" automation at first; prove the
+   backtest engine on one manually-encoded strategy.
+2. `backtest_runs` / `backtest_trades` tables + the backtest engine
+   consuming `historical_prices`/`dividends`/`splits`.
+3. `backtest_audits` + the auditor agent reviewing a `backtest_run` —
+   usable on its own before step 4 or 5 exist.
+4. Strategy Agent automation (source → `rules_json`) — same shape as the
+   Ticker research skill above; worth sharing conventions between the two
+   rather than solving "skill output: saved to DB vs. printed in chat"
    twice.
 5. Chart agent last.
 
