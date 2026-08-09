@@ -26,6 +26,103 @@ const insertTransaction = db.prepare(`
   ) RETURNING *
 `);
 
+// --- Stock splits --------------------------------------------------------
+// A split is a market event, not something a user logs -- it arrives via
+// priceService.backfillDividendsSplits() writing new rows into the (cache,
+// holder-agnostic) `splits` table. This section is what turns "a split
+// happened" into "every open lot for that security, for every holder,
+// actually reflects it." See docs/V2_BACKLOG.md's multi-agent design note
+// for the class of bug this closes (adj_close/dividends double-counting is
+// the *other* half of that same lesson, for the future backtester).
+
+const getSplitsForSecurity = db.prepare(
+  "SELECT split_date, ratio FROM splits WHERE security_id = ? AND split_date > ? ORDER BY split_date",
+);
+const getOpenLotsForSplit = db.prepare(`
+  SELECT * FROM transactions
+  WHERE security_id = ? AND transaction_type = 'BUY' AND quantity_remaining > 0
+    AND transaction_date < ?
+  ORDER BY transaction_date, id
+`);
+const rescaleLot = db.prepare(
+  "UPDATE transactions SET quantity = ?, quantity_remaining = ? WHERE id = ?",
+);
+
+function parseSplitRatio(ratioText) {
+  const [numerator, denominator] = String(ratioText).split(":").map(Number);
+  if (!(numerator > 0) || !(denominator > 0)) {
+    throw new Error(`Unparseable split ratio: "${ratioText}"`);
+  }
+  return numerator / denominator;
+}
+
+/**
+ * Rescales one open lot for a stock split and logs a SPLIT_ADJ audit row.
+ * `cost_basis` (total dollars) is deliberately left untouched -- a split
+ * doesn't change what was paid, only how many shares that payment is spread
+ * across. Per-share cost (cost_basis / quantity, computed everywhere it's
+ * needed, e.g. listOpenPositions) adjusts correctly as a side effect of
+ * quantity changing.
+ * @returns {object} the lot with its quantity/quantity_remaining updated,
+ *   for compounding multiple splits in sequence without re-reading the DB.
+ */
+function rescaleLotForSplit(lot, splitDate, ratioText) {
+  const multiplier = parseSplitRatio(ratioText);
+  const newQuantity = lot.quantity * multiplier;
+  const newQuantityRemaining = lot.quantity_remaining * multiplier;
+  rescaleLot.run(newQuantity, newQuantityRemaining, lot.id);
+  insertTransaction.get({
+    holderId: lot.holder_id,
+    accountId: lot.account_id,
+    securityId: lot.security_id,
+    watchedItemId: null,
+    sourceId: lot.source_id,
+    strategyId: lot.strategy_id,
+    isPaperTrade: lot.is_paper_trade,
+    transactionType: "SPLIT_ADJ",
+    transactionDate: splitDate,
+    // Resulting share count, not the delta -- keeps `quantity` a plain
+    // positive count on every row (matches BUY/SELL) instead of needing a
+    // signed "shares added/removed" convention for reverse splits.
+    quantity: newQuantityRemaining,
+    price: 0,
+    fees: 0,
+    costBasis: null,
+    quantityRemaining: null,
+    linkedBuyId: lot.id,
+    externalRef: null,
+    notes:
+      `Split ${ratioText} applied to lot #${lot.id}: ` +
+      `${lot.quantity_remaining} -> ${newQuantityRemaining} share(s) remaining ` +
+      `(lot size ${lot.quantity} -> ${newQuantity}).`,
+  });
+  return { ...lot, quantity: newQuantity, quantity_remaining: newQuantityRemaining };
+}
+
+/**
+ * Applies a newly-discovered stock split to every currently open BUY lot for
+ * a security, across ALL holders -- a split is a market event, not scoped to
+ * one holder's view. Only lots opened before the split date are touched; a
+ * lot bought on/after the split already reflects post-split share counts,
+ * and a lot that's already fully sold has nothing left to rescale.
+ *
+ * Call this once per genuinely new row discovered in the `splits` cache
+ * table (see priceService.backfillDividendsSplits's `newSplits` return) --
+ * idempotent as long as callers only pass splits that are actually new,
+ * since a lot's own state only ever reflects a given split once.
+ * @param {number} securityId
+ * @param {string} splitDate 'YYYY-MM-DD'
+ * @param {string} ratioText e.g. '2:1'
+ * @returns {{lotsAdjusted: number}}
+ */
+export function applySplitToOpenLots(securityId, splitDate, ratioText) {
+  return withTransaction(() => {
+    const lots = getOpenLotsForSplit.all(securityId, splitDate);
+    for (const lot of lots) rescaleLotForSplit(lot, splitDate, ratioText);
+    return { lotsAdjusted: lots.length };
+  });
+}
+
 /**
  * Logs an executed BUY, creating a new open lot.
  * @param {object} input
@@ -45,26 +142,40 @@ export async function recordBuy(input) {
 
   const security = await getOrCreateSecurity(input.symbol, { exchangeCode: input.exchangeCode });
 
-  return insertTransaction.get({
-    holderId: input.holderId,
-    accountId: input.accountId ?? null,
-    securityId: security.id,
-    watchedItemId: input.watchedItemId ?? null,
-    sourceId: input.sourceId ?? null,
-    strategyId: input.strategyId ?? null,
-    isPaperTrade: input.isPaperTrade ? 1 : 0,
-    transactionType: "BUY",
-    transactionDate: input.transactionDate,
-    quantity,
-    price,
-    fees,
-    // Fees are folded into cost basis so P&L reflects what the trade
-    // actually cost, not just the sticker price.
-    costBasis: quantity * price + fees,
-    quantityRemaining: quantity,
-    linkedBuyId: null,
-    externalRef: input.externalRef ?? null,
-    notes: input.notes ?? null,
+  return withTransaction(() => {
+    const buy = insertTransaction.get({
+      holderId: input.holderId,
+      accountId: input.accountId ?? null,
+      securityId: security.id,
+      watchedItemId: input.watchedItemId ?? null,
+      sourceId: input.sourceId ?? null,
+      strategyId: input.strategyId ?? null,
+      isPaperTrade: input.isPaperTrade ? 1 : 0,
+      transactionType: "BUY",
+      transactionDate: input.transactionDate,
+      quantity,
+      price,
+      fees,
+      // Fees are folded into cost basis so P&L reflects what the trade
+      // actually cost, not just the sticker price.
+      costBasis: quantity * price + fees,
+      quantityRemaining: quantity,
+      linkedBuyId: null,
+      externalRef: input.externalRef ?? null,
+      notes: input.notes ?? null,
+    });
+
+    // Catch up a backdated entry: if this stock already split, on record,
+    // since the date being logged (e.g. entering a real trade from before
+    // this app tracked it), apply those splits to the new lot right away
+    // instead of leaving it stuck at pre-split share counts until the next
+    // live-discovered split walks past it.
+    let lot = buy;
+    for (const split of getSplitsForSecurity.all(security.id, buy.transaction_date)) {
+      lot = rescaleLotForSplit(lot, split.split_date, split.ratio);
+    }
+
+    return lot === buy ? buy : getTransaction.get(buy.id, buy.holder_id);
   });
 }
 

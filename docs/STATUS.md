@@ -1,10 +1,21 @@
 # Strategy Lab V2 — Status
 
-Last updated: 2026-07-27 (scheduled alerts bell clicked through live; added
+Last updated: 2026-08-09 (code-reviewed the whole implementation cold —
+server.js, every services/*.js file, the frontend — and found real gaps.
+Fixed the one correctness bug that actually mattered: stock splits were
+never applied to open lots, silently corrupting market value/P&L for
+anything held across a real split. See "Orders" row below and
+`applySplitToOpenLots`/`recordBuy` in `services/transactionsService.js`.
+Everything else found (9 items, ranked by severity) recorded in
+`docs/BUGS.md`'s "Open" section rather than fixed blind. Previous entry
+(2026-07-27, scheduled alerts + webhook + graceful shutdown) is preserved
+below.
+
+Last updated 2026-07-27: scheduled alerts bell clicked through live; added
 graceful server shutdown + npm run stop/restart; added webhook auth-header
 support for Home Assistant; committed and pushed all of the above; decided to
 migrate to the Orchestrator NUC, not yet executed; project shelved for a few
-days after this). Read this first in any new session before touching code —
+days after this. Read this first in any new session before touching code —
 it's the "external brain" for where this project is and why.
 
 ## Picking this back up after a break
@@ -90,7 +101,7 @@ strategy backtesting. Deferred on purpose until the core app is solid.
 | Orders / Watchlist (web UI + API) | Built, **not yet run** — see "verification boundary" below |
 | Price data pull (Yahoo/Finnhub) | Done, tested (Yahoo and Finnhub both live-verified) |
 | Historical price storage | Backfills 2yr daily OHLCV + dividends/splits on ticker add; `POST /api/refresh-history` re-runs for all watched tickers. Storage/idempotency tested offline; live backfill not yet run |
-| Orders (log buys/sells, positions, history) | Built with full lot accounting; services heavily tested offline, UI not yet clicked through |
+| Orders (log buys/sells, positions, history) | Built with full lot accounting; services heavily tested offline (371 checks total as of 2026-08-09, up from 360), UI not yet clicked through. **Stock splits are now applied to open lots** (`applySplitToOpenLots`, plus `recordBuy` auto-catches-up a backdated entry against any already-known split) — before 2026-08-09 this was a real, untested gap: the `SPLIT_ADJ` transaction type was modeled in the schema and split events were already being fetched into the `splits` cache table, but nothing ever rescaled a lot's `quantity`/`quantity_remaining` when a held security actually split |
 | Dashboard | Card grid + table toggle + click-through ticker detail built; services tested offline, UI not yet clicked through |
 | Imports | Not started |
 | Journal / Strategy Lab | Service + UI built (strategies many-to-many with sources as of schema v5, paper ideas, execute-into-real-trade); services tested offline, UI not yet clicked through |

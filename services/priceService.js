@@ -168,11 +168,23 @@ const insertSplit = db.prepare(`
   VALUES (@securityId, @splitDate, @ratio, 'yahoo')
 `);
 
+/**
+ * @returns {{dividendCount: number, splitCount: number, newSplits: Array<{splitDate: string, ratio: string}>}}
+ *   `newSplits` is the subset that was ACTUALLY new (not already in the
+ *   `splits` cache table) -- `INSERT OR IGNORE` plus `UNIQUE(security_id,
+ *   split_date)` means re-running this over the same range is safe to check
+ *   against, so callers can trigger split-adjustment logic exactly once per
+ *   real split event rather than every time this function happens to run.
+ */
 export async function backfillDividendsSplits(securityId, symbol, range = {}) {
   const { dividends, splits } = await yahoo.getDividendsAndSplits(symbol, range);
+  const newSplits = [];
   withTransaction(() => {
     for (const d of dividends) insertDividend.run({ securityId, ...d });
-    for (const s of splits) insertSplit.run({ securityId, ...s });
+    for (const s of splits) {
+      const result = insertSplit.run({ securityId, ...s });
+      if (result.changes > 0) newSplits.push(s);
+    }
   });
-  return { dividendCount: dividends.length, splitCount: splits.length };
+  return { dividendCount: dividends.length, splitCount: splits.length, newSplits };
 }

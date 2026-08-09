@@ -20,6 +20,7 @@ import {
   getHistoryCoverage,
 } from "./priceService.js";
 import { deliverAlertWebhook } from "./notifyService.js";
+import { applySplitToOpenLots } from "./transactionsService.js";
 
 // --- Watchlists (named lists: "Tech", "Dip Buys", etc.) ---------------------
 // One list per item, not tags. Every holder gets a default list so nothing
@@ -332,9 +333,30 @@ export async function backfillSecurityHistory(securityId, symbol, opts = {}) {
   const barCount = await backfillHistorical(securityId, symbol, { period1 });
 
   const withEvents = opts.withEvents ?? isFirstFetch;
-  let events = { dividendCount: 0, splitCount: 0 };
+  let events = { dividendCount: 0, splitCount: 0, newSplits: [] };
   if (withEvents) {
     events = await backfillDividendsSplits(securityId, symbol, { period1 });
+    // Sorted chronologically so compounding (two splits in one backfill,
+    // e.g. catching up a security that's never been fetched before) applies
+    // in the right order -- the provider doesn't guarantee return order.
+    const splitsInOrder = [...events.newSplits].sort((a, b) =>
+      a.splitDate < b.splitDate ? -1 : a.splitDate > b.splitDate ? 1 : 0,
+    );
+    for (const split of splitsInOrder) {
+      try {
+        const { lotsAdjusted } = applySplitToOpenLots(securityId, split.splitDate, split.ratio);
+        if (lotsAdjusted > 0) {
+          console.log(
+            `[splits] Applied ${split.ratio} split (${split.splitDate}) to ${lotsAdjusted} open lot(s), security ${securityId}.`,
+          );
+        }
+      } catch (err) {
+        console.error(
+          `[splits] Failed to apply ${split.ratio} split (${split.splitDate}) for security ${securityId}:`,
+          err.message,
+        );
+      }
+    }
   }
 
   return { symbol, barCount, incremental: !isFirstFetch, ...events };

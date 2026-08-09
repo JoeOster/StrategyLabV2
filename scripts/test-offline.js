@@ -1164,6 +1164,90 @@ check(
   renderPaperPositionsRows([], fakeCols).includes("Log Paper Trade"),
 );
 
+console.log("\n6j. Transactions: stock split adjustment");
+db.prepare(
+  "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('SPLTCO', ?, 'Split Test Co', 'manual')",
+).run(exchangeId);
+const splitSecurityId = db.prepare("SELECT id FROM securities WHERE symbol = 'SPLTCO'").get().id;
+const splitHolder = db
+  .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Splitter', 0) RETURNING *")
+  .get();
+
+// Lot bought before the split, partially sold before the split -- exercises
+// quantity AND quantity_remaining rescaling together, not just a fresh lot.
+const preSplitLot = await tx.recordBuy({
+  holderId: splitHolder.id, symbol: "SPLTCO", transactionDate: "2026-01-01",
+  quantity: 100, price: 40, fees: 0,
+});
+await tx.recordSell({
+  holderId: splitHolder.id, symbol: "SPLTCO", transactionDate: "2026-01-15",
+  quantity: 30, price: 45,
+});
+// Lot bought ON the split date already reflects post-split share counts --
+// applySplitToOpenLots' `transaction_date < splitDate` bound must exclude it.
+const onSplitDateLot = await tx.recordBuy({
+  holderId: splitHolder.id, symbol: "SPLTCO", transactionDate: "2026-02-01",
+  quantity: 20, price: 20, fees: 0,
+});
+
+const { lotsAdjusted } = tx.applySplitToOpenLots(splitSecurityId, "2026-02-01", "2:1");
+check("applySplitToOpenLots only touches the one lot opened before the split date", lotsAdjusted === 1);
+
+const rescaledLot = db.prepare("SELECT * FROM transactions WHERE id = ?").get(preSplitLot.id);
+check("2:1 split doubles the lot's original quantity (100 -> 200)", rescaledLot.quantity === 200);
+check(
+  "2:1 split doubles quantity_remaining too (100-30=70 -> 140)",
+  rescaledLot.quantity_remaining === 140,
+);
+check(
+  "Split leaves total cost_basis (dollars) untouched -- only share count changes",
+  rescaledLot.cost_basis === preSplitLot.cost_basis,
+);
+
+const untouchedLot = db.prepare("SELECT * FROM transactions WHERE id = ?").get(onSplitDateLot.id);
+check(
+  "A lot bought on the split date itself is left alone",
+  untouchedLot.quantity === 20 && untouchedLot.quantity_remaining === 20,
+);
+
+const splitAudit = db
+  .prepare("SELECT * FROM transactions WHERE transaction_type = 'SPLIT_ADJ' AND linked_buy_id = ?")
+  .get(preSplitLot.id);
+check("A SPLIT_ADJ audit row is logged, linked back to the adjusted lot", splitAudit != null);
+check("SPLIT_ADJ row records the resulting share count", splitAudit.quantity === 140);
+
+console.log("\n6k. Transactions: recordBuy retroactively applies an already-known split");
+db.prepare(
+  "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('BACKDATE', ?, 'Backdate Test Co', 'manual')",
+).run(exchangeId);
+const backdateSecurityId = db.prepare("SELECT id FROM securities WHERE symbol = 'BACKDATE'").get().id;
+db.prepare(
+  "INSERT INTO splits (security_id, split_date, ratio, source) VALUES (?, '2026-03-01', '3:1', 'yahoo')",
+).run(backdateSecurityId);
+
+// Entering a real historical trade *after* the split it happened before was
+// already recorded -- e.g. backfilling old trades into a stock that's since
+// split. Should come out already-adjusted, not stuck pre-split.
+const backdatedLot = await tx.recordBuy({
+  holderId: splitHolder.id, symbol: "BACKDATE", transactionDate: "2026-01-20",
+  quantity: 10, price: 60, fees: 0,
+});
+check("A backdated buy entered after a known split is auto-adjusted (10 -> 30)", backdatedLot.quantity === 30);
+check(
+  "Backdated buy's quantity_remaining is adjusted too",
+  backdatedLot.quantity_remaining === 30,
+);
+check(
+  "Backdated buy's cost_basis (total dollars actually paid) is untouched",
+  backdatedLot.cost_basis === 10 * 60,
+);
+
+const postSplitBuy = await tx.recordBuy({
+  holderId: splitHolder.id, symbol: "BACKDATE", transactionDate: "2026-04-01",
+  quantity: 15, price: 20, fees: 0,
+});
+check("A buy entered after the split date is untouched by it", postSplitBuy.quantity === 15);
+
 console.log("\n6e. Orders: form mapping + validation (pure functions)");
 const { orderFormToPayload, validateOrderPayload } = await import(
   "../public/js/modules/orders/handlers.js"
