@@ -44,6 +44,7 @@ const bookLookup = await import("./services/bookLookupService.js");
 const accounts = await import("./services/accountsService.js");
 const imports = await import("./services/importService.js");
 const plans = await import("./services/plansService.js");
+const alertsSvc = await import("./services/alertsService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -196,6 +197,33 @@ app.post("/api/watched-items/delete", (req, res) => {
 app.get("/api/alerts", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   res.json(listUnacknowledgedAlerts(holder.id));
+});
+
+// The notifications queue. Distinct from the bell, which only lists what has
+// not been silenced: this is every alert with what was DECIDED about it.
+app.get("/api/notifications", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  res.json(
+    alertsSvc.listAlerts(holder.id, {
+      unresolvedOnly: req.query.pending === "1",
+      limit: Number(req.query.limit) || 200,
+    }),
+  );
+});
+
+// Body: { resolution: 'accepted'|'declined', declineKind?, note?, fillPrice?, fillDate? }
+//
+// Accepting a PAPER exit rung records the sale at the price the rung fired at --
+// that is the plan followed mechanically. Accepting a REAL one requires the
+// price actually got: defaulting it to the trigger price would record the ideal
+// as though it were real and erase the very gap being measured.
+app.post("/api/notifications/:id/resolve", async (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(await alertsSvc.resolveAlert(holder.id, Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.post("/api/alerts/:id/acknowledge", (req, res) => {

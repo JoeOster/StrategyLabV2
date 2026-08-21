@@ -16,6 +16,7 @@
         <button type="button" class="view-btn" data-view="orders">Orders</button>
         <button type="button" class="view-btn" data-view="journal">Journal</button>
         <button type="button" class="view-btn" data-view="papertrade">Paper Trade</button>
+        <button type="button" class="view-btn" data-view="notifications">Notifications</button>
         <button type="button" class="view-btn" data-view="settings">Settings</button>
       </nav>
     </div>
@@ -273,6 +274,23 @@
     </main>
   </section>
 
+  <section id="view-notifications" hidden>
+    <main>
+      <div class="panel-head">
+        <h2>Notifications</h2>
+        <label class="select-all-label">
+          <input type="checkbox" id="notifications-show-resolved" /> Show decided
+        </label>
+      </div>
+      <p class="panel-hint">
+        What your plans said to do, and what you decided. Nothing here acts on its own &mdash;
+        and deciding late costs nothing, because an alert records the price and time it fired at.
+      </p>
+      <p id="notifications-banner" class="status-banner" hidden></p>
+      <p id="notifications-count" class="panel-hint"></p>
+      <ul id="notifications-list" class="settings-list"></ul>
+    </main>
+  </section>
   <section id="view-settings" hidden>
     <nav id="settings-tabs" class="watchlist-tabs">
       <button type="button" class="tab active" data-panel="lists">Lists</button>

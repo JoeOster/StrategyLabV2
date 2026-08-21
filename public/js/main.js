@@ -6,6 +6,7 @@ import { initializeJournalModule, reloadJournalView } from "./modules/journal/in
 import { initializePaperTradeModule, reloadPaperTradeView } from "./modules/papertrade/index.js";
 import { initializeAlertsModule } from "./modules/alerts/index.js";
 import { initPlansUi } from "./modules/plans/dialog.js";
+import { initializeNotificationsModule, reloadNotificationsView } from "./modules/notifications/index.js";
 
 document.addEventListener("DOMContentLoaded", async () => {
   try {
@@ -16,6 +17,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     await initializeJournalModule();
     await initializePaperTradeModule();
     await initializeAlertsModule();
+    // Deciding on an alert can record a sale, so the position views need to
+    // reload behind it.
+    await initializeNotificationsModule({
+      onChange: () => Promise.all([reloadOrdersView(), reloadPaperTradeView(), reloadDashboardView()]),
+    });
     // Settings changes (renaming a list, deleting a holder) can invalidate
     // what the other views are showing, so they reload on any change.
     await initializeSettingsModule({
@@ -44,6 +50,7 @@ function setupViewSwitching() {
     orders: document.getElementById("view-orders"),
     journal: document.getElementById("view-journal"),
     papertrade: document.getElementById("view-papertrade"),
+    notifications: document.getElementById("view-notifications"),
     settings: document.getElementById("view-settings"),
   };
   const watchlistActions = document.getElementById("watchlist-actions");
@@ -70,6 +77,7 @@ function setupViewSwitching() {
       else if (target === "dashboard") await reloadDashboardView();
       else if (target === "journal") await reloadJournalView();
       else if (target === "papertrade") await reloadPaperTradeView();
+      else if (target === "notifications") await reloadNotificationsView();
       else await reloadWatchlistView();
     });
   }

@@ -2662,6 +2662,100 @@ db.prepare("DELETE FROM transactions WHERE security_id = (SELECT id FROM securit
 db.prepare("DELETE FROM securities WHERE symbol = 'XACC'").run();
 db.prepare("DELETE FROM accounts WHERE id IN (?, ?)").run(xa.id, xb.id);
 
+console.log("\n14c. Notifications: accepting and declining an alert");
+const alertsSvc = await import("../services/alertsService.js");
+
+// A paper position with a ladder, so a rung can fire and be decided on.
+db.prepare("INSERT INTO securities (symbol, name, data_source) VALUES ('NOTIF','Notify Co','manual')").run();
+const notifBuy = await tx.recordBuy({
+  holderId: traderHolder.id, symbol: "NOTIF", transactionDate: "2026-02-01",
+  quantity: 100, price: 10, isPaperTrade: true,
+});
+const notifPlan = plans.createPlanForTrade(traderHolder.id, notifBuy.id);
+const notifRung = plans.addExit(traderHolder.id, notifPlan.id, { kind: "TAKE_PROFIT", quantity: 40, priceLow: 15 });
+const notifFired = wlSvc.applyExitAlert(
+  plans.listPendingExits().find((e) => e.id === notifRung.id),
+  16,
+);
+check("A fired rung appears in the notifications queue", alertsSvc.listAlerts(traderHolder.id, { unresolvedOnly: true }).some((a) => a.plan_exit_id === notifRung.id));
+
+const queued = alertsSvc.listAlerts(traderHolder.id, { unresolvedOnly: true }).find((a) => a.plan_exit_id === notifRung.id);
+check("...classified as an exit, and known to be paper", queued.kind === "exit" && queued.isPaper === true);
+
+// Accepting a PAPER rung records the sale at the price the rung FIRED at,
+// dated the day it fired -- not today. That is what makes deciding later free.
+const positionsBefore = tx.listOpenPositions(traderHolder.id, { isPaperTrade: true }).length;
+const accepted = await alertsSvc.resolveAlert(traderHolder.id, queued.id, {
+  resolution: "accepted",
+});
+check("Accepting a paper rung records the sale", accepted.transaction !== null);
+check(
+  "...at the price the rung fired at, not a fresh one",
+  accepted.transaction.sells[0].price === 16,
+);
+check(
+  "...dated when it fired, so acting days later does not move the trade",
+  accepted.transaction.sells[0].transaction_date === String(notifFired.message ? queued.triggered_at : "").slice(0, 10),
+);
+check(
+  "...for the rung's quantity",
+  accepted.transaction.sells[0].quantity === 40,
+);
+check(
+  "The alert links to the transaction it produced",
+  db.prepare("SELECT resulting_transaction_id FROM alerts WHERE id = ?").get(queued.id).resulting_transaction_id != null,
+);
+
+let doubleResolveRejected = false;
+try {
+  await alertsSvc.resolveAlert(traderHolder.id, queued.id, { resolution: "declined" });
+} catch (err) {
+  doubleResolveRejected = /already accepted/.test(err.message);
+}
+check("An alert cannot be decided twice", doubleResolveRejected);
+
+// A REAL position must not have the trigger price recorded as its fill --
+// that would erase the execution gap the whole feature measures.
+const realBuy = await tx.recordBuy({
+  holderId: traderHolder.id, symbol: "NOTIF", transactionDate: "2026-02-01", quantity: 50, price: 10,
+});
+const realPlan = plans.createPlanForTrade(traderHolder.id, realBuy.id);
+const realRung = plans.addExit(traderHolder.id, realPlan.id, { kind: "TAKE_PROFIT", quantity: 50, priceLow: 15 });
+wlSvc.applyExitAlert(plans.listPendingExits().find((e) => e.id === realRung.id), 16);
+const realQueued = alertsSvc.listAlerts(traderHolder.id, { unresolvedOnly: true }).find((a) => a.plan_exit_id === realRung.id);
+let realNeedsPrice = false;
+try {
+  await alertsSvc.resolveAlert(traderHolder.id, realQueued.id, { resolution: "accepted" });
+} catch (err) {
+  realNeedsPrice = /actually sold at/.test(err.message);
+}
+check("Accepting a REAL rung without a fill price is refused", realNeedsPrice);
+const realAccepted = await alertsSvc.resolveAlert(traderHolder.id, realQueued.id, {
+  resolution: "accepted", fillPrice: 15.4,
+});;
+check("...and records the price actually got, not the trigger", realAccepted.transaction.sells[0].price === 15.4);
+
+// Declining, and the two kinds of it.
+const declineBuy = await tx.recordBuy({
+  holderId: traderHolder.id, symbol: "NOTIF", transactionDate: "2026-02-01", quantity: 30, price: 10, isPaperTrade: true,
+});
+const declinePlan = plans.createPlanForTrade(traderHolder.id, declineBuy.id);
+const badRung = plans.addExit(traderHolder.id, declinePlan.id, { kind: "TAKE_PROFIT", quantity: 30, priceLow: 15 });
+wlSvc.applyExitAlert(plans.listPendingExits().find((e) => e.id === badRung.id), 16);
+const badQueued = alertsSvc.listAlerts(traderHolder.id, { unresolvedOnly: true }).find((a) => a.plan_exit_id === badRung.id);
+await alertsSvc.resolveAlert(traderHolder.id, badQueued.id, {
+  resolution: "declined", declineKind: "invalid", note: "level was set wrong",
+});
+check(
+  "Declining a rung as invalid un-hits it, so it cannot count against adherence",
+  db.prepare("SELECT status, hit_at FROM plan_exits WHERE id = ?").get(badRung.id).status === "cancelled",
+);
+check(
+  "...and the reason is a column, not prose",
+  db.prepare("SELECT decline_kind FROM alerts WHERE id = ?").get(badQueued.id).decline_kind === "invalid",
+);
+check("Declining never writes a trade", db.prepare("SELECT resulting_transaction_id FROM alerts WHERE id = ?").get(badQueued.id).resulting_transaction_id === null);
+
 console.log("\n15. Brokerages and accounts");
 const acctSvc = await import("../services/accountsService.js");
 
@@ -2852,6 +2946,7 @@ const uiModules = [
   "public/js/modules/papertrade/index.js",
   "public/js/modules/alerts/index.js",
   "public/js/modules/plans/dialog.js",
+  "public/js/modules/notifications/index.js",
 ];
 let idsChecked = 0;
 const missingIds = [];

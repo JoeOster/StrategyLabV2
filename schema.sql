@@ -354,6 +354,14 @@ CREATE TABLE alerts (
   resolution        TEXT CHECK (resolution IN ('accepted','declined')),
   resolved_at       TEXT,
   resolution_note   TEXT,
+  -- WHY a decline happened. Two different facts pointing at different things:
+  --   'invalid'   the level was wrong; the rung should not have fired, must not
+  --               count as hit, and should stop firing. Not a judgement.
+  --   'judgement' the rung was right and the user decided otherwise. On a real
+  --               position that is the execution gap; on a paper leg it is a
+  --               finding about the RULE, since the mechanical plan and what
+  --               the user would actually do have diverged.
+  decline_kind      TEXT CHECK (decline_kind IN ('invalid','judgement')),
   -- The transaction an accepted alert produced, when it produced one. Lets an
   -- adherence report join plan -> alert -> what actually happened without
   -- re-deriving the link from dates and prices.
