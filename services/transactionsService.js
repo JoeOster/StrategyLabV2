@@ -599,8 +599,14 @@ export function getPortfolioSummary(holderId, { isPaperTrade = false, accountId 
     // Cash and the account total are only meaningful for ONE account: summing
     // balances across accounts would produce a figure no statement shows.
     cash: accountId != null ? cashBalance(accountId).balance : null,
+    // Flagged, not hidden: a derived balance is usually right and always worth
+    // knowing about, but it must not read as verified.
+    cashIsDerived: accountId != null ? cashBalance(accountId).isDerived : null,
+    // Only when EVERY position is priced. An account total built on a market
+    // value covering one holding in three is not an account total, it is a
+    // fragment with a confident label.
     accountTotal:
-      accountId != null && totalValue != null
+      accountId != null && totalValue != null && unpricedCount === 0
         ? totalValue + cashBalance(accountId).balance
         : null,
     dividendIncome: dividends,

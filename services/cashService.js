@@ -92,6 +92,12 @@ export function cashBalance(accountId) {
   });
   const fromTrades = t.spent + t.received + t.income;
   return {
+    // No opening balance means this figure ASSUMES the account began empty and
+    // that every movement since is present in the ledger. For an account whose
+    // history predates the oldest statement to hand, that is false -- and a
+    // derived balance shown as flatly as a verified one is the exact shape of
+    // wrong number this codebase keeps producing. Callers must surface it.
+    isDerived: !opening,
     openingBalance: opening ? opening.amount : null,
     openingDate: since,
     balance: movements + fromTrades,

@@ -263,8 +263,12 @@ export function renderSummary(s) {
       // balances across accounts gives a figure no statement shows.
       s.cash == null
         ? ""
-        : `<div class="summary-item"><span class="summary-label">Cash</span><span class="summary-value">${money(s.cash)}</span></div>` +
-          `<div class="summary-item"><span class="summary-label" title="Positions plus cash — the figure comparable to a broker’s account total.">Account Total</span><span class="summary-value">${money(s.accountTotal)}</span></div>`
+        : `<div class="summary-item"><span class="summary-label"${
+            s.cashIsDerived
+              ? ' title="Derived from the trade ledger — no opening balance recorded, so this assumes the account began empty and every movement since is imported."'
+              : ""
+          }>Cash${s.cashIsDerived ? " *" : ""}</span><span class="summary-value">${money(s.cash)}</span></div>` +
+          `<div class="summary-item"><span class="summary-label" title="Positions plus cash. Shown only when every position is priced — a total built on a partial market value would be a fragment with a confident label.">Account Total</span><span class="summary-value">${money(s.accountTotal)}</span></div>`
     }
     <div class="summary-item"><span class="summary-label">Realized</span><span class="summary-value ${realClass}">${signedMoney(s.realizedPnl)}</span></div>
     <div class="summary-item"><span class="summary-label">Dividends</span><span class="summary-value">${money(s.dividendIncome)}</span></div>
