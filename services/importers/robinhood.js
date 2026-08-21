@@ -18,7 +18,22 @@ export const BROKER = "robinhood";
 // Everything else in the export is cash-account noise -- counted and reported
 // rather than silently dropped, so an import that skips half a file is
 // visible instead of looking like a clean run.
-const TYPE_BY_CODE = { Buy: "BUY", Sell: "SELL", CDIV: "DIVIDEND" };
+const TYPE_BY_CODE = { Buy: "BUY", Sell: "SELL", CDIV: "DIVIDEND", REC: "BUY" };
+
+// REC is shares RECEIVED -- a referral or promotional grant. It carries a
+// quantity and no price at all, because nothing was paid.
+//
+// It has to be a BUY, not a skip. It opens a real lot, and skipping it orphans
+// the eventual sale: 0.0147 CAT arrived 2025-01-27 and was sold 2025-10-14, and
+// with REC unclassified that sale had no covering buy and was dropped. Free
+// shares that later sell for money are exactly the kind of thing a journal
+// must not lose.
+//
+// Cost basis is zero, which is what was actually paid. That makes the whole
+// eventual proceeds show as gain -- correct for this app, which measures
+// outcomes rather than tax, and flagged for review so the figure is never
+// mistaken for a purchase price nobody recorded.
+const ZERO_COST_CODES = new Set(["REC"]);
 
 // Known-and-deliberately-ignored codes, with what they are, so nobody has to
 // re-derive this later:
@@ -64,8 +79,15 @@ export function parse(text) {
     const qty = type === "DIVIDEND" ? 0 : Math.abs(quantity ?? 0);
     if (type !== "DIVIDEND" && qty === 0) { skipped.unknownCode++; continue; }
 
+    const zeroCost = ZERO_COST_CODES.has(code);
+
     let unitPrice = price;
     if (type === "DIVIDEND") unitPrice = Math.abs(amount ?? 0);
+    // Granted shares have no price and no amount. Left to the extrapolation
+    // below, an empty amount would leave the price null and then default to 0
+    // anyway -- but saying so explicitly stops a later change to that fallback
+    // from silently inventing a cost for shares that had none.
+    else if (zeroCost) unitPrice = 0;
     else if (unitPrice == null && amount != null && qty > 0) unitPrice = Math.abs(amount) / qty;
 
     out.push({
@@ -77,8 +99,10 @@ export function parse(text) {
       // Robinhood charges no commission and the export has no fee column.
       fees: 0,
       price: unitPrice ?? 0,
-      notes: null,
-      needsReview: false,
+      notes: zeroCost
+        ? "Shares received at no cost (Robinhood REC). Cost basis recorded as $0, so the whole eventual sale shows as gain."
+        : null,
+      needsReview: zeroCost,
       raw: Object.fromEntries(Object.entries(col).map(([h, idx]) => [h, r[idx] ?? ""])),
     });
   }

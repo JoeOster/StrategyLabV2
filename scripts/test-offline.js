@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 600;
+const MIN_EXPECTED_CHECKS = 608;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -3899,6 +3899,36 @@ console.log("\n29. Reconcile knows what the account already holds");
     "The drop reason mentions both the file and the ledger",
     /this file/.test(blind.dropped[0].dropReason) && /ledger/.test(blind.dropped[0].dropReason),
   );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n30. Robinhood REC: shares received at no cost");
+// A referral or promotional grant. It carries a quantity and no price, because
+// nothing was paid. Unclassified it fell to skipped.unknownCode, which orphans
+// the eventual sale -- 0.0147 CAT arrived 2025-01-27 and sold 2025-10-14, and
+// with the grant missing that sale had no covering buy and was dropped.
+{
+  const rh = await import("../services/importers/robinhood.js");
+  const csv = [
+    '"Activity Date","Process Date","Settle Date","Instrument","Description","Trans Code","Quantity","Price","Amount"',
+    '"1/27/2025","1/27/2025","1/27/2025","CAT","Caterpillar","REC","0.0147","",""',
+  ].join("\n");
+  const p = rh.parse(csv);
+
+  check("A grant is not an unknown action", p.skipped.unknownCode === 0);
+  check("It opens a lot", p.rows.length === 1 && p.rows[0].transactionType === "BUY");
+  check("...for the shares granted", Math.abs(p.rows[0].quantity - 0.0147) < 1e-9);
+  check("...at zero cost, which is what was paid", p.rows[0].price === 0);
+  check("...flagged, so $0 is never read as a lost purchase price", p.rows[0].needsReview === true);
+  check("...and says so in the note", /no cost/i.test(p.rows[0].notes || ""));
+
+  // An ordinary buy must not pick up any of this.
+  const buy = rh.parse([
+    '"Activity Date","Process Date","Settle Date","Instrument","Description","Trans Code","Quantity","Price","Amount"',
+    '"1/27/2025","1/27/2025","1/28/2025","CAT","Caterpillar","Buy","2","$500.00","($1,000.00)"',
+  ].join("\n"));
+  check("A normal buy keeps its price", buy.rows[0].price === 500);
+  check("...and is not flagged for review", buy.rows[0].needsReview === false);
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

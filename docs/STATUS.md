@@ -133,6 +133,23 @@ clear that it was caught only because the preview was actually read this time.
 The earlier Robinhood import was driven through curl and its `dropped` list
 went unexamined.
 
+Two older exports followed on 2026-08-21, covering 2025-01-27 to 2025-10-21.
+They added 47 rows and pulled 2026 realized to -$1,277.80 against the app's YTD
+-$1,272.24, within $5.56, while recovering +$1,092.98 of 2025 realized that the
+ledger had never seen.
+
+**They also opened a window that is still missing: 2025-10-22 to 2025-11-13.**
+The files end 10-21 and the original export begins 11-14. Three positions
+bought in that last week -- TEM 14, HIVE 80, PLUG 5 -- were sold inside the gap,
+so the ledger shows them as still held. They are not phantom in the sense of
+being wrong data; the buys are real. The sells are simply absent, and until
+that window is imported the account shows 19 positions where Robinhood shows
+16, and `accountTotal` is correctly null because those lots have no quote.
+
+Voiding those three buys would be the wrong fix: it would erase real purchases
+and the realized P&L of the sales that closed them. The right fix is the
+missing export.
+
 The two IONQ sales still cannot be recovered. Their buys predate any window
 Robinhood will export, so those 27 shares have no cost basis and their realized
 P&L is permanently unknown. `reconcile()` drops them rather than inventing one.
