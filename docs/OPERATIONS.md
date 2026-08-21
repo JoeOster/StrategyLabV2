@@ -161,3 +161,44 @@ Raise that number as tests are added. Never lower it to make a run pass — if t
 count dropped, something stopped running.
 
 To bypass the hook deliberately: `git commit --no-verify`.
+
+## Never copy a database file over a running instance
+
+Learned the hard way during the plan-exits merge, 2026-08-21.
+
+The move was: snapshot the branch database with `VACUUM INTO`, then `cp` it
+over `data/strategy_lab.dev.db` in the main tree. The snapshot was fine. The
+copy produced `database disk image is malformed`.
+
+The reason is worth understanding, because the mistake looks harmless:
+
+1. The service on 3113 was still running, holding the old file open **by
+   inode**, in WAL mode.
+2. `cp` truncates and rewrites that same inode. The running process's handle
+   now points at entirely different content, and it has no idea.
+3. Stopping the service made it checkpoint its old `-wal` into what it thought
+   was its own database. It was not. Old pages landed in the new file.
+
+The stale `-wal` and `-shm` left beside the file are the visible symptom;
+the corruption is already done by then.
+
+**The order that works:**
+
+```bash
+systemctl --user stop strategylab
+rm -f data/strategy_lab.dev.db data/strategy_lab.dev.db-wal data/strategy_lab.dev.db-shm
+cp /path/to/snapshot.db data/strategy_lab.dev.db
+node -e "const {DatabaseSync}=require('node:sqlite');
+         console.log(new DatabaseSync('./data/strategy_lab.dev.db')
+           .prepare('PRAGMA integrity_check').get())"
+systemctl --user start strategylab
+```
+
+Stop first, delete the sidecars explicitly rather than trusting them to be
+gone, and run `integrity_check` before starting anything against it. The whole
+sequence costs about ten seconds.
+
+This cost nothing on the day because the file being overwritten was main's,
+which held six accounts and no transactions, and the source snapshot was
+untouched and could simply be re-copied. Against a database with real data in
+it and no snapshot to fall back on, it is unrecoverable.
