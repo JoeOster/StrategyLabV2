@@ -24,6 +24,12 @@ console.log("Schema applied to test DB.");
 const { baseline: baselineMigrations } = await import("../lib/migrate.js");
 baselineMigrations();
 
+// Same shared seed init-db uses. Applying schema.sql alone leaves a
+// structurally correct database missing the reference rows the app assumes
+// exist -- which is how this suite ended up with no brokerages.
+const { seedReferenceData } = await import("../lib/seed.js");
+seedReferenceData();
+
 const {
   addWatchedItem,
   listWatchedItems,
@@ -165,7 +171,7 @@ check(
 if (notSelected.length) console.log(`      missing from the query: ${notSelected.join(", ")}`);
 
 console.log("\n2. DB wiring checks (no network -- security pre-seeded)");
-db.prepare("INSERT INTO exchanges (code, name) VALUES ('NASDAQ','Nasdaq')").run();
+// NASDAQ comes from the shared reference seed above, not inserted here.
 const exchangeId = db.prepare("SELECT id FROM exchanges WHERE code='NASDAQ'").get().id;
 db.prepare(
   "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('NVDA', ?, 'NVIDIA Corp', 'manual')",
@@ -684,10 +690,10 @@ globalThis.fetch = originalFetch;
 settingsSvcEarly.saveGeneralSettings({ alert_webhook_url: "", alert_webhook_auth_header: "" }); // reset for later sections
 
 // --- Acknowledge flow ---
-// Reuses `holder` and `otherHolder` from earlier sections rather than
-// creating fresh ones -- section 5c's "listHolders returns both holders"
-// check counts every account_holders row, so adding new ones here would
-// silently break an assertion two sections down.
+// Reuses `holder` and `otherHolder` from earlier sections rather than creating
+// fresh ones. That used to be load-bearing, because 5c counted every
+// account_holders row; it no longer is, but reusing them keeps the fixture
+// small.
 const alertHolder = holder;
 const alertList = createWatchlist(alertHolder.id, "Alert Test List");
 const alertItem = await addWatchedItem({
@@ -795,7 +801,15 @@ check(
 
 console.log("\n5c. Settings: account holders");
 const holders = settingsSvc.listHolders();
-check("listHolders returns both holders with counts", holders.length === 2);
+// Counts what this suite created rather than every row: lib/seed.js creates a
+// default holder ("Me") for every database, and a raw total also breaks any
+// time another section adds one. The previous version asserted length === 2
+// and had a warning comment two sections up telling people not to add holders
+// -- a test that constrains the rest of the suite is the wrong shape.
+check(
+  "listHolders returns the holders this suite created, with counts",
+  [holder.id, otherHolder.id].every((id) => holders.some((h) => h.id === id)),
+);
 const newHolder = settingsSvc.createHolder("Third Person");
 check("New holder is not default when others exist", newHolder.is_default === 0);
 settingsSvc.makeHolderDefault(newHolder.id);
@@ -2616,6 +2630,82 @@ check(
   "A closed plan's rungs are no longer evaluated",
   !plans.listPendingExits().some((e) => e.plan_id === closingPlan.id),
 );
+
+console.log("\n15. Brokerages and accounts");
+const acctSvc = await import("../services/accountsService.js");
+
+// Brokerages are rows now, not a CHECK constraint. v11 existed only to add
+// two of them to that enum; opening an account somewhere new should not be a
+// schema change.
+const brokers = acctSvc.listBrokers();
+check("Brokerages are seeded", brokers.length >= 6);
+check(
+  "Parser-backed brokerages are flagged as such",
+  brokers.filter((b) => b.has_parser === 1).map((b) => b.slug).sort().join(",") === "etrade,fidelity,robinhood",
+);
+
+// The slug is what importService selects a parser by, so renaming a brokerage
+// must not move it.
+const etrade = brokers.find((b) => b.slug === "etrade");
+const renamed = acctSvc.updateBroker(etrade.id, { name: "Morgan Stanley E*TRADE" });
+check("A brokerage can be renamed", renamed.name === "Morgan Stanley E*TRADE");
+check("...without its slug moving", renamed.slug === "etrade");
+acctSvc.updateBroker(etrade.id, { name: "E*TRADE" });
+
+let dupeBrokerRejected = false;
+try {
+  acctSvc.createBroker({ name: "Fidelity" });
+} catch (err) {
+  dupeBrokerRejected = /already exists/.test(err.message);
+}
+check("A duplicate brokerage key is refused", dupeBrokerRejected);
+
+const newBroker = acctSvc.createBroker({ name: "Interactive Brokers" });
+check("A new brokerage is just a row", newBroker.slug === "interactivebrokers");
+check(
+  "...and is honest that no parser exists for it",
+  newBroker.has_parser === 0,
+);
+
+// Accounts carry their number as a column. It used to live inside the
+// nickname, e.g. "Rollover IRA (146518557)" -- data hiding in a label.
+const acctA = acctSvc.createAccount(holder.id, {
+  broker: "fidelity", accountNumber: "146518557", accountType: "ira", nickname: "Rollover IRA",
+});
+const acctB = acctSvc.createAccount(holder.id, {
+  broker: "fidelity", accountNumber: "266356256", accountType: "brokerage", nickname: "Wife brokerage",
+});
+check("An account records its number", acctA.account_number === "146518557");
+check(
+  "Accounts are labelled brokerage-then-number, which is how statements are",
+  acctSvc.getAccount(holder.id, acctA.id).label.startsWith("Fidelity 146518557"),
+);
+
+// The concrete payoff: the monthly audit can pick the account itself.
+check(
+  "A statement filename matches its account",
+  acctSvc.matchAccountByFilename(holder.id, "History_for_Account_266356256.csv")?.id === acctB.id,
+);
+check(
+  "A filename with no number matches nothing",
+  acctSvc.matchAccountByFilename(holder.id, "Robinhood.csv") === null,
+);
+check(
+  "An unknown number matches nothing rather than guessing",
+  acctSvc.matchAccountByFilename(holder.id, "History_for_Account_999999999.csv") === null,
+);
+
+let unknownBrokerRejected = false;
+try {
+  acctSvc.createAccount(holder.id, { broker: "notabroker" });
+} catch (err) {
+  unknownBrokerRejected = /Unknown brokerage/.test(err.message);
+}
+check("An unknown brokerage is named, not left to the foreign key", unknownBrokerRejected);
+
+// Cleanup: later sections count rows globally.
+db.prepare("DELETE FROM accounts WHERE id IN (?, ?)").run(acctA.id, acctB.id);
+db.prepare("DELETE FROM brokers WHERE id = ?").run(newBroker.id);
 
 console.log("\n14. Migrations");
 const mig = await import("../lib/migrate.js");

@@ -27,7 +27,17 @@ export const deleteWatchlist = (id, opts = {}) => send(`/api/watchlists/${id}/de
 export const fetchGeneralSettings = () => fetch("/api/settings/general").then(handleResponse);
 export const saveGeneralSettings = (patch) => send("/api/settings/general", "PUT", patch);
 
-// --- Exchanges ---
+// --- Brokerages ---
+export const fetchBrokers = () => fetch("/api/brokers").then(handleResponse);
+export const createBroker = (name) => send("/api/brokers", "POST", { name });
+export const renameBroker = (id, name) => send(`/api/brokers/${id}`, "PATCH", { name });
+
+// --- Accounts ---
+export const fetchAccounts = () => fetch("/api/accounts").then(handleResponse);
+export const createAccount = (payload) => send("/api/accounts", "POST", payload);
+export const updateAccount = (id, patch) => send(`/api/accounts/${id}`, "PUT", patch);
+
+// --- Stock exchanges (NOT brokerages -- see the Brokerages tab) ---
 export const fetchExchanges = () => fetch("/api/exchanges").then(handleResponse);
 export const createExchange = (payload) => send("/api/exchanges", "POST", payload);
 export const deleteExchange = (id) => send(`/api/exchanges/${id}/delete`, "POST", {});

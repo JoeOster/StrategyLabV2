@@ -278,7 +278,9 @@
       <button type="button" class="tab active" data-panel="lists">Lists</button>
       <button type="button" class="tab" data-panel="sources">Advice Sources</button>
       <button type="button" class="tab" data-panel="holders">Account Holders</button>
-      <button type="button" class="tab" data-panel="exchanges">Exchanges</button>
+      <button type="button" class="tab" data-panel="brokerages">Brokerages</button>
+      <button type="button" class="tab" data-panel="accounts">Accounts</button>
+      <button type="button" class="tab" data-panel="exchanges">Stock Exchanges</button>
       <button type="button" class="tab" data-panel="general">General</button>
       <button type="button" class="tab" data-panel="columns">Table Columns</button>
     </nav>
@@ -313,6 +315,23 @@
         <ul id="settings-holders" class="settings-list"></ul>
       </div>
 
+      <div class="settings-panel" data-panel="brokerages" hidden>
+        <div class="panel-head">
+          <h2>Brokerages</h2>
+          <button type="button" id="settings-add-broker-btn" class="primary">+ New Brokerage</button>
+        </div>
+        <p class="panel-hint">The firms you hold accounts with. Renaming one is safe; the key it imports under never changes.</p>
+        <ul id="settings-brokerages" class="settings-list"></ul>
+      </div>
+
+      <div class="settings-panel" data-panel="accounts" hidden>
+        <div class="panel-head">
+          <h2>Accounts</h2>
+          <button type="button" id="settings-add-account-btn" class="primary">+ New Account</button>
+        </div>
+        <p class="panel-hint">Identified by brokerage and account number, which is how statements are labelled &mdash; and how a monthly import knows which account a file belongs to.</p>
+        <ul id="settings-accounts" class="settings-list"></ul>
+      </div>
       <div class="settings-panel" data-panel="exchanges" hidden>
         <div class="panel-head">
           <h2>Exchanges</h2>

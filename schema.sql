@@ -145,20 +145,39 @@ CREATE TABLE account_holders (
 
 -- A holder can have multiple brokerage accounts (Fidelity, E-Trade,
 -- Robinhood, ...). CSV imports and transactions are tied to one account.
+-- The firms accounts are held with. A TABLE, not a CHECK constraint: this is a
+-- list of companies, which is data. As an enum it was structure, and adding one
+-- meant a schema migration -- v11 exists for no reason other than allowing
+-- 'schwab' and 'tradestation'.
+CREATE TABLE brokers (
+  id          INTEGER PRIMARY KEY,
+  -- Stable machine key. MUST match the BROKER constant exported by the matching
+  -- parser in services/importers/, because importService picks a parser by this
+  -- value. Renaming a brokerage changes `name`, never `slug`.
+  slug        TEXT NOT NULL UNIQUE,
+  name        TEXT NOT NULL UNIQUE,
+  -- Whether a CSV parser exists for it. Recorded rather than inferred at import
+  -- time: an account can be held with a brokerage long before anyone writes a
+  -- parser, and the import screen should say so rather than fail at upload.
+  has_parser  INTEGER NOT NULL DEFAULT 0 CHECK (has_parser IN (0,1)),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE accounts (
-  id            INTEGER PRIMARY KEY,
-  holder_id     INTEGER NOT NULL REFERENCES account_holders(id) ON DELETE CASCADE,
-  -- Add a broker here BEFORE opening an account with them. This CHECK fails
-  -- at insert time, not at startup, so a missing broker looks like "creating
-  -- accounts is broken" rather than "the schema is stale" -- the same trap that
-  -- made ISBN lookup appear broken for weeks (see lib/schemaVersion.js v8).
-  -- schwab and tradestation are listed ahead of use: both accounts exist but
-  -- are unfunded and unused as of 2026-08-21. A CSV parser for each is still
-  -- future work; 'other' is the fallback until then.
-  broker        TEXT NOT NULL CHECK (broker IN ('fidelity','etrade','robinhood','schwab','tradestation','other')),
-  account_type  TEXT,                     -- 'brokerage', 'roth_ira', 'ira', etc.
-  nickname      TEXT,
-  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  id              INTEGER PRIMARY KEY,
+  holder_id       INTEGER NOT NULL REFERENCES account_holders(id) ON DELETE CASCADE,
+  broker_id       INTEGER NOT NULL REFERENCES brokers(id) ON DELETE RESTRICT,
+  -- The brokerage's own number for it. Nullable, because an account can be
+  -- registered before its number is to hand and a wrong number is worse than
+  -- none -- the import matches files like History_for_Account_266356256.csv on
+  -- this, so a guess would attach a statement to the wrong account.
+  --
+  -- A column rather than part of the nickname. It used to live inside strings
+  -- like "Rollover IRA (146518557)", which is data hiding in a display label.
+  account_number  TEXT,
+  account_type    TEXT,                   -- 'brokerage', 'roth_ira', 'ira', etc.
+  nickname        TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ============================================================================
@@ -515,6 +534,8 @@ CREATE TABLE app_settings (
 -- Uniqueness on symbol alone matches how the app genuinely behaves. It forgoes
 -- listing one ticker on two exchanges, which nothing here supports anyway:
 -- there is one lookup path and it is by symbol. (BUG 6)
+CREATE INDEX idx_accounts_broker              ON accounts(broker_id);
+CREATE INDEX idx_accounts_number              ON accounts(account_number);
 CREATE INDEX idx_transactions_plan            ON transactions(plan_id);
 -- The evaluator's hot query is "every pending rung of an open plan".
 CREATE INDEX idx_plan_exits_pending

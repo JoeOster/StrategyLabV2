@@ -95,6 +95,66 @@ export function renderHoldersPanel(holders) {
     .join("");
 }
 
+export function renderBrokeragesPanel(brokers) {
+  if (brokers.length === 0) return `<li class="empty-row">No brokerages yet.</li>`;
+  return brokers
+    .map(
+      (b) => `
+      <li data-id="${b.id}">
+        <div class="settings-row">
+          <div class="settings-row-main">
+            <strong>${escapeHtml(b.name)}</strong>
+            <span class="settings-row-meta">
+              ${b.account_count} account(s) ·
+              ${b.has_parser ? "CSV import supported" : "no CSV parser written"}
+            </span>
+          </div>
+          <div class="settings-row-actions">
+            <button type="button" data-action="rename" data-id="${b.id}">Rename</button>
+          </div>
+        </div>
+      </li>`,
+    )
+    .join("");
+}
+
+/**
+ * Accounts, labelled brokerage-then-number.
+ *
+ * That is how the statements are labelled and how Joe identifies them --
+ * "Fidelity 146518557". The nickname is a note rather than the identity: there
+ * are two Fidelity accounts, and "Wife brokerage" does not say which statement
+ * belongs to it.
+ */
+export function renderAccountsPanel(accounts) {
+  if (accounts.length === 0) return `<li class="empty-row">No accounts yet.</li>`;
+  return accounts
+    .map((a) => {
+      const number = a.account_number
+        ? escapeHtml(a.account_number)
+        : `<span class="settings-row-meta">no number set</span>`;
+      const activity = a.transaction_count
+        ? `${a.transaction_count} trade(s) · latest ${escapeHtml(a.last_transaction_date ?? "—")}`
+        : "no trades imported yet";
+      return `
+      <li data-id="${a.id}">
+        <div class="settings-row">
+          <div class="settings-row-main">
+            <strong>${escapeHtml(a.broker_name)} ${number}</strong>
+            <span class="settings-row-meta">
+              ${escapeHtml(a.nickname || "")}${a.nickname ? " · " : ""}${escapeHtml(a.account_type || "")}
+              ${a.account_type ? " · " : ""}${activity}
+            </span>
+          </div>
+          <div class="settings-row-actions">
+            <button type="button" data-action="edit-account" data-id="${a.id}">Edit</button>
+          </div>
+        </div>
+      </li>`;
+    })
+    .join("");
+}
+
 export function renderExchangesPanel(exchanges) {
   if (exchanges.length === 0) {
     return `<li class="empty-row">No exchanges yet.</li>`;

@@ -31,7 +31,13 @@ import { recordBuyWith, recordSellWith, recordDividendWith } from "./transaction
 
 const PARSERS = { fidelity, robinhood, etrade };
 
-const getAccount = db.prepare("SELECT * FROM accounts WHERE id = ?");
+// Joined to brokers because the parser is selected by slug. Since v15 the
+// brokerage is a row rather than a CHECK-constrained string on the account.
+const getAccount = db.prepare(`
+  SELECT a.*, b.slug AS broker, b.name AS broker_name, b.has_parser
+  FROM accounts a JOIN brokers b ON b.id = a.broker_id
+  WHERE a.id = ?
+`);
 
 // match.js compares on the economic facts of the trade, so the symbol has to
 // come along rather than the security_id.
@@ -96,6 +102,15 @@ export function stageImport({ accountId, files }) {
   if (!account) throw new Error("No such account.");
   if (!files?.length) throw new Error("No files supplied.");
 
+  // has_parser is recorded on the brokerage, so an account held somewhere
+  // without a parser fails here with a straight answer rather than at the
+  // first malformed row.
+  if (account.has_parser === 0) {
+    throw new Error(
+      `No CSV parser has been written for ${account.broker_name}. ` +
+        `Supported: ${Object.keys(PARSERS).join(", ")}.`,
+    );
+  }
   const parser = parserFor(account.broker);
 
   const parsed = files.map((f) => ({ filename: f.filename, ...parser.parse(f.text) }));
@@ -296,12 +311,13 @@ export async function approveBatch(batchId, { rowIds = null } = {}) {
  * a gap costs data.
  */
 const latestImportedStmt = db.prepare(`
-  SELECT a.id AS account_id, a.nickname, a.broker,
+  SELECT a.id AS account_id, a.nickname, a.account_number, b.name AS broker,
          (SELECT MAX(t.transaction_date) FROM transactions t
            WHERE t.account_id = a.id AND t.voided_at IS NULL) AS latest_transaction_date,
          (SELECT MAX(b.imported_at) FROM import_batches b
            WHERE b.account_id = a.id AND b.status = 'reconciled') AS last_imported_at
   FROM accounts a
+  JOIN brokers b ON b.id = a.broker_id
   ORDER BY a.id
 `);
 

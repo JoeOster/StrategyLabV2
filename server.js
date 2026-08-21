@@ -376,6 +376,33 @@ app.post("/api/sources/:id/delete", (req, res) => {
 // is what tells you what span to download next, and should be presented as a
 // point to start *before*, since overlapping exports deduplicate safely and a
 // gap silently loses transactions.
+// --- Brokerages ------------------------------------------------------------
+// A table since v15, not a CHECK constraint: opening an account somewhere new
+// is data, and as an enum it was a schema migration (v11 existed only to add
+// two of them).
+
+app.get("/api/brokers", (req, res) => {
+  res.json(accounts.listBrokers());
+});
+
+app.post("/api/brokers", (req, res) => {
+  try {
+    res.status(201).json(accounts.createBroker(req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Rename only. The slug is what importService selects a parser by, so it is
+// deliberately not editable -- renaming the label must not move the wiring.
+app.patch("/api/brokers/:id", (req, res) => {
+  try {
+    res.json(accounts.updateBroker(Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get("/api/accounts", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   res.json(accounts.listAccounts(holder.id));
