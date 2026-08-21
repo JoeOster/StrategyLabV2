@@ -1,8 +1,28 @@
 # Strategy Lab V2 — Status
 
-Last updated: 2026-08-21 (long session; the app moved onto the Orchestrator
-NUC and a lot changed). **Read "Picking this back up after a break" directly
-below — it is current as of this entry.** Highlights:
+Last updated: 2026-08-21 (later the same day: the import write path was built,
+and the four real broker exports now import correctly end to end).
+**Read "Picking this back up after a break" directly below — it is current as
+of this entry.** Highlights:
+
+- **The import write path is built and verified.** Staging, approval and the
+  four routes exist; all four accounts import correctly and the IRA still
+  reconciles **6/6**. Nothing has been imported into the live database yet —
+  that is a deliberate decision left to Joe, not an unfinished step. On branch
+  `import-write-path`, not yet merged.
+- **The offline test suite had been dead since schema v7** and nobody noticed,
+  because it threw rather than reporting a failure. 216 checks had not run in
+  weeks. Fixed; the suite now reports **372 passed, 0 failed**. Worth
+  remembering that a suite which crashes looks a lot like a suite that passes
+  if you only ever read the last line.
+- Two more silent-failure bugs, both found only by running real files:
+  identical trades fingerprint identically (two $20,000 FTRNX buys on the same
+  day collided and would have aborted every IRA import), and repeated FIFO
+  subtraction left sold-out lots holding ~1e-14 shares, which every
+  open-position read counts as a real position.
+
+Earlier the same day (the app moved onto the Orchestrator NUC and a lot
+changed):
 
 - **Migrated off Joe's PC onto the NUC.** Runs as a user-level systemd unit
   (`strategylab.service`) on `localhost:3113`, with a nightly hot backup to the
@@ -20,12 +40,13 @@ below — it is current as of this entry.** Highlights:
   fallback for the 979-8 (Amazon KDP) range Open Library does not carry.
 - **Accounts exist now.** The table shipped in v1 but nothing ever wrote to it,
   which blocked CSV import outright. Six accounts are registered.
-- **CSV import: parsing and reconciliation are built and verified; nothing is
-  persisted yet.** Three broker parsers (Fidelity, Robinhood, E*TRADE) verified
-  against four real accounts — the IRA reconciles **6/6 against a live Fidelity
-  screenshot** from 509 rows across two exports. **`docs/IMPORTS.md` is the
-  authority on this feature**, including why import is an *audit* rather than a
-  loader, and where Claude fits.
+- **CSV import: parsing and reconciliation are built and verified.** Three
+  broker parsers (Fidelity, Robinhood, E*TRADE) verified against four real
+  accounts — the IRA reconciles **6/6 against a live Fidelity screenshot**
+  from 508 rows across two exports. **`docs/IMPORTS.md` is the authority on
+  this feature**, including why import is an *audit* rather than a loader, and
+  where Claude fits. (The persistence half was still unbuilt as of this entry;
+  see the top of this file.)
 - **The HA alert webhook is live and proven** — it targets an HA *webhook
   trigger*, not `notify.<target>`, and therefore needs no token at all.
 
@@ -66,19 +87,46 @@ Code Remote against the same host alias. There is no PC copy any more.
 Restart with `systemctl --user restart strategylab` — the old
 `npm run stop`/`restart` scripts were Windows-only and have been removed.
 
-**The database is empty of user data on purpose.** Schema v11, six accounts
-registered, zero transactions. Real broker exports are sitting in `files/`
-(gitignored): both Fidelity accounts, E*TRADE, and Robinhood. They parse and
-reconcile correctly but **nothing has been imported yet**, because the
-persistence half of the import feature is not built.
+**The database is still empty of user data, now by choice rather than by
+blocker.** Schema v11, six accounts registered, zero transactions. Real broker
+exports sit in `files/` (gitignored): both Fidelity accounts, E*TRADE, and
+Robinhood. They parse, reconcile, stage and approve correctly — verified
+repeatedly against `VACUUM INTO` snapshots — but the live database has
+deliberately not been written to. Joe wanted to run the real import himself,
+with the Fidelity screenshot in front of him.
 
-**The single next piece of work** is import staging: `import_batches` →
-`import_raw_rows` → approved writes into `transactions` via the existing
-`recordBuy`/`recordSell`, so FIFO, cost basis and the void filter all apply.
-Everything it depends on is built and tested; the design is settled in
-`docs/IMPORTS.md` and can be picked up cold. Doing it lands Joe's six real IRA
-positions and lets `/api/summary` be checked against his actual Fidelity
-screenshot.
+**The import write path is built** (branch `import-write-path`):
+`import_batches` → `import_raw_rows` → approved writes into `transactions`
+through the existing `recordBuy`/`recordSell`/`recordDividend`, so FIFO, cost
+basis and the void filter all apply. Routes are `POST /api/imports` (stage),
+`GET /api/imports/:id` (preview), `POST /api/imports/:id/approve`, and
+`GET /api/imports/latest`. Only rows classified `new` are ever written.
+
+**The single next piece of work** is the import UI: upload, preview and
+approve screens over those four routes, plus the per-account "latest imported"
+display. The backend beneath it is done and tested.
+
+**To run the real import**, take a backup first -- `bash deploy/backup-db.sh`
+is the real one and refuses to run if the NAS mount is down, or the snapshot
+below for a quick local copy -- then use `scripts/verify-import.js`, which
+stages and approves a set of files for an account and prints what landed:
+
+```
+node -e "import('./lib/db.js').then(m=>m.default.exec(\"VACUUM INTO '/tmp/pre-import.db'\"))"
+node scripts/verify-import.js 1 files/IRA_a.csv files/IRA_b.csv
+```
+
+Expect 507 rows written and exactly six positions: ASTS 30, KLAR 100, KTOS 30,
+MRVL 30, MU 3, RKLB 50.
+
+**One number to check before trusting it:** after importing the IRA,
+`/api/summary` reports realized P&L of about **-$14,745**. That has not been
+verified against anything. The likeliest contributor is extrapolated cost
+basis on transferred-in shares — the documented `needs_review` case, where the
+export gives a transfer *value* rather than what was paid, which inflates a
+loss on sale. It may be entirely correct. It has simply never been checked,
+and it is exactly the shape of the three bugs that cost this project real time:
+a plausible number that nothing throws on.
 
 **Read `docs/IMPORTS.md` before touching anything import-related.** It carries
 per-broker format traps that each cost real effort to find and every one of

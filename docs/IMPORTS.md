@@ -235,21 +235,24 @@ broker files must not also hold write access to the ledger.
 
 **Built, tested, committed:** `csv.js` (RFC4180), three broker parsers
 (`fidelity.js`, `robinhood.js`, `etrade.js`), `reconcile.js` (the drop policy),
-`match.js` (the audit classifier), the accounts service and routes, and the
-`needs_review` flag columns on `transactions`.
+`match.js` (the audit classifier), the accounts service and routes, the
+`needs_review` flag columns on `transactions`, and — as of the second session
+on 2026-08-21 — `importService.js` and the four import routes.
 
-**Not built:** anything that writes an import to the database.
+**Not built:** the UI. Upload, preview and approve screens over the routes,
+plus the per-account "latest imported" display described at the end of this
+file.
 
-**Nothing has been imported.** The database has six accounts and zero
-transactions. Real exports for all four accounts sit in `files/` (gitignored).
-They parse and reconcile correctly every time they are run; they have simply
-never been persisted.
+**Nothing has been imported into the live database**, by choice rather than by
+blocker. Six accounts, zero transactions. Real exports for all four accounts
+sit in `files/` (gitignored) and import correctly end to end — verified against
+`VACUUM INTO` snapshots, never against the live file.
 
 **Verified numbers, for checking a change did not break anything:**
 
 | Account | Files | Accepted | Review | Dropped | Positions |
 |---|---|---|---|---|---|
-| Fidelity IRA `146518557` | `IRA_a.csv` + `IRA_b.csv` | 506 | 6 | 4 | **6/6 vs screenshot** |
+| Fidelity IRA `146518557` | `IRA_a.csv` + `IRA_b.csv` | 507 | 6 | 4 | **6/6 vs screenshot** |
 | Fidelity `266356256` | `History_for_Account_266356256.csv` | 133 | 3 | 0 | 3/3 |
 | E*TRADE `-7178` | `etrade_a.csv` + `etrade_b.csv` | 87 | 0 | 1 | — |
 | Robinhood | `Robinhood.csv` | 108 | 0 | 2 | — |
@@ -257,7 +260,11 @@ never been persisted.
 Zero negative positions in any of them. The IRA's expected positions are
 ASTS 30, KLAR 100, KTOS 30, MRVL 30, MU 3, RKLB 50.
 
-### Blocker found 2026-08-21: external_ref cannot be one-per-broker-row
+### Blocker found 2026-08-21, FIXED the same day: external_ref cannot be one-per-broker-row
+
+**Fixed in `import-write-path`.** All three steps below were implemented, and
+the IRA now imports 507/507 rows with zero rejections. The description is kept
+because the reasoning still explains why the code looks the way it does.
 
 A trial load of the IRA straight through `POST /api/transactions` (skipping
 staging) got **302/302 buys in and only 94/204 sells**. 110 sells were rejected
@@ -294,31 +301,48 @@ the ordinary API, with FIFO, cost basis and validation applied normally, and
 zero unexpected failures. The write path is not far off -- it just cannot treat
 one CSV row as one database row.
 
-**Next piece of work**, in order:
+### What the write path actually needed (2026-08-21, second session)
 
-1. `import_batches` + `import_raw_rows` writes — stage the parsed rows with
-   their classification and the original row as JSON.
-2. An approval step that writes only accepted rows, through the existing
-   `recordBuy` / `recordSell` / `recordDividend` so FIFO, cost basis and the
-   void filter all apply. Never write to `transactions` directly.
-3. Routes: upload → preview → approve.
+Three things beyond the fix above, none of which were visible from the design:
 
-Rows the parsers mark `needsReview` must arrive in `transactions` with
-`needs_review = 1` and the reason carried across — that plumbing exists
-(`recordBuy` and friends accept `needsReview`/`reviewReason`), it just is not
-wired to the importer yet.
+1. **`withTransaction` had to become re-entrant.** A batch must commit or roll
+   back as one unit, but it is built out of `recordBuy`/`recordSell` calls that
+   each open a transaction of their own, and SQLite has no nested `BEGIN`.
+   Inner levels now use SAVEPOINTs.
 
+2. **The record functions had to split in half.** `getOrCreateSecurity` does
+   network I/O, and `withTransaction` takes a *synchronous* function — awaiting
+   inside it lets the transaction commit before the awaited half ever runs,
+   which is not atomicity, it only looks like it. Each is now an async wrapper
+   (`recordBuy`) around a sync core (`recordBuyWith`) that takes an
+   already-resolved security. The importer resolves every symbol up front.
 
+3. **Identical trades fingerprint identically.** Two genuinely identical
+   $20,000 FTRNX buys on 2025-01-21 produce the same `external_ref`, and the
+   partial unique index rejects the second — the same failure as the fan-out
+   blocker, a different cause. `disambiguateRefs` in `csv.js` appends an
+   occurrence ordinal, stable across re-imports because the same date-ranged
+   export produces the same groups. It shifts only if an export splits an
+   identical group across its boundary, which is one more reason to overlap
+   exports generously.
 
-1. **Accounts.** There is no `/api/accounts` route and nothing anywhere inserts
-   into `accounts`, but `import_batches.account_id` is `NOT NULL`. This blocks
-   persistence entirely.
-2. **Staging.** `import_batches` → `import_raw_rows` → reconciled
-   `transactions`. `import_raw_rows.raw_data` is already "a JSON blob of the
-   original row", and per `V2_BACKLOG.md` the consumption side must not care
-   which producer wrote it — a future Fidelity browser-sync is meant to reuse
-   this same pipeline.
-3. **Routes and UI** for upload, preview and reconcile.
+A fourth bug was not an import bug at all, but only a real import was ever
+going to find it: repeated FIFO subtraction leaves a fully-sold lot holding
+~1e-14 shares, and every open-position read filters `quantity_remaining > 0`.
+The IRA came out with **eight** positions instead of six, the two extras
+sitting at 0.00 shares and $0.00. Drained lots now snap to exactly zero in
+`reduceLot`.
+
+**Rows flagged `needsReview` are carried across** into `transactions` with
+`needs_review = 1` and the reason preserved. Note the count grows on the way
+in: six flagged broker rows became seven flagged transaction rows, because a
+flagged sell fans out across the lots it consumes and each row inherits the
+flag. That is correct, not a double-count.
+
+**Verified end to end** on all four accounts against snapshots: no negative
+positions anywhere, every staged row mapped to a transaction, and a re-import
+of the same files classifies all 507 rows as `duplicate` and writes nothing.
+
 
 ### Requested: show the latest imported data date per account
 
