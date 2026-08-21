@@ -8,6 +8,7 @@
 // logging, error shaping, and any future API-key handling in one place
 // instead of scattered across UI code.
 import { withUsageLog } from "../usageLog.js";
+import { fetchWithTimeout } from "../../lib/timeout.js";
 
 const BASE_URL = "https://openlibrary.org/api/books";
 
@@ -64,7 +65,7 @@ export async function lookupBookByIsbn(rawIsbn) {
     url.searchParams.set("jscmd", "data");
     url.searchParams.set("format", "json");
 
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url, { label: "open library" });
     if (!res.ok) {
       const err = new Error(`Open Library lookup failed: ${res.status} ${res.statusText}`);
       err.statusCode = res.status;

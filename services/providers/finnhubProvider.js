@@ -10,6 +10,7 @@
 // process.loadEnvFile() -- every module that needs process.env just reads
 // it directly rather than each re-importing a .env loader.
 import { withUsageLog } from "../usageLog.js";
+import { fetchWithTimeout } from "../../lib/timeout.js";
 
 const BASE_URL = "https://finnhub.io/api/v1";
 
@@ -29,7 +30,7 @@ async function finnhubGet(endpointPath, params) {
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   url.searchParams.set("token", key);
 
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url, { label: "finnhub" });
   if (!res.ok) {
     const err = new Error(`Finnhub ${endpointPath} failed: ${res.status} ${res.statusText}`);
     err.statusCode = res.status;

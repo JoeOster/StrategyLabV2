@@ -9,6 +9,7 @@
 // at all -- 3.x's default export registers every module.
 import YahooFinance from "yahoo-finance2";
 import { withUsageLog } from "../usageLog.js";
+import { withTimeout } from "../../lib/timeout.js";
 
 // suppressNotices silences the library's one-time "please fill out our
 // survey" console message. (Tried this once before and it appeared to do
@@ -22,7 +23,7 @@ const yahooFinance = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
  */
 export async function getQuote(symbol) {
   return withUsageLog("yahoo", `quote:${symbol}`, async () => {
-    const q = await yahooFinance.quote(symbol);
+    const q = await withTimeout(yahooFinance.quote(symbol), { label: `yahoo quote ${symbol}` });
     if (!q || q.regularMarketPrice == null) {
       throw new Error(`No quote returned for ${symbol}`);
     }
@@ -50,7 +51,10 @@ export async function getHistorical(symbol, range = {}) {
   const period1 = range.period1 ?? new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
   const period2 = range.period2 ?? new Date();
   return withUsageLog("yahoo", `chart:${symbol}`, async () => {
-    const result = await yahooFinance.chart(symbol, { period1, period2, interval: "1d" });
+    const result = await withTimeout(
+      yahooFinance.chart(symbol, { period1, period2, interval: "1d" }),
+      { label: `yahoo history ${symbol}` },
+    );
     return (result.quotes || [])
       .filter((row) => row.close != null)
       .map((row) => ({
@@ -72,9 +76,10 @@ export async function getHistorical(symbol, range = {}) {
  */
 export async function getProfile(symbol) {
   return withUsageLog("yahoo", `quoteSummary:${symbol}`, async () => {
-    const result = await yahooFinance.quoteSummary(symbol, {
-      modules: ["assetProfile", "price"],
-    });
+    const result = await withTimeout(
+      yahooFinance.quoteSummary(symbol, { modules: ["assetProfile", "price"] }),
+      { label: `yahoo profile ${symbol}` },
+    );
     const profile = result.assetProfile ?? {};
     const price = result.price ?? {};
     return {
@@ -97,12 +102,10 @@ export async function getDividendsAndSplits(symbol, range = {}) {
   const period1 = range.period1 ?? new Date(Date.now() - 5 * 365 * 24 * 60 * 60 * 1000);
   const period2 = range.period2 ?? new Date();
   return withUsageLog("yahoo", `chart-events:${symbol}`, async () => {
-    const result = await yahooFinance.chart(symbol, {
-      period1,
-      period2,
-      interval: "1d",
-      events: "div,split",
-    });
+    const result = await withTimeout(
+      yahooFinance.chart(symbol, { period1, period2, interval: "1d", events: "div,split" }),
+      { label: `yahoo events ${symbol}` },
+    );
     const dividends = (result.events?.dividends || []).map((d) => ({
       exDate: d.date.toISOString().slice(0, 10),
       amount: d.amount,

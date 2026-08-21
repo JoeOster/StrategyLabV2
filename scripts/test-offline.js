@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 608;
+const MIN_EXPECTED_CHECKS = 618;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -3929,6 +3929,67 @@ console.log("\n30. Robinhood REC: shares received at no cost");
   ].join("\n"));
   check("A normal buy keeps its price", buy.rows[0].price === 500);
   check("...and is not flagged for review", buy.rows[0].needsReview === false);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n31. Outbound calls cannot hang forever");
+// Nothing in this app had a timeout. Every provider call would wait
+// indefinitely on a server that accepted the connection and then said nothing.
+// The alert scheduler ticks on a timer during market hours, and the
+// re-entrancy guard means a hung tick does not pile up behind itself -- so the
+// symptom is not a crash but alerts quietly ceasing, the app looking healthy
+// while doing nothing. A wrong answer is recoverable; silence is not, because
+// nobody goes looking for an alert that never arrived.
+{
+  const { withTimeout, fetchWithTimeout, TimeoutError, DEFAULT_TIMEOUT_MS } =
+    await import("../lib/timeout.js");
+
+  check("There is a default ceiling", DEFAULT_TIMEOUT_MS > 0);
+
+  const resolved = await withTimeout(Promise.resolve("ok"), { ms: 1000 });
+  check("A prompt answer passes straight through", resolved === "ok");
+
+  let rejected = null;
+  try {
+    await withTimeout(Promise.reject(new Error("upstream said no")), { ms: 1000 });
+  } catch (err) { rejected = err; }
+  check("A real failure is not disguised as a timeout", rejected?.message === "upstream said no");
+  check("...and is not wrapped in TimeoutError", !(rejected instanceof TimeoutError));
+
+  // The thing this exists for.
+  const hang = new Promise(() => {});
+  let timedOut = null;
+  const started = Date.now();
+  try {
+    await withTimeout(hang, { ms: 60, label: "a server that never answers" });
+  } catch (err) { timedOut = err; }
+  check("A call that never answers eventually gives up", timedOut instanceof TimeoutError);
+  check("...promptly", Date.now() - started < 2000);
+  check("...naming what went quiet", /never answers/.test(timedOut.message));
+  check("...and for how long", /60ms/.test(timedOut.message));
+
+  // The safety net must not itself become the crash. A request abandoned here
+  // that fails on its own minutes later would otherwise surface as an
+  // unhandled rejection with no context, long after anything could act on it.
+  let unhandled = null;
+  const onUnhandled = (err) => { unhandled = err; };
+  process.on("unhandledRejection", onUnhandled);
+  const slowFailure = new Promise((_, reject) => setTimeout(() => reject(new Error("late")), 40));
+  try {
+    await withTimeout(slowFailure, { ms: 10, label: "slow failure" });
+  } catch { /* expected */ }
+  await new Promise((r) => setTimeout(r, 120));
+  process.off("unhandledRejection", onUnhandled);
+  check("A late failure on an abandoned call does not crash the process", unhandled === null);
+
+  // fetch aborts rather than merely being abandoned, so the socket is released.
+  let fetchErr = null;
+  try {
+    // Reserved by RFC 5737 for documentation; never routable, so it hangs.
+    await fetchWithTimeout("http://192.0.2.1/never", { ms: 80, label: "unroutable host" });
+  } catch (err) { fetchErr = err; }
+  check("fetchWithTimeout gives up too", fetchErr instanceof TimeoutError);
+  check("...and says which host", /unroutable host/.test(fetchErr.message));
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -16,6 +16,7 @@
 // definitely exist. Free tier with a key is 1,000 requests/day.
 import { withUsageLog } from "../usageLog.js";
 import { normalizeIsbn } from "./openLibraryProvider.js";
+import { fetchWithTimeout } from "../../lib/timeout.js";
 
 const BASE_URL = "https://www.googleapis.com/books/v1/volumes";
 
@@ -52,7 +53,7 @@ export async function lookupBookByIsbn(rawIsbn) {
     url.searchParams.set("q", `isbn:${isbn}`);
     url.searchParams.set("key", key);
 
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url, { label: "google books" });
     if (!res.ok) {
       // 400 here almost always means a bad/restricted key rather than a bad
       // ISBN -- worth saying so, since the ISBN was already validated above.
