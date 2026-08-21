@@ -1,4 +1,6 @@
 // The "HTML" file for orders. Pure functions: data in, markup out.
+import { money, signedMoney, formatQty, formatPrice } from "../shared/format.js";
+
 import { renderStrategyOptions } from "../journal/render.js";
 export { renderStrategyOptions };
 
@@ -266,24 +268,8 @@ export function filterPositions(positions, query) {
 
 // --- formatting -------------------------------------------------------------
 
-function money(value) {
-  if (value == null) return "—";
-  const n = Number(value);
-  return `${n < 0 ? "-" : ""}$${Math.abs(n).toFixed(2)}`;
-}
 
-function signedMoney(value) {
-  if (value == null) return "—";
-  const n = Number(value);
-  return `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
-}
 
-function formatQty(value) {
-  if (value == null) return "—";
-  const n = Number(value);
-  // Whole share counts shouldn't render as "100.0000".
-  return Number.isInteger(n) ? String(n) : n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
-}
 
 function truncate(str, maxLen) {
   const s = str || "";

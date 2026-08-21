@@ -7,6 +7,8 @@
 // "available via the Columns tool but hidden until the user opts in" -- these
 // extra ones exist so hide/show is actually useful, not just plumbing with
 // nothing to reveal.
+import { formatPrice } from "../shared/format.js";
+
 export const ALL_COLUMNS = [
   { key: "symbol", label: "Symbol" },
   { key: "trend_10d", label: "10d" },
@@ -249,9 +251,6 @@ function computeChangePct(item) {
   return ((Number(item.last_price) - Number(item.prev_close)) / Number(item.prev_close)) * 100;
 }
 
-function formatPrice(value) {
-  return value != null ? `$${Number(value).toFixed(2)}` : "—";
-}
 
 function renderTargetCell(item) {
   if (item.order_type === "HELD") {
