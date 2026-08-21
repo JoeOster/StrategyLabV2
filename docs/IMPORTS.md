@@ -53,6 +53,24 @@ re-importing idempotent.
   bug looks like: correct where you check, wrong where you don't.
 - Nine action verbs handled, including fund capital-gain distributions and bond
   interest (income, no share movement) and redemptions (position leaves at par).
+- **Bonds and CDs are skipped, deliberately.** They are quoted per $100 of face
+  value with `Quantity` carrying the face amount in dollars, so a $1,000 CD at
+  par reads as `qty 1000 @ px 100`. Stock maths turns that into $100,000 and
+  books a **$99,000 phantom loss** on redemption — which is exactly what
+  happened before this was caught. The `Amount` column said `1000` throughout.
+  This app has no concept of face value, coupons, accrued interest or maturity,
+  so such an instrument cannot be represented correctly at all: skipping it is
+  honest, mangling it is not. Detected by CUSIP shape (9 alphanumerics
+  including a digit). **Consequence worth knowing: a real $1,000 US Bank CD and
+  its $32.16 of interest are absent from the ledger.** Tracking CDs properly
+  would be a schema feature, not a parser fix.
+- **Unit price is extrapolated for sells as well as buys.** Transfers out have
+  an empty `Price` column; a buy-only rule left them at price 0 and booked the
+  whole cost basis as a realized loss.
+- **`quantity * price` is cross-checked against the cash amount**, and a gap
+  beyond fees and rounding flags the row. That is a general guard against the
+  next instrument whose unit convention nobody anticipated, rather than a fix
+  for one known case.
 
 ### Robinhood
 
@@ -213,7 +231,47 @@ fixed column mapping already solves for free.
 combine untrusted content with actuation in one session. A skill that reads
 broker files must not also hold write access to the ledger.
 
-## Remaining work
+## State of play (2026-08-21) — read this first
+
+**Built, tested, committed:** `csv.js` (RFC4180), three broker parsers
+(`fidelity.js`, `robinhood.js`, `etrade.js`), `reconcile.js` (the drop policy),
+`match.js` (the audit classifier), the accounts service and routes, and the
+`needs_review` flag columns on `transactions`.
+
+**Not built:** anything that writes an import to the database.
+
+**Nothing has been imported.** The database has six accounts and zero
+transactions. Real exports for all four accounts sit in `files/` (gitignored).
+They parse and reconcile correctly every time they are run; they have simply
+never been persisted.
+
+**Verified numbers, for checking a change did not break anything:**
+
+| Account | Files | Accepted | Review | Dropped | Positions |
+|---|---|---|---|---|---|
+| Fidelity IRA `146518557` | `IRA_a.csv` + `IRA_b.csv` | 506 | 6 | 4 | **6/6 vs screenshot** |
+| Fidelity `266356256` | `History_for_Account_266356256.csv` | 133 | 3 | 0 | 3/3 |
+| E*TRADE `-7178` | `etrade_a.csv` + `etrade_b.csv` | 87 | 0 | 1 | — |
+| Robinhood | `Robinhood.csv` | 108 | 0 | 2 | — |
+
+Zero negative positions in any of them. The IRA's expected positions are
+ASTS 30, KLAR 100, KTOS 30, MRVL 30, MU 3, RKLB 50.
+
+**Next piece of work**, in order:
+
+1. `import_batches` + `import_raw_rows` writes — stage the parsed rows with
+   their classification and the original row as JSON.
+2. An approval step that writes only accepted rows, through the existing
+   `recordBuy` / `recordSell` / `recordDividend` so FIFO, cost basis and the
+   void filter all apply. Never write to `transactions` directly.
+3. Routes: upload → preview → approve.
+
+Rows the parsers mark `needsReview` must arrive in `transactions` with
+`needs_review = 1` and the reason carried across — that plumbing exists
+(`recordBuy` and friends accept `needsReview`/`reviewReason`), it just is not
+wired to the importer yet.
+
+
 
 1. **Accounts.** There is no `/api/accounts` route and nothing anywhere inserts
    into `accounts`, but `import_batches.account_id` is `NOT NULL`. This blocks

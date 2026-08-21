@@ -1,5 +1,42 @@
 # Strategy Lab V2 — Status
 
+Last updated: 2026-08-21 (long session; the app moved onto the Orchestrator
+NUC and a lot changed). **Read "Picking this back up after a break" directly
+below — it is current as of this entry.** Highlights:
+
+- **Migrated off Joe's PC onto the NUC.** Runs as a user-level systemd unit
+  (`strategylab.service`) on `localhost:3113`, with a nightly hot backup to the
+  NAS. **The PC working tree has been deleted** — the NUC is the only one, and
+  development happens over SSH. See `docs/MIGRATION.md`.
+- **Schema v6 -> v11.** Orders are voided rather than deleted (v7); ISBN lookup
+  fixed (v8) and a Google Books fallback added (v9); imported figures that were
+  extrapolated can now be flagged and reconciled later (v10); `schwab` and
+  `tradestation` added to the broker list ahead of use (v11).
+- **Orders are never hard-deleted.** A mistaken entry is *voided* — the row
+  survives for the audit trail and stops counting. Twelve read paths filter it.
+  Selling was never a delete and still is not.
+- **ISBN lookup had never worked at all** — every call died on a CHECK
+  constraint that did not list `openlibrary`. Fixed, plus a Google Books
+  fallback for the 979-8 (Amazon KDP) range Open Library does not carry.
+- **Accounts exist now.** The table shipped in v1 but nothing ever wrote to it,
+  which blocked CSV import outright. Six accounts are registered.
+- **CSV import: parsing and reconciliation are built and verified; nothing is
+  persisted yet.** Three broker parsers (Fidelity, Robinhood, E*TRADE) verified
+  against four real accounts — the IRA reconciles **6/6 against a live Fidelity
+  screenshot** from 509 rows across two exports. **`docs/IMPORTS.md` is the
+  authority on this feature**, including why import is an *audit* rather than a
+  loader, and where Claude fits.
+- **The HA alert webhook is live and proven** — it targets an HA *webhook
+  trigger*, not `notify.<target>`, and therefore needs no token at all.
+
+Three bugs found this session are worth internalising, because **none of them
+would ever have thrown**: `TRANSFERRED TO` rows being ignored (implying seven
+positions that do not exist, while still matching every stock position); a
+$1,000 CD read as $100,000 (bonds quote per $100 of face value); and an
+`external_ref` dedupe that would have duplicated every hand-entered trade. Each
+looked like working software. They surfaced only by checking outputs against
+ground truth rather than checking that the code ran.
+
 Last updated: 2026-08-09 (code-reviewed the whole implementation cold —
 server.js, every services/*.js file, the frontend — and found real gaps.
 Fixed the one correctness bug that actually mattered: stock splits were
@@ -20,10 +57,32 @@ it's the "external brain" for where this project is and why.
 
 ## Picking this back up after a break
 
-Everything through the scheduled-alerts feature is built, offline-tested, and
-now also verified live in a real browser (see "Clicked through for real
-(2026-07-27)" under "Scheduled alerts + webhook delivery" below). Nothing is
-mid-edit and nothing is known-broken as of this date — safe to leave as-is.
+**Current as of 2026-08-21.** Nothing is mid-edit, nothing is known-broken,
+every repo is committed and pushed, and all services are running.
+
+**Where the app lives now.** On the Orchestrator NUC at `~/StrategyLabV2`,
+served on `localhost:3113` and reachable on the LAN. `ssh orchestrator`, or VS
+Code Remote against the same host alias. There is no PC copy any more.
+Restart with `systemctl --user restart strategylab` — the old
+`npm run stop`/`restart` scripts were Windows-only and have been removed.
+
+**The database is empty of user data on purpose.** Schema v11, six accounts
+registered, zero transactions. Real broker exports are sitting in `files/`
+(gitignored): both Fidelity accounts, E*TRADE, and Robinhood. They parse and
+reconcile correctly but **nothing has been imported yet**, because the
+persistence half of the import feature is not built.
+
+**The single next piece of work** is import staging: `import_batches` →
+`import_raw_rows` → approved writes into `transactions` via the existing
+`recordBuy`/`recordSell`, so FIFO, cost basis and the void filter all apply.
+Everything it depends on is built and tested; the design is settled in
+`docs/IMPORTS.md` and can be picked up cold. Doing it lands Joe's six real IRA
+positions and lets `/api/summary` be checked against his actual Fidelity
+screenshot.
+
+**Read `docs/IMPORTS.md` before touching anything import-related.** It carries
+per-broker format traps that each cost real effort to find and every one of
+which fails silently rather than erroring.
 
 Two things worth knowing before diving back in:
 - **The dev server can outlive its terminal — but there are now scripts for
@@ -1311,6 +1370,11 @@ picking this back up and something here doesn't match intent:
   added later"); these columns hold references until that's built.
 
 ## Suggested next steps (in no particular order)
+
+**As of 2026-08-21 the top item is import staging** — see "Picking this back up
+after a break" at the top of this file. Everything below predates that and is
+still valid, but none of it is the obvious next move.
+
 
 - **First thing in a new session**: `npm install && npm start`, open
   `http://localhost:3113`, and actually click through — add a ticker, add a
