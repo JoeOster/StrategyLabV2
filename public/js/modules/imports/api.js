@@ -16,6 +16,11 @@ const send = (url, body) =>
   }).then(handleResponse);
 
 export const fetchAccounts = () => fetch("/api/accounts").then(handleResponse);
+export const fetchPendingBatches = () => fetch("/api/imports/pending").then(handleResponse);
+
+export const discardBatch = (id) =>
+  fetch(`/api/imports/${id}`, { method: "DELETE" }).then(handleResponse);
+
 export const fetchLatestImported = () => fetch("/api/imports/latest").then(handleResponse);
 export const matchAccount = (filename) =>
   fetch(`/api/accounts/match?filename=${encodeURIComponent(filename)}`).then(handleResponse);

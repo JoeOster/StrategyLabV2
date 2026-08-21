@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 710;
+const MIN_EXPECTED_CHECKS = 727;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4423,6 +4423,84 @@ console.log("\n38. The new columns are actually read");
     "The gap is still measured against the ceiling",
     Math.abs(entry({}).gapPerShare - 0.5) < 1e-9,
   );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n39. A staged import can be found again");
+// Staging writes the batch and its rows to the database, but the preview lived
+// only in the browser's memory. Reload the page, close the tab, or stage from
+// a script, and the batch was stranded: present in the data, invisible in the
+// UI, reachable only by already knowing its id.
+//
+// Several accumulated in one afternoon before anyone noticed, and each had to
+// be deleted by hand from the database. An import that is half-finished is
+// exactly the state a user must be able to see, because the alternative is
+// trusting that nothing was left behind.
+{
+  const imports = await import("../services/importService.js");
+
+  const acct = acctSvcEarly.createAccount(holder.id, { broker: "fidelity", accountNumber: "9911" });
+  const batch = db
+    .prepare("INSERT INTO import_batches (account_id, broker, filename, row_count) VALUES (?, 'fidelity', 'stranded.csv', 2) RETURNING *")
+    .get(acct.id);
+  for (const status of ["new", "duplicate"]) {
+    db.prepare("INSERT INTO import_raw_rows (batch_id, raw_data, reconciliation_status) VALUES (?, '{}', ?)")
+      .run(batch.id, status);
+  }
+
+  const pending = imports.listPendingBatches();
+  const mine = pending.find((b) => b.id === batch.id);
+  check("A staged batch is listed as pending", mine != null);
+  check("...naming the account it belongs to", mine.account_number === "9911");
+  check("...and the file it came from", mine.filename === "stranded.csv");
+  check("...with what it would actually add", mine.new_rows === 1);
+  check("...and what is already present", mine.duplicate_rows === 1);
+
+  // Discarding is a hard delete, which nothing else in this app does. It is
+  // safe precisely because a pending batch has written nothing to the ledger:
+  // there is no history to preserve, only a staging area to clear.
+  const before = db.prepare("SELECT COUNT(*) n FROM import_raw_rows WHERE batch_id = ?").get(batch.id).n;
+  const result = imports.discardBatch(batch.id);
+  check("Discarding reports what it threw away", result.stagedRows === before);
+  check("...and the batch is gone", !imports.listPendingBatches().some((b) => b.id === batch.id));
+  check(
+    "...along with its staged rows, not orphaned",
+    db.prepare("SELECT COUNT(*) n FROM import_raw_rows WHERE batch_id = ?").get(batch.id).n === 0,
+  );
+
+  // An APPROVED batch is the provenance of real trades and must not be
+  // removable by the same call.
+  const done = db
+    .prepare("INSERT INTO import_batches (account_id, broker, filename, row_count, status) VALUES (?, 'fidelity', 'done.csv', 1, 'reconciled') RETURNING *")
+    .get(acct.id);
+  let refused = "";
+  try { imports.discardBatch(done.id); } catch (err) { refused = err.message; }
+  check("An approved batch cannot be discarded", /already approved/.test(refused));
+  check("...and says what to do instead", /void/.test(refused));
+  check(
+    "...and is still there",
+    db.prepare("SELECT COUNT(*) n FROM import_batches WHERE id = ?").get(done.id).n === 1,
+  );
+  check("An approved batch never appears as pending",
+    !imports.listPendingBatches().some((b) => b.id === done.id));
+
+  let missing = "";
+  try { imports.discardBatch(999999); } catch (err) { missing = err.message; }
+  check("Discarding something that does not exist says so", /No such import batch/.test(missing));
+
+  // The view.
+  const { renderPendingBatches } = await import("../public/js/modules/imports/render.js");
+  check("Nothing pending renders nothing at all", renderPendingBatches([]) === "");
+  check("...not an empty panel", renderPendingBatches(null) === "");
+
+  const html = renderPendingBatches([
+    { id: 7, broker_name: "Fidelity", account_number: "146518557", filename: "IRA_b.csv",
+      imported_at: "2026-08-21 22:33:12", new_rows: 3, duplicate_rows: 200, review_rows: 0 },
+  ]);
+  check("A pending batch is shown with a way back to it", /resume-batch-btn/.test(html));
+  check("...and a way to throw it away", /discard-batch-btn/.test(html));
+  check("...saying nothing has been written yet", /nothing from it is in your ledger yet/.test(html));
+  check("...and what it would add", html.includes("3 to add"));
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

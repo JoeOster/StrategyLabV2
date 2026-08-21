@@ -301,6 +301,58 @@ function buildWarnings(accepted) {
 }
 
 /** Reads a staged batch back for the preview screen. */
+// Batches staged and never decided on.
+//
+// Staging writes a batch and its rows to the database, but the preview lived
+// only in the browser's memory -- so closing the tab, reloading, or staging
+// from a script left the batch stranded: present in the data, invisible and
+// unreachable from the UI, and counted by nothing. Several accumulated during
+// one afternoon's work before anybody noticed.
+//
+// An import that is half-done is exactly the state a user needs to be able to
+// see, because the alternative is trusting that nothing was left behind.
+const pendingBatchesStmt = db.prepare(`
+  SELECT
+    b.id, b.account_id, b.broker, b.filename, b.imported_at, b.row_count,
+    br.name AS broker_name, a.account_number, a.nickname,
+    SUM(CASE WHEN r.reconciliation_status = 'new' THEN 1 ELSE 0 END) AS new_rows,
+    SUM(CASE WHEN r.reconciliation_status = 'duplicate' THEN 1 ELSE 0 END) AS duplicate_rows,
+    SUM(CASE WHEN r.reconciliation_status = 'needs_review' THEN 1 ELSE 0 END) AS review_rows
+  FROM import_batches b
+  JOIN accounts a ON a.id = b.account_id
+  JOIN brokers br ON br.id = a.broker_id
+  LEFT JOIN import_raw_rows r ON r.batch_id = b.id
+  WHERE b.status = 'pending'
+  GROUP BY b.id
+  ORDER BY b.imported_at DESC, b.id DESC
+`);
+
+export function listPendingBatches() {
+  return pendingBatchesStmt.all();
+}
+
+const deleteBatchStmt = db.prepare("DELETE FROM import_batches WHERE id = ? AND status = 'pending'");
+
+/**
+ * Throws away a staged batch that was never approved.
+ *
+ * A hard delete, unlike everything else in this app, and that is deliberate: a
+ * pending batch has written nothing to the ledger. There is no history to
+ * preserve, only a staging area to clear. Restricted to `pending` so an
+ * approved batch -- which DID write trades and is their provenance -- cannot
+ * be removed by the same call.
+ */
+export function discardBatch(batchId) {
+  const batch = getBatch.get(batchId);
+  if (!batch) throw new Error("No such import batch.");
+  if (batch.status === "reconciled") {
+    throw new Error("This batch was already approved. Its rows are in the ledger; void those instead.");
+  }
+  const rows = db.prepare("SELECT COUNT(*) n FROM import_raw_rows WHERE batch_id = ?").get(batchId).n;
+  deleteBatchStmt.run(batchId);
+  return { discarded: batchId, stagedRows: rows };
+}
+
 export function getBatchPreview(batchId) {
   const batch = getBatch.get(batchId);
   if (!batch) throw new Error("No such import batch.");

@@ -902,3 +902,21 @@ dialog input, dialog select, dialog textarea {
 .stale-row td {
   background: color-mix(in srgb, var(--warn, #b8860b) 8%, transparent);
 }
+
+/* Staged-but-unfinished imports. Warning-coloured rather than neutral: a batch
+   sitting here means rows were written to the staging tables and the ledger
+   knows nothing about them, which is a state to resolve rather than note. */
+.status-warn {
+  background: color-mix(in srgb, var(--warn, #b8860b) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn, #b8860b) 40%, transparent);
+}
+.pending-imports .pending-list {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+}
+.pending-imports .pending-list li {
+  margin-bottom: 0.5rem;
+}
+.pending-imports button {
+  margin-left: 0.4rem;
+}

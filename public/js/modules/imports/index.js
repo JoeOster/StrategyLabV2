@@ -9,7 +9,12 @@
 // yahoo-finance2 and nothing else -- a multipart parser would be a third
 // dependency for something FileReader already does.
 import * as api from "./api.js";
-import { renderPreview, renderAccountOptions, renderCurrency } from "./render.js";
+import {
+  renderPreview,
+  renderAccountOptions,
+  renderCurrency,
+  renderPendingBatches,
+} from "./render.js";
 
 const els = {};
 let onDataChanged = () => {};
@@ -23,18 +28,69 @@ export async function initializeImportsModule({ onChange = () => {} } = {}) {
   els.preview = document.getElementById("import-preview");
   els.banner = document.getElementById("import-banner");
   els.currency = document.getElementById("import-currency");
+  els.pending = document.getElementById("import-pending");
 
   els.uploadBtn.addEventListener("click", handleUpload);
   els.preview.addEventListener("click", handlePreviewAction);
   els.fileInput.addEventListener("change", suggestAccountFromFilename);
+  els.pending.addEventListener("click", handlePendingAction);
 
   await reloadImportsView();
 }
 
 export async function reloadImportsView() {
-  const [accounts, currency] = await Promise.all([api.fetchAccounts(), api.fetchLatestImported()]);
+  const [accounts, currency, pending] = await Promise.all([
+    api.fetchAccounts(),
+    api.fetchLatestImported(),
+    api.fetchPendingBatches(),
+  ]);
   els.accountSelect.innerHTML = renderAccountOptions(accounts);
   els.currency.innerHTML = renderCurrency(currency);
+  // Shown on every visit, not only after staging. A batch staged and abandoned
+  // wrote rows to the database that the ledger knows nothing about, and until
+  // now the only way back to one was to already know its id.
+  els.pending.innerHTML = renderPendingBatches(pending);
+}
+
+/**
+ * Reopens or throws away a staged batch.
+ *
+ * Reopening rebuilds exactly the preview staging produced, from the batch that
+ * is still in the database -- so an import interrupted by a reload, a closed
+ * tab, or a script is finished the same way it would have been finished then.
+ */
+async function handlePendingAction(event) {
+  const resume = event.target.closest(".resume-batch-btn");
+  const discard = event.target.closest(".discard-batch-btn");
+  if (!resume && !discard) return;
+
+  const batchId = Number((resume ?? discard).dataset.batchId);
+
+  if (discard) {
+    if (!window.confirm("Throw away this staged import? Nothing from it has been written, so nothing is lost from your ledger.")) {
+      return;
+    }
+    try {
+      const r = await api.discardBatch(batchId);
+      banner(`Discarded ${r.stagedRows} staged row(s). Nothing was written.`);
+      staged = null;
+      els.preview.innerHTML = "";
+      await reloadImportsView();
+    } catch (err) {
+      banner(err.message, true);
+    }
+    return;
+  }
+
+  try {
+    staged = await api.fetchBatch(batchId);
+    const discrepancies = await api.fetchDiscrepancies(batchId);
+    els.preview.innerHTML = renderPreview(staged, discrepancies);
+    banner("Reopened. Still nothing written until you approve it.");
+    els.preview.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (err) {
+    banner(err.message, true);
+  }
 }
 
 function banner(message, isError) {

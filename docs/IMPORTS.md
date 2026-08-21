@@ -365,3 +365,30 @@ Backing query is `MAX(transaction_date)` per `account_id`, plus
 `import_batches.imported_at` for when the import itself last ran. The two are
 different questions and both are worth showing: how current the *data* is, and
 when you last *did* anything.
+
+
+## Unfinished imports (added 2026-08-21)
+
+Staging writes the batch and its rows to `import_batches` / `import_raw_rows`
+immediately. The preview, however, lived only in the browser's memory -- so a
+reload, a closed tab, or staging from a script left the batch stranded: present
+in the data, invisible in the UI, and reachable only by already knowing its id.
+
+Several accumulated during one afternoon and each had to be deleted by hand
+from the database. That was the signal and it went unread for hours.
+
+The Import tab now lists pending batches on every visit, with what each would
+add and what it found already present. **Review** reopens exactly the preview
+staging produced, from the batch still in the database, so an interrupted
+import is finished the same way it would have been finished at the time.
+**Discard** throws it away.
+
+Discard is a hard `DELETE`, which nothing else in this app does -- everything
+else is voided. It is safe here precisely because a pending batch has written
+nothing to the ledger: there is no history to preserve, only a staging area to
+clear. It refuses on an approved batch, which IS the provenance of real trades,
+and says to void those instead.
+
+The panel renders nothing when nothing is pending, rather than a permanent
+"no unfinished imports" heading -- noise on every visit for a state that is
+almost always true.

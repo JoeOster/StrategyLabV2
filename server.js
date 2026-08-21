@@ -629,6 +629,20 @@ app.get("/api/imports/latest", (req, res) => {
   res.json(imports.latestImportedPerAccount());
 });
 
+// Batches staged and never decided on. Listed BEFORE /api/imports/:id so
+// "pending" is not swallowed as a batch id.
+app.get("/api/imports/pending", (req, res) => {
+  res.json(imports.listPendingBatches());
+});
+
+app.delete("/api/imports/:id", (req, res) => {
+  try {
+    res.json(imports.discardBatch(Number(req.params.id)));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.post("/api/imports", (req, res) => {
   try {
     const { accountId, files } = req.body || {};

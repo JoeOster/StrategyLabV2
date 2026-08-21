@@ -69,6 +69,43 @@ function warningBlock(warnings) {
  * Ordered by what needs a human: discrepancies first because they are why the
  * audit exists, then missing trades, then everything that already agreed.
  */
+/**
+ * Batches staged and never decided on.
+ *
+ * Staging writes the batch to the database while the preview lived only in the
+ * browser's memory, so a reload left it stranded -- in the data, invisible in
+ * the UI. This is the way back to one. It renders nothing at all when there is
+ * nothing pending, rather than an empty panel saying so: a permanent "no
+ * unfinished imports" heading is noise on every visit for a state that is
+ * almost always true.
+ */
+export function renderPendingBatches(batches) {
+  if (!batches || batches.length === 0) return "";
+  return `
+    <div class="status-banner status-warn pending-imports">
+      <strong>${batches.length} unfinished import${batches.length === 1 ? "" : "s"}.</strong>
+      Staged but never approved &mdash; nothing from ${batches.length === 1 ? "it" : "them"} is in your ledger yet.
+      <ul class="pending-list">
+        ${batches
+          .map(
+            (b) => `
+          <li>
+            <strong>${escapeHtml(b.broker_name)}${b.account_number ? ` ${escapeHtml(b.account_number)}` : ""}</strong>
+            &mdash; ${escapeHtml(b.filename || "unnamed")}
+            <span class="muted-cell">staged ${escapeHtml(String(b.imported_at).slice(0, 16))}</span>
+            <br />
+            <span class="muted-cell">
+              ${b.new_rows} to add, ${b.duplicate_rows} already present${b.review_rows ? `, ${b.review_rows} needing review` : ""}
+            </span>
+            <button type="button" class="resume-batch-btn" data-batch-id="${b.id}">Review</button>
+            <button type="button" class="discard-batch-btn" data-batch-id="${b.id}">Discard</button>
+          </li>`,
+          )
+          .join("")}
+      </ul>
+    </div>`;
+}
+
 export function renderPreview(staged, discrepancies) {
   const c = staged.counts;
 
