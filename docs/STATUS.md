@@ -107,7 +107,7 @@ database is the one that must survive.
 | Fidelity 146518557 (IRA) | $23,646.37 | $23,677.51 | live price drift |
 | Fidelity 266356256 (IRA, wife) | $15,327.69 | $15,352.65 | live price drift |
 | E*TRADE 7178 | $319.99 | $320.89 | live price drift |
-| Robinhood | $1,636.62 | $1,638.91 | live price drift |
+| Robinhood | $1,636.81 | $1,638.91 | live price drift |
 | Schwab (thinkorswim) | $100.00 | $100.00 | funded, no positions, no parser |
 | TradeStation | $100.00 | $100.00 | funded, no positions, no parser |
 
@@ -121,18 +121,21 @@ were dropped because their opening purchases predate the file. Recording
 $10.48 as a dated OPENING_BALANCE baselines all of that away, and cash is now
 exact against the app.
 
-Two caveats that survive the reconciliation:
+The five-week gap is closed. Joe supplied a 60-day export on 2026-08-21 which
+covered 2026-06-30 to 2026-08-20; four of its ten trade rows were already in
+the ledger and were correctly classified as duplicates. Realized moved from
+-$1,113.52 to -$1,254.46 against Robinhood's YTD -$1,272.24, so the remaining
+$17.78 is the difference between all-time and year-to-date rather than missing
+data.
 
-- **Realized P&L is understated for 2026.** The app reports -$1,136.86 against
-  Robinhood's YTD -$1,272.24. The export ends 2026-07-15 and today is
-  2026-08-21, so roughly five weeks of activity are simply not in the file.
-  This is a data-coverage gap, not an arithmetic one; a fresh export closes it.
-- **The dropped IONQ sales cannot be recovered by exporting again.** Their buys
-  predate any window Robinhood will hand back, so those 27 shares have no cost
-  basis and their realized P&L is permanently unknown. `reconcile()` drops them
-  rather than inventing a basis, which is the right call, and the import
-  preview names them explicitly -- they were only invisible here because this
-  import was driven through curl rather than the UI.
+That import is also what caught the reconcile bug below, and it is worth being
+clear that it was caught only because the preview was actually read this time.
+The earlier Robinhood import was driven through curl and its `dropped` list
+went unexamined.
+
+The two IONQ sales still cannot be recovered. Their buys predate any window
+Robinhood will export, so those 27 shares have no cost basis and their realized
+P&L is permanently unknown. `reconcile()` drops them rather than inventing one.
 
 Non-trade cash rows being unstaged costs nothing today, because every one of
 them predates the 2026-08-21 baseline and so cannot move the balance. It will

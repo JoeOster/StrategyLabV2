@@ -426,3 +426,38 @@ only on click.
 Related: the Orders tab now has two "Refresh Prices" buttons — one in the
 header (which shouldn't be there) and one in the panel. Fixing the above
 removes the duplicate.
+
+### 18. Reconcile ignored what the account already held -- FIXED (2026-08-21)
+
+**File:** `services/importers/reconcile.js`, `services/importService.js`
+
+`reconcile()` built its picture of available shares from the buys inside the
+file being imported, and nothing else. For a first import into an empty ledger
+that is correct. For every import after it, it is wrong.
+
+The actual workflow is a 60-day export once a month. Any sale of a position
+bought more than 60 days earlier has its covering buy outside the file, so
+reconcile saw an orphan sell and dropped it -- while the lot sat in the ledger
+the entire time, plainly visible to any other query in the app.
+
+Caught on the first real 60-day file: 18 KTOS sold 2026-08-04, bought
+2026-06-01. Dropping it cost $140.97 of realized loss and left 18 phantom
+shares. It was noticed only because the import preview was read this time; the
+earlier Robinhood import went through curl with its `dropped` list unexamined,
+which is how it survived at all.
+
+**Fixed:** `stageImport` passes the account's current open lots by symbol, and
+`reconcile` seeds its availability map with them. Held shares and in-file buys
+add rather than replace.
+
+Seeding makes reconcile more permissive, which is the safe direction here. A
+row wrongly accepted is still caught downstream -- first by duplicate
+classification, then by `recordSell`'s own oversell guard. A row wrongly
+dropped is simply gone, and nothing later can notice it is missing.
+
+The drop message changed too. It used to blame the export window exclusively,
+which after this fix would name the wrong cause and send the reader off to
+re-export a file that was never the problem.
+
+Eleven checks in section 29, including that seeding does not let a sale exceed
+what is held, and that one ticker's holdings cannot cover another's sale.

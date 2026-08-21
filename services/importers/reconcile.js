@@ -18,9 +18,24 @@
 
 /**
  * @param {Array} rows normalized rows from a parser
+ * @param {{openingPositions?: Map<string, number>}} [opts] what the account
+ *   ALREADY holds, by symbol, before this file is applied.
+ *
+ *   Without this, reconcile knew only about buys inside the file, which is
+ *   right for a first import into an empty ledger and wrong for every one
+ *   after it. The monthly audit imports a 60-day window; any sale of a
+ *   position bought more than 60 days ago has its covering buy outside the
+ *   file and was dropped as unmatched -- while the lot sat in the ledger the
+ *   whole time. A real case on the first 60-day file: 18 KTOS sold 2026-08-04,
+ *   bought 2026-06-01, dropped.
+ *
+ *   Being seeded makes this more permissive, which is the safe direction: a
+ *   row wrongly accepted here is still caught downstream, by duplicate
+ *   classification and then by recordSell's own oversell guard. A row wrongly
+ *   dropped here is simply gone, and nothing later can notice it is missing.
  * @returns {{accepted: Array, dropped: Array, summary: object}}
  */
-export function reconcile(rows) {
+export function reconcile(rows, { openingPositions } = {}) {
   // Buys before sells within the same date. Brokers list same-day activity in
   // arbitrary order, and taking file order at face value orphans sells whose
   // covering buy sits one line below them (real case: IONQ 2026-01-21).
@@ -31,7 +46,9 @@ export function reconcile(rows) {
       (order[a.transactionType] ?? 9) - (order[b.transactionType] ?? 9)
   );
 
-  const openBySymbol = new Map(); // symbol -> shares available
+  // symbol -> shares available. Seeded with what is already held, so a sale
+  // covered by an earlier import is not mistaken for an orphan.
+  const openBySymbol = new Map(openingPositions ?? []);
   const accepted = [];
   const dropped = [];
 
@@ -49,7 +66,11 @@ export function reconcile(rows) {
     // SELL
     const available = openBySymbol.get(row.symbol) ?? 0;
     if (available <= 1e-9) {
-      dropped.push({ ...row, dropReason: "No matching buy in the export window -- the opening purchase predates it." });
+      dropped.push({
+        ...row,
+        dropReason:
+          "No matching buy -- not in this file, and none open in the ledger for this account.",
+      });
       continue;
     }
     if (row.quantity - available > 1e-9) {

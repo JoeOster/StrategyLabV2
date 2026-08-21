@@ -104,6 +104,26 @@ function parserFor(broker) {
  *
  * @param {{accountId: number, files: Array<{filename: string, text: string}>}} input
  */
+// What the account already holds, by symbol, before a file is applied.
+//
+// Seeds reconcile() so a sale whose covering buy arrived in an EARLIER import
+// is not mistaken for one whose buy predates the export window. Without it the
+// monthly 60-day audit drops every sale of a position held longer than 60 days.
+const openLotsBySymbolStmt = db.prepare(`
+  SELECT s.symbol, SUM(t.quantity_remaining) AS shares
+  FROM transactions t
+  JOIN securities s ON s.id = t.security_id
+  WHERE t.account_id = ?
+    AND t.transaction_type = 'BUY'
+    AND t.quantity_remaining > 0
+    AND t.voided_at IS NULL
+  GROUP BY s.symbol
+`);
+
+function openPositionsBySymbol(accountId) {
+  return new Map(openLotsBySymbolStmt.all(accountId).map((r) => [r.symbol, r.shares]));
+}
+
 export function stageImport({ accountId, files }) {
   const account = getAccount.get(accountId);
   if (!account) throw new Error("No such account.");
@@ -126,7 +146,9 @@ export function stageImport({ accountId, files }) {
   const rows = disambiguateRefs(parsed.flatMap((p) => p.rows));
   const skipped = parsed.flatMap((p) => p.skipped ?? []);
 
-  const { accepted, dropped, summary } = reconcile(rows);
+  const { accepted, dropped, summary } = reconcile(rows, {
+    openingPositions: openPositionsBySymbol(accountId),
+  });
   const existing = getExistingForAccount.all(accountId);
   const classified = classify(accepted, existing);
 

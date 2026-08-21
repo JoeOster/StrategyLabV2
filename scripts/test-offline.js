@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 590;
+const MIN_EXPECTED_CHECKS = 600;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -3840,6 +3840,65 @@ console.log("\n28. The benchmark table ranks on excess, not on raw return");
     overall: { trips: 0 },
   });
   check("With history but no round trips it says that instead", /No closed round trips/.test(noTrips));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n29. Reconcile knows what the account already holds");
+// reconcile() built its picture of available shares from the buys inside the
+// file alone. That is right for a first import into an empty ledger and wrong
+// for every one after it -- which is the actual workflow, a 60-day export once
+// a month. Any sale of a position bought more than 60 days ago had its
+// covering buy outside the file and was dropped as an orphan, while the lot
+// sat in the ledger the whole time.
+//
+// Caught on Joe's first real 60-day file: 18 KTOS sold 2026-08-04, bought
+// 2026-06-01, dropped. It cost $140.97 of realized loss and left a phantom
+// holding, and the only reason it was noticed is that the preview happened to
+// be read this time.
+{
+  const { reconcile } = await import("../services/importers/reconcile.js");
+
+  const sell = {
+    transactionType: "SELL", symbol: "KTOS", transactionDate: "2026-08-04",
+    quantity: 18, price: 54.75,
+  };
+
+  const blind = reconcile([sell]);
+  check("With no ledger context an uncovered sale is still dropped", blind.dropped.length === 1);
+  check("...and nothing is accepted", blind.accepted.length === 0);
+
+  const seeded = reconcile([sell], { openingPositions: new Map([["KTOS", 18]]) });
+  check("Seeded with the held lot, the same sale is accepted", seeded.accepted.length === 1);
+  check("...and nothing is dropped", seeded.dropped.length === 0);
+
+  // Held shares and file buys have to add, not replace one another.
+  const both = reconcile(
+    [
+      { transactionType: "BUY", symbol: "KTOS", transactionDate: "2026-08-05", quantity: 18, price: 56.83 },
+      { ...sell, quantity: 30, transactionDate: "2026-08-06" },
+    ],
+    { openingPositions: new Map([["KTOS", 18]]) },
+  );
+  check("Held shares and in-file buys combine", both.accepted.filter(r => r.transactionType === "SELL").length === 1);
+  check("...covering a sale larger than either alone", both.dropped.length === 0);
+
+  // Seeding must not make it accept an oversell.
+  const over = reconcile([{ ...sell, quantity: 50 }], { openingPositions: new Map([["KTOS", 18]]) });
+  check("A sale beyond what is held is still trimmed", over.dropped.length === 1);
+  check("...to the part the data supports", Math.abs(over.accepted[0].quantity - 18) < 1e-9);
+  check("...and flagged for review", over.accepted[0].needsReview === true);
+
+  // A different symbol must not borrow another's shares.
+  const wrong = reconcile([sell], { openingPositions: new Map([["ARM", 100]]) });
+  check("Holdings in one ticker do not cover a sale in another", wrong.dropped.length === 1);
+
+  // The drop message no longer blames the export window, since the ledger is
+  // now consulted too -- a message that names the wrong cause sends the reader
+  // to re-export a file that was never the problem.
+  check(
+    "The drop reason mentions both the file and the ledger",
+    /this file/.test(blind.dropped[0].dropReason) && /ledger/.test(blind.dropped[0].dropReason),
+  );
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
