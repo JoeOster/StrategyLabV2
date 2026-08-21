@@ -7,6 +7,7 @@ import {
   HISTORY_COLUMNS,
   renderHeaderRow,
   renderPositionsRows,
+  renderPositionsFooter,
   renderHistoryRows,
   renderSummary,
   renderSourceOptions,
@@ -60,6 +61,7 @@ export async function initializeOrdersModule() {
 
   els.positionsThead = document.getElementById("positions-thead-row");
   els.positionsTbody = document.getElementById("positions-tbody");
+  els.positionsTfoot = document.getElementById("positions-tfoot");
   els.positionsFilter = document.getElementById("positions-filter");
   els.positionsAccount = document.getElementById("positions-account");
   els.positionsCount = document.getElementById("positions-count");
@@ -228,6 +230,9 @@ function renderPositions() {
     state.positionsSort.dir,
   );
   els.positionsTbody.innerHTML = renderPositionsRows(visible, state.positionColumns);
+  // Totals the VISIBLE rows, so the footer agrees with the filter above it
+  // rather than contradicting the rows it sits under.
+  els.positionsTfoot.innerHTML = renderPositionsFooter(visible, state.positionColumns);
   els.positionsCount.textContent =
     visible.length === state.positions.length
       ? `${state.positions.length} lot(s)`

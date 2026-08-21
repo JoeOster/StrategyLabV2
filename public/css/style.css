@@ -785,3 +785,24 @@ dialog input, dialog select, dialog textarea {
 /* Pushes Delete to the far left, away from Save, so it can't be hit by
    accident when reaching for the primary action. */
 .form-actions-spacer { flex: 1; }
+
+/* The account scope sits above the summary strip because it governs it. */
+.account-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.account-scope label {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+/* Totals row. Separated by a rule rather than a background so it reads as a
+   summation of the rows above, not as another row of data. */
+.totals-row td {
+  border-top: 2px solid var(--border);
+  padding-top: 0.5rem;
+}

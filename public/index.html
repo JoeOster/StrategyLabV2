@@ -127,6 +127,17 @@
     <main>
       <div id="orders-banner" class="status-banner" hidden></div>
 
+      <!-- The account filter sits ABOVE the summary strip because it governs
+           it: the strip's totals are for whatever account is selected, and a
+           control placed below the numbers it changes reads as belonging to the
+           table instead. -->
+      <div class="account-scope">
+        <label for="positions-account">Account</label>
+        <select id="positions-account" title="Show one brokerage account, or all of them">
+          <option value="">All accounts</option>
+        </select>
+      </div>
+
       <div class="summary-strip" id="portfolio-summary"></div>
 
       <div class="orders-panel" data-panel="positions">
@@ -138,9 +149,6 @@
           </div>
         </div>
         <div class="table-toolbar">
-          <select id="positions-account" title="Show one brokerage account, or all of them">
-            <option value="">All accounts</option>
-          </select>
           <input id="positions-filter" type="search" placeholder="Filter by ticker or name…" autocomplete="off" />
           <button type="button" id="positions-columns-btn" title="Show, hide, or reorder columns">⚙ Columns</button>
           <span id="positions-count" class="row-count"></span>
@@ -148,6 +156,7 @@
         <table class="items-table">
           <thead><tr id="positions-thead-row"></tr></thead>
           <tbody id="positions-tbody"></tbody>
+          <tfoot id="positions-tfoot"></tfoot>
         </table>
       </div>
 

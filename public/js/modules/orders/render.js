@@ -136,6 +136,48 @@ export function renderPositionsRows(positions, columns, opts = {}) {
     .join("");
 }
 
+/**
+ * Totals row for the positions table.
+ *
+ * Sums the rows CURRENTLY DISPLAYED, not the whole portfolio -- so it responds
+ * to the ticker filter as well as the account scope. A footer that ignored the
+ * filter above it would contradict the rows it sits under, which is worse than
+ * having no footer.
+ *
+ * Only genuinely additive columns get a total. Averaging an entry price across
+ * different lot sizes, or summing a percentage, produces a number that looks
+ * meaningful and is not.
+ */
+export function renderPositionsFooter(positions, columns) {
+  if (positions.length === 0) return "";
+
+  const sum = (fn) => positions.reduce((acc, p) => acc + (fn(p) ?? 0), 0);
+  const anyPriced = positions.some((p) => p.market_value != null);
+
+  const totalCost = sum((p) => p.cost_basis);
+  const totalValue = anyPriced ? sum((p) => p.market_value) : null;
+  // Only over priced rows, or the percentage compares different sets.
+  const pricedCost = positions.filter((p) => p.market_value != null).reduce((a, p) => a + p.cost_basis, 0);
+  const totalUnreal = anyPriced ? totalValue - pricedCost : null;
+  const pct = anyPriced && pricedCost > 0 ? (totalUnreal / pricedCost) * 100 : null;
+
+  const TOTALS = {
+    symbol: () => `<td><strong>Total</strong></td>`,
+    quantity_remaining: () => `<td></td>`,
+    cost_basis: () => `<td><strong>${money(totalCost)}</strong></td>`,
+    market_value: () => `<td><strong>${money(totalValue)}</strong></td>`,
+    unrealized_pnl: () =>
+      `<td class="${totalUnreal == null ? "" : totalUnreal >= 0 ? "change-up" : "change-down"}"><strong>${signedMoney(totalUnreal)}</strong></td>`,
+    unrealized_pnl_percent: () =>
+      `<td class="${pct == null ? "" : pct >= 0 ? "change-up" : "change-down"}"><strong>${
+        pct == null ? "—" : `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`
+      }</strong></td>`,
+  };
+
+  const cells = columns.map((col) => (TOTALS[col.key] || (() => "<td></td>"))()).join("");
+  return `<tr class="totals-row">${cells}<td></td></tr>`;
+}
+
 const HISTORY_CELL_RENDERERS = {
   transaction_date: (t) => `<td>${escapeHtml(t.transaction_date)}</td>`,
   symbol: (t) => `<td><strong>${escapeHtml(t.symbol)}</strong></td>`,
