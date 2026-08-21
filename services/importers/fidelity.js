@@ -107,7 +107,19 @@ export function parse(text) {
       reviewReason = "Transferred in from another account -- cost basis unknown (Amount is transfer value, not purchase price).";
     } else { skipped.unknownAction++; continue; }
 
-    if (quantity == null || quantity === 0) { skipped.unknownAction++; continue; }
+    // DIVIDEND is exempt on purpose. A dividend, a fund capital-gain
+    // distribution and bond interest are all income against a holding with NO
+    // share movement, so their Quantity column is empty or zero -- which is
+    // exactly what this guard rejects.
+    //
+    // Placed one line earlier, this discarded every dividend immediately after
+    // correctly identifying it, and the comment directly below already said
+    // "Dividends carry no share quantity". 49 income rows in one IRA's
+    // statements vanished into skipped.unknownAction without a word.
+    if (type !== "DIVIDEND" && (quantity == null || quantity === 0)) {
+      skipped.unknownAction++;
+      continue;
+    }
 
     // Dividends carry no share quantity; everything else is a share count that
     // must be positive (direction is carried by `type`, not by the sign).

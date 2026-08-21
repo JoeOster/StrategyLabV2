@@ -2756,6 +2756,44 @@ check(
 );
 check("Declining never writes a trade", db.prepare("SELECT resulting_transaction_id FROM alerts WHERE id = ?").get(badQueued.id).resulting_transaction_id === null);
 
+console.log("\n14e. Fidelity parser: income rows survive");
+const fidelityParser = await import("../services/importers/fidelity.js");
+
+// A dividend, a fund capital-gain distribution and bond interest are income
+// against a holding with NO share movement, so their Quantity column is empty
+// or zero. A share-quantity guard placed one line too early discarded every
+// one of them immediately after correctly identifying it -- $2,003.63 of real
+// income vanished from one IRA without a word.
+const incomeCsv = [
+  "Run Date,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Settlement Date",
+  "02/07/2026,DIVIDEND RECEIVED FIDELITY TREND (FTRNX) (Cash),FTRNX,FIDELITY TREND,Cash,,0,,,,81.29,",
+  "02/07/2026,LONG-TERM CAP GAIN FIDELITY TREND (FTRNX) (Cash),FTRNX,FIDELITY TREND,Cash,,0,,,,1142.31,",
+  "02/07/2026,SHORT-TERM CAP GAIN FIDELITY TREND (FTRNX) (Cash),FTRNX,FIDELITY TREND,Cash,,0,,,,139.12,",
+  "03/02/2026,YOU BOUGHT NVIDIA CORP (NVDA) (Cash),NVDA,NVIDIA CORP,Cash,100,10,,,,\"-1000\",",
+].join("\n");
+const incomeParsed = fidelityParser.parse(incomeCsv);
+const incomeRows = incomeParsed.rows.filter((r) => r.transactionType === "DIVIDEND");
+
+check("Dividends survive the share-quantity guard", incomeRows.length === 3);
+check(
+  "Capital-gain distributions and interest are income too, not unknown actions",
+  incomeParsed.skipped.unknownAction === 0,
+);
+check(
+  "Income carries its amount as the price",
+  Math.abs(incomeRows.reduce((s, r) => s + r.price, 0) - (81.29 + 1142.31 + 139.12)) < 1e-9,
+);
+check("...and no share quantity", incomeRows.every((r) => r.quantity === 0));
+check(
+  "A genuine share row with zero quantity is still rejected",
+  fidelityParser.parse(
+    incomeCsv.replace(
+      '"03/02/2026,YOU BOUGHT NVIDIA CORP (NVDA) (Cash),NVDA,NVIDIA CORP,Cash,100,10,,,,\"-1000\","'.slice(1, -1),
+      "03/02/2026,YOU BOUGHT NVIDIA CORP (NVDA) (Cash),NVDA,NVIDIA CORP,Cash,100,0,,,,\"-1000\",",
+    ),
+  ).rows.filter((r) => r.transactionType === "BUY").length === 0,
+);
+
 console.log("\n14d. Import audit: correcting a typo");
 const imports = await import("../services/importService.js");
 
