@@ -341,7 +341,23 @@ CREATE TABLE alerts (
   -- guessing one from prose would invent data.
   trigger_reason    TEXT CHECK (trigger_reason IN ('STOP','BUY','TAKE_PROFIT','TAKE_PROFIT_2')),
   message           TEXT,
+  -- "Stop showing me this." Says nothing about what was decided.
   acknowledged_at   TEXT,
+  -- What was DECIDED, which is the interesting part. Declining is data, not a
+  -- dismissal: "the plan said sell at $10.75, I passed, it later fell to $9" is
+  -- the execution gap this app exists to measure, and declining an ENTRY alert
+  -- is "they called it, I passed" -- the skipped-call record that separates a
+  -- source's real hit rate from the user's own filter.
+  --
+  -- Separate from acknowledged_at rather than overloading it: silencing a
+  -- notification and deciding about it are different acts.
+  resolution        TEXT CHECK (resolution IN ('accepted','declined')),
+  resolved_at       TEXT,
+  resolution_note   TEXT,
+  -- The transaction an accepted alert produced, when it produced one. Lets an
+  -- adherence report join plan -> alert -> what actually happened without
+  -- re-deriving the link from dates and prices.
+  resulting_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
   -- Exactly one parent. Enforced here rather than trusted to the service layer,
   -- because an alert belonging to neither is invisible in every query that
   -- joins, and an alert belonging to both would be counted twice.
@@ -542,6 +558,8 @@ CREATE INDEX idx_plan_exits_pending
   ON plan_exits (plan_id) WHERE status = 'pending';
 CREATE INDEX idx_plans_open ON plans (holder_id) WHERE status = 'open';
 CREATE INDEX idx_alerts_plan_exit ON alerts(plan_exit_id);
+-- The notification queue's hot query: what still needs a decision.
+CREATE INDEX idx_alerts_unresolved ON alerts (triggered_at) WHERE resolution IS NULL;
 
 CREATE UNIQUE INDEX idx_securities_symbol    ON securities(symbol);
 CREATE INDEX idx_historical_prices_security   ON historical_prices(security_id, date);

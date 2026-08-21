@@ -13,7 +13,6 @@ export const GENERAL_SETTING_DEFAULTS = {
   app_title: "Strategy Lab",
   default_take_profit_percent: "10",
   default_stop_loss_percent: "5",
-  notification_cooldown_minutes: "30",
   theme: "light",
   // Nightly maintenance job (services/scheduler.js). "1" = on.
   nightly_refresh_enabled: "1",

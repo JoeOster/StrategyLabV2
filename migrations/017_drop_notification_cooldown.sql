@@ -1,0 +1,13 @@
+-- v16 -> v17: remove notification_cooldown_minutes.
+--
+-- It had a labelled input in Settings > General, was validated, saved and read
+-- back correctly -- and nothing anywhere consumed it. Setting "notify me at
+-- most every 30 minutes" produced no throttling whatsoever.
+--
+-- Removed rather than implemented, on Joe's call: "I dont recall what i was
+-- going to do with this... remove". A control that silently does nothing is
+-- worse than one that is not there, and the honest fix for a feature nobody
+-- remembers wanting is to delete it.
+--
+-- Data only -- the key simply stops existing. Re-adding it later is an insert.
+DELETE FROM app_settings WHERE key = 'notification_cooldown_minutes';

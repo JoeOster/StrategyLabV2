@@ -767,10 +767,6 @@ const defaults = settingsSvc.getGeneralSettings();
 check("Unset settings fall back to defaults", defaults.app_title === "Strategy Lab");
 settingsSvc.saveGeneralSettings({ app_title: "Joe's Lab", default_take_profit_percent: "12.5" });
 check("Saved values are read back", settingsSvc.getGeneralSettings().app_title === "Joe's Lab");
-check(
-  "Unsaved keys keep their defaults",
-  settingsSvc.getGeneralSettings().notification_cooldown_minutes === "30",
-);
 const rejected = settingsSvc.saveGeneralSettings({ not_a_real_setting: "x", app_title: "Kept" });
 check("Unknown keys are ignored, not written", rejected.ignored.includes("not_a_real_setting"));
 check("Known keys in the same patch still save", rejected.saved.includes("app_title"));
