@@ -42,12 +42,16 @@ const summary = await import("./services/summaryService.js");
 const journal = await import("./services/journalService.js");
 const bookLookup = await import("./services/bookLookupService.js");
 const accounts = await import("./services/accountsService.js");
+const imports = await import("./services/importService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
 
 const app = express();
-app.use(express.json());
+// 25mb rather than the 100kb default: broker CSVs are posted as text in a
+// JSON body (see the import routes below), and the two Fidelity IRA exports
+// together are already 86kb before JSON escaping.
+app.use(express.json({ limit: "25mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/health", (req, res) => {
@@ -360,6 +364,47 @@ app.put("/api/accounts/:id", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   try {
     res.json(accounts.updateAccount(holder.id, Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// --- Broker CSV imports ---------------------------------------------------
+// Upload -> preview -> approve. Staging never touches `transactions`; approval
+// writes only the rows classified `new`, through recordBuy/recordSell so FIFO,
+// cost basis and the void filter all apply. See docs/IMPORTS.md.
+//
+// Files arrive as text in a JSON body rather than as multipart form data: the
+// app deliberately runs on express and yahoo-finance2 and nothing else, and a
+// multipart parser would be a third dependency for something the browser can
+// already do with FileReader.
+
+// Ahead of /api/imports/:id, or "latest" is parsed as a batch id.
+app.get("/api/imports/latest", (req, res) => {
+  res.json(imports.latestImportedPerAccount());
+});
+
+app.post("/api/imports", (req, res) => {
+  try {
+    const { accountId, files } = req.body || {};
+    res.status(201).json(imports.stageImport({ accountId: Number(accountId), files }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get("/api/imports/:id", (req, res) => {
+  try {
+    res.json(imports.getBatchPreview(Number(req.params.id)));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+app.post("/api/imports/:id/approve", async (req, res) => {
+  try {
+    const rowIds = Array.isArray(req.body?.rowIds) ? req.body.rowIds : null;
+    res.json(await imports.approveBatch(Number(req.params.id), { rowIds }));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

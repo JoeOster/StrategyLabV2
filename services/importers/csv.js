@@ -63,3 +63,31 @@ export function toIsoDate(raw) {
 export function fingerprint(parts) {
   return parts.map((p) => String(p ?? "").trim().toUpperCase()).join("|");
 }
+
+/**
+ * Makes every row's `externalRef` unique within one import.
+ *
+ * fingerprint() is built from the economic facts of a trade only, which is
+ * what lets a broker re-export with cosmetic differences and still match. The
+ * cost is that two GENUINELY identical trades -- same day, same symbol, same
+ * quantity, same price, same amount -- fingerprint identically, and the
+ * partial UNIQUE (account_id, external_ref) index then rejects the second.
+ * Real case: two $20,000 FTRNX buys on 2025-01-21 in the Fidelity IRA.
+ *
+ * The Nth member of an identical group gets |#N appended. That stays stable
+ * across re-imports -- the same file, or an overlapping export covering the
+ * same dates, produces the same groups and therefore the same ordinals, so a
+ * re-import is still a no-op.
+ *
+ * It does shift if an export splits an identical group across its boundary,
+ * which is one more reason to overlap exports generously rather than trying
+ * to abut them exactly (see docs/IMPORTS.md).
+ */
+export function disambiguateRefs(rows) {
+  const seen = new Map();
+  return rows.map((row) => {
+    const n = (seen.get(row.externalRef) ?? 0) + 1;
+    seen.set(row.externalRef, n);
+    return n === 1 ? row : { ...row, externalRef: `${row.externalRef}|#${n}` };
+  });
+}

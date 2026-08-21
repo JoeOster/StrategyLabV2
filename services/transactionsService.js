@@ -17,11 +17,13 @@ import { getOrCreateSecurity } from "./priceService.js";
 const insertTransaction = db.prepare(`
   INSERT INTO transactions (
     holder_id, account_id, security_id, watched_item_id, source_id, strategy_id, is_paper_trade,
+    import_batch_id,
     transaction_type, transaction_date, quantity, price, fees, cost_basis,
     quantity_remaining, linked_buy_id, external_ref, notes,
     needs_review, review_reason
   ) VALUES (
     @holderId, @accountId, @securityId, @watchedItemId, @sourceId, @strategyId, @isPaperTrade,
+    @importBatchId,
     @transactionType, @transactionDate, @quantity, @price, @fees, @costBasis,
     @quantityRemaining, @linkedBuyId, @externalRef, @notes,
     @needsReview, @reviewReason
@@ -33,7 +35,7 @@ const insertTransaction = db.prepare(`
 // was missed. Defaulting here means only the paths that actually set a review
 // flag have to mention it.
 const insertTxn = (params) =>
-  insertTransaction.get({ needsReview: 0, reviewReason: null, ...params });
+  insertTransaction.get({ needsReview: 0, reviewReason: null, importBatchId: null, ...params });
 
 // --- Stock splits --------------------------------------------------------
 // A split is a market event, not something a user logs -- it arrives via
@@ -133,6 +135,21 @@ export function applySplitToOpenLots(securityId, splitDate, ratioText) {
 }
 
 /**
+ * Cheap input checks shared by the async entry points and the sync cores
+ * below. Deliberately run in both: the async wrapper validates before the
+ * network round trip so a bad quantity fails immediately, and the core
+ * validates again because the importer calls it directly.
+ */
+function validateTradeInput(input) {
+  const quantity = Number(input.quantity);
+  const price = Number(input.price);
+  const fees = Number(input.fees ?? 0);
+  if (!(quantity > 0)) throw new Error("Quantity must be greater than zero");
+  if (!(price >= 0)) throw new Error("Price must be zero or greater");
+  return { quantity, price, fees };
+}
+
+/**
  * Logs an executed BUY, creating a new open lot.
  * @param {object} input
  * @param {number} input.holderId
@@ -143,13 +160,23 @@ export function applySplitToOpenLots(securityId, splitDate, ratioText) {
  * @param {number} [input.fees=0]
  */
 export async function recordBuy(input) {
-  const quantity = Number(input.quantity);
-  const price = Number(input.price);
-  const fees = Number(input.fees ?? 0);
-  if (!(quantity > 0)) throw new Error("Quantity must be greater than zero");
-  if (!(price >= 0)) throw new Error("Price must be zero or greater");
-
+  validateTradeInput(input);
   const security = await getOrCreateSecurity(input.symbol, { exchangeCode: input.exchangeCode });
+  return recordBuyWith(security, input);
+}
+
+/**
+ * The synchronous half of recordBuy, taking an already-resolved security.
+ *
+ * Split out so a batch import can hold ONE transaction open across many
+ * writes. getOrCreateSecurity does network I/O, and withTransaction takes a
+ * synchronous function -- awaiting inside it would let the transaction close
+ * before the awaited half ever ran, which is not atomicity, it just looks
+ * like it. The importer resolves every symbol up front and then calls this.
+ * See docs/IMPORTS.md.
+ */
+export function recordBuyWith(security, input) {
+  const { quantity, price, fees } = validateTradeInput(input);
 
   return withTransaction(() => {
     const buy = insertTxn({
@@ -171,6 +198,7 @@ export async function recordBuy(input) {
       quantityRemaining: quantity,
       linkedBuyId: null,
       externalRef: input.externalRef ?? null,
+      importBatchId: input.importBatchId ?? null,
       needsReview: input.needsReview ? 1 : 0,
       reviewReason: input.reviewReason ?? null,
       notes: input.notes ?? null,
@@ -198,9 +226,21 @@ const getOpenLots = db.prepare(`
   ORDER BY transaction_date, id
 `);
 
-const reduceLot = db.prepare(
-  "UPDATE transactions SET quantity_remaining = quantity_remaining - ? WHERE id = ?",
-);
+// Snapped to exactly zero when the remainder lands within float noise of it.
+// Repeated FIFO subtraction accumulates error, so a lot that has been sold out
+// completely can be left holding ~1e-14 shares -- and every open-position read
+// filters on `quantity_remaining > 0`, which that satisfies. The symptom is a
+// fully-closed holding sitting in the portfolio at 0.00 shares and $0.00,
+// which is how a real 507-row import produced eight positions instead of six.
+// 1e-9 matches the epsilon reconcile.js already uses for the same reason.
+const reduceLot = db.prepare(`
+  UPDATE transactions
+     SET quantity_remaining = CASE
+           WHEN ABS(quantity_remaining - ?) < 1e-9 THEN 0
+           ELSE quantity_remaining - ?
+         END
+   WHERE id = ?
+`);
 
 /**
  * Logs an executed SELL, drawing down open lots oldest-first (FIFO) unless a
@@ -213,13 +253,14 @@ const reduceLot = db.prepare(
  * @returns {{sells: Array, totalProceeds: number, realizedPnl: number}}
  */
 export async function recordSell(input) {
-  const quantity = Number(input.quantity);
-  const price = Number(input.price);
-  const fees = Number(input.fees ?? 0);
-  if (!(quantity > 0)) throw new Error("Quantity must be greater than zero");
-  if (!(price >= 0)) throw new Error("Price must be zero or greater");
-
+  validateTradeInput(input);
   const security = await getOrCreateSecurity(input.symbol, { exchangeCode: input.exchangeCode });
+  return recordSellWith(security, input);
+}
+
+/** The synchronous half of recordSell -- see recordBuyWith for why. */
+export function recordSellWith(security, input) {
+  const { quantity, price, fees } = validateTradeInput(input);
   const isPaperTrade = input.isPaperTrade ? 1 : 0;
 
   return withTransaction(() => {
@@ -273,13 +314,20 @@ export async function recordSell(input) {
         costBasis: costOfSold,
         quantityRemaining: null,
         linkedBuyId: lot.id,
-        externalRef: input.externalRef ?? null,
+        // Only the FIRST row of the fan-out carries the ref. A sale spanning
+        // three lots writes three rows, and the partial
+        // UNIQUE (account_id, external_ref) index rejects all but the first
+        // -- which is exactly how a trial import landed every buy and under
+        // half the sells (docs/IMPORTS.md). The constraint is meant to mean
+        // "this broker row has been imported", not "this database row".
+        externalRef: sells.length === 0 ? (input.externalRef ?? null) : null,
+        importBatchId: input.importBatchId ?? null,
         needsReview: input.needsReview ? 1 : 0,
         reviewReason: input.reviewReason ?? null,
         notes: input.notes ?? null,
       });
 
-      reduceLot.run(take, lot.id);
+      reduceLot.run(take, take, lot.id);
       sells.push(sell);
       realizedPnl += proceeds - costOfSold;
       remainingToSell -= take;
@@ -294,6 +342,13 @@ export async function recordDividend(input) {
   const amount = Number(input.amount ?? input.price);
   if (!(amount > 0)) throw new Error("Dividend amount must be greater than zero");
   const security = await getOrCreateSecurity(input.symbol, { exchangeCode: input.exchangeCode });
+  return recordDividendWith(security, input);
+}
+
+/** The synchronous half of recordDividend -- see recordBuyWith for why. */
+export function recordDividendWith(security, input) {
+  const amount = Number(input.amount ?? input.price);
+  if (!(amount > 0)) throw new Error("Dividend amount must be greater than zero");
 
   return insertTxn({
     holderId: input.holderId,
@@ -312,6 +367,7 @@ export async function recordDividend(input) {
     quantityRemaining: null,
     linkedBuyId: null,
     externalRef: input.externalRef ?? null,
+    importBatchId: input.importBatchId ?? null,
     needsReview: input.needsReview ? 1 : 0,
     reviewReason: input.reviewReason ?? null,
     notes: input.notes ?? null,
@@ -586,7 +642,7 @@ export function updateTransaction(holderId, id, patch = {}) {
       }
       // Restore the old draw, then take the new one.
       restoreLot.run(txn.quantity, lot.id);
-      reduceLot.run(quantity, lot.id);
+      reduceLot.run(quantity, quantity, lot.id);
     }
 
     const lotCostPerShare = lot.cost_basis / lot.quantity;
