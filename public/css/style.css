@@ -869,3 +869,36 @@ dialog input, dialog select, dialog textarea {
 .acct-schwab       { background: #eaf2fb; color: #1d4ed8; border-color: #cbdcf5; }
 .acct-tradestation { background: #fdf2e9; color: #9a3412; border-color: #f6ddc4; }
 .acct-multi        { background: #f3e8ff; color: #6b21a8; border-color: #e4d0fa; }
+
+/* --- Efficiency report --------------------------------------------------- */
+
+/* The sample size under each headline figure. Deliberately quiet but always
+   present: this report becomes useful at an N small enough to mislead, and a
+   percentage with no count beside it invites being read as settled. */
+.stat-n {
+  display: block;
+  font-size: 0.7rem;
+  opacity: 0.7;
+  margin-top: 0.15rem;
+}
+
+/* Marked, not hidden. Hiding thin rows would misrepresent how much evidence
+   the totals rest on; marking them says "this exists, do not lean on it". */
+.thin-sample td {
+  opacity: 0.75;
+}
+.thin-tag {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  opacity: 0.8;
+}
+
+/* A rung whose level was behind the market when it fired. Its gap is
+   overshoot, not execution, and it inflates every total it is part of. */
+.stale-row td {
+  background: color-mix(in srgb, var(--warn, #b8860b) 8%, transparent);
+}

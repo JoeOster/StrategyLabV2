@@ -7,6 +7,7 @@ import { initializePaperTradeModule, reloadPaperTradeView } from "./modules/pape
 import { initializeAlertsModule } from "./modules/alerts/index.js";
 import { initPlansUi } from "./modules/plans/dialog.js";
 import { initializeNotificationsModule, reloadNotificationsView } from "./modules/notifications/index.js";
+import { initializeEfficiencyModule, reloadEfficiencyView } from "./modules/efficiency/index.js";
 import { initializeImportsModule, reloadImportsView } from "./modules/imports/index.js";
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -24,8 +25,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     await initializeImportsModule({
       onChange: () => Promise.all([reloadOrdersView(), reloadDashboardView()]),
     });
+    await initializeEfficiencyModule();
+    // Deciding on an alert IS the event this report measures, so it reloads
+    // alongside the position views rather than waiting for a tab switch.
     await initializeNotificationsModule({
-      onChange: () => Promise.all([reloadOrdersView(), reloadPaperTradeView(), reloadDashboardView()]),
+      onChange: () =>
+        Promise.all([
+          reloadOrdersView(),
+          reloadPaperTradeView(),
+          reloadDashboardView(),
+          reloadEfficiencyView(),
+        ]),
     });
     // Settings changes (renaming a list, deleting a holder) can invalidate
     // what the other views are showing, so they reload on any change.
@@ -56,6 +66,7 @@ function setupViewSwitching() {
     journal: document.getElementById("view-journal"),
     papertrade: document.getElementById("view-papertrade"),
     imports: document.getElementById("view-imports"),
+    efficiency: document.getElementById("view-efficiency"),
     notifications: document.getElementById("view-notifications"),
     settings: document.getElementById("view-settings"),
   };
@@ -84,6 +95,7 @@ function setupViewSwitching() {
       else if (target === "journal") await reloadJournalView();
       else if (target === "papertrade") await reloadPaperTradeView();
       else if (target === "notifications") await reloadNotificationsView();
+      else if (target === "efficiency") await reloadEfficiencyView();
       else if (target === "imports") await reloadImportsView();
       else await reloadWatchlistView();
     });

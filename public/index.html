@@ -17,6 +17,7 @@
         <button type="button" class="view-btn" data-view="journal">Journal</button>
         <button type="button" class="view-btn" data-view="papertrade">Paper Trade</button>
         <button type="button" class="view-btn" data-view="imports">Import</button>
+        <button type="button" class="view-btn" data-view="efficiency">Efficiency</button>
         <button type="button" class="view-btn" data-view="notifications">Notifications</button>
         <button type="button" class="view-btn" data-view="settings">Settings</button>
       </nav>
@@ -323,6 +324,65 @@
 
       <div id="import-currency"></div>
       <div id="import-preview"></div>
+    </main>
+  </section>
+
+  <section id="view-efficiency" hidden>
+    <main>
+      <div id="efficiency-banner" class="status-banner" hidden></div>
+
+      <div class="panel-head">
+        <h2>Execution efficiency</h2>
+        <select id="efficiency-leg" title="Which leg to measure">
+          <option value="">Paper and real</option>
+          <option value="real">Real only</option>
+          <option value="paper">Paper only</option>
+        </select>
+      </div>
+
+      <p class="panel-hint">
+        What your plans said against what actually happened. Positive always means you did
+        better than the plan. This is not a measure of whether a source picks well &mdash; that
+        needs hundreds of trades before the noise settles. It measures whether the plan was
+        followed, which needs only a handful.
+      </p>
+
+      <div id="efficiency-summary"></div>
+
+      <div class="orders-panel">
+        <div class="panel-head">
+          <h3>By attribution</h3>
+          <div class="sub-tabs">
+            <button type="button" class="sub-tab active" data-eff-group="source">By source</button>
+            <button type="button" class="sub-tab" data-eff-group="strategy">By strategy</button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="items-table">
+            <thead><tr id="efficiency-group-head"></tr></thead>
+            <tbody id="efficiency-group-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="orders-panel">
+        <div class="panel-head"><h3>Every measured event</h3></div>
+        <div class="table-scroll">
+          <table class="items-table">
+            <thead>
+              <tr>
+                <th>Date</th><th>Ticker</th><th>What</th><th>Attributed to</th>
+                <th title="The price the plan named">Planned</th>
+                <th title="The price you actually got">Actual</th>
+                <th>Qty</th>
+                <th title="Actual minus planned, times quantity. Positive is better than the plan.">Gap</th>
+                <th>Outcome</th>
+              </tr>
+            </thead>
+            <tbody id="efficiency-events-body"></tbody>
+          </table>
+        </div>
+      </div>
     </main>
   </section>
 

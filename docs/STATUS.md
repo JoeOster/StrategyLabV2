@@ -1562,3 +1562,68 @@ still valid, but none of it is the obvious next move.
   reconciled `transactions`) — CSV parsing for Fidelity/E-Trade/Robinhood
   formats not started. This is the single largest unbuilt feature at this
   point.
+
+## Execution efficiency (built 2026-08-21)
+
+The first thing in this app that is an OUTPUT rather than plumbing, and the
+question Joe asked first: a Telegram call says buy at $10, the fill is $9.95,
+the sell signal goes out at $10.75 and gets missed. How well is the plan being
+executed?
+
+It is deliberately not "how good is this source". Source reliability needs
+hundreds of trades before the noise settles. Execution gap needs a handful,
+because every trade is compared against its OWN stated plan rather than against
+the market -- which is why it is the report that becomes useful soonest. A
+source that calls well but is executed badly and a source that simply calls
+badly are indistinguishable in a returns table and completely distinguishable
+here.
+
+`services/efficiencyService.js`, `GET /api/efficiency`, Efficiency tab.
+
+**Three measurable moments, and only three.** A BUY_LIMIT names a ceiling and
+the fill lands somewhere. A rung names a price and the sale lands somewhere. A
+rung fires and is declined on judgement. Anything else -- whether the thesis
+was any good, whether the market cooperated -- is a different question and is
+not answered here.
+
+**One sign convention: positive always means better than the plan.** Buying
+below the ceiling is positive, selling above the target is positive. Without a
+single convention a total spanning entries and exits means nothing.
+
+**The gap is decomposed, and this is the part that matters.** The obvious
+implementation -- actual minus planned -- flatters badly. The one real alert in
+the live database is a take-profit set at $50 on a stock trading at $90; it
+fired the instant it was checked and scores +80% "better than plan". That is
+arithmetically true and says nothing about execution. It says the rung was
+stale. So the gap is split into:
+
+- **overshoot** (trigger - planned): how far past the level the price already
+  was. Polling granularity, overnight gaps, rungs left behind the market. Not
+  a discipline measure.
+- **slippage** (actual - trigger): between being told and acting. This is the
+  part that is actually yours, and the part Joe described.
+
+They sum to the gap exactly, so reporting all three hides nothing. A paper leg
+has slippage of zero by construction, which is the point: it follows the plan
+mechanically and is therefore the baseline the real leg is measured against.
+
+**Discipline counts the two decline kinds differently.** `judgement` means the
+plan was ignored and counts against you. `invalid` means the rung itself was
+wrong and is excluded entirely -- penalising someone for correcting a mistake
+would be perverse, and the `decline_kind` column exists precisely so this
+report can tell them apart. Unanswered alerts are excluded from the denominator
+too: an alert nobody has answered is not yet a decision, and defaulting it
+either way would let it quietly move the figure.
+
+**The view is built to undercut itself.** Every headline carries its N. Groups
+under five events are tagged `thin` -- marked rather than hidden, because
+hiding them would misrepresent how much evidence the totals rest on. Stale
+rungs are counted separately and their rows highlighted. Nothing measurable
+renders as an em dash, never a confident $0.00. Forty-seven checks across
+sections 24 and 25 pin all of it, including that the empty report shows no
+percentages at all.
+
+**Known gap.** Entry-side discipline -- "the BUY_LIMIT triggered and I never
+bought" -- is not measured. It needs a query over watches that alerted and
+never produced a trade, which is a different shape from everything here.
+Reported as not-built rather than folded in as a silent zero.

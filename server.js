@@ -46,6 +46,7 @@ const imports = await import("./services/importService.js");
 const plans = await import("./services/plansService.js");
 const cash = await import("./services/cashService.js");
 const alertsSvc = await import("./services/alertsService.js");
+const efficiencySvc = await import("./services/efficiencyService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -195,6 +196,20 @@ app.post("/api/watched-items/delete", (req, res) => {
 });
 
 // Header bell: everything this holder hasn't dismissed yet.
+// Execution efficiency: what each plan said, what actually happened, and the
+// gap. `paper` narrows to one leg; omitted means both, which is the honest
+// default -- the paper leg follows the plan mechanically, so it is the
+// baseline the real leg is measured against rather than a separate universe.
+app.get("/api/efficiency", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const paper = req.query.paper;
+  res.json(
+    efficiencySvc.efficiencyReport(holder.id, {
+      isPaperTrade: paper === "1" ? true : paper === "0" ? false : null,
+    }),
+  );
+});
+
 app.get("/api/alerts", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   res.json(listUnacknowledgedAlerts(holder.id));

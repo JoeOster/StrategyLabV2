@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 503;
+const MIN_EXPECTED_CHECKS = 548;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -3433,6 +3433,198 @@ console.log("\n23. Dividend reinvestment buys shares");
   const sweep = fidelityParser.parse(sweepCsv);
   check("Reinvestment into a core cash sweep is still skipped", sweep.rows.length === 0);
   check("...and counted as cash, not as an unknown action", sweep.skipped.cash === 2);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n24. Execution efficiency: plan vs actual");
+// The first report in the app that is an OUTPUT rather than plumbing, and the
+// question Joe asked first: the signal said sell at $10.75, what did I get?
+//
+// It is scored by pure functions on purpose. Every rule below is one that
+// could be quietly got wrong in a way that still produces a plausible
+// percentage, which is the failure mode this project keeps meeting.
+{
+  const eff = await import("../services/efficiencyService.js");
+
+  const exitRow = (over = {}) => ({
+    alert_id: 1, triggered_at: "2026-08-10 14:00:00", trigger_price: 10.75,
+    resolution: "accepted", decline_kind: null,
+    rung_id: 1, rung_kind: "TAKE_PROFIT", rung_quantity: 100,
+    planned_price: 10.75, plan_id: 1, plan_status: "open", symbol: "XYZ",
+    source_id: 3, source_name: "Telegram group", strategy_id: null, strategy_title: null,
+    transaction_id: 9, actual_price: 10.75, actual_quantity: 100,
+    actual_date: "2026-08-10", is_paper_trade: 0,
+    ...over,
+  });
+
+  // Joe's example, exactly: signal at $10.75, sold at $10.40.
+  const missed = eff.scoreExit(exitRow({ actual_price: 10.4 }));
+  check("Selling below the signal price is a negative gap", missed.gapPerShare < 0);
+  check("...sized by the shares actually sold", Math.abs(missed.gapTotal - -35) < 1e-9);
+  check("...and expressed against the planned price", Math.abs(missed.gapPercent - -35 / 1075) < 1e-9);
+  check("A followed rung counts as followed", missed.followed && !missed.skipped);
+
+  // Beating the plan.
+  const beat = eff.scoreExit(exitRow({ actual_price: 11 }));
+  check("Selling above the signal price is a positive gap", beat.gapPerShare > 0);
+
+  // The sign convention has to survive the other rung kind, or totals that mix
+  // stops and take-profits are meaningless.
+  const stopBeat = eff.scoreExit(
+    exitRow({ rung_kind: "STOP", planned_price: 8, trigger_price: 8, actual_price: 8.25 }),
+  );
+  check("A stop filled ABOVE its level also beat the plan", stopBeat.gapPerShare > 0);
+  const stopMiss = eff.scoreExit(
+    exitRow({ rung_kind: "STOP", planned_price: 8, trigger_price: 8, actual_price: 7.5 }),
+  );
+  check("...and one filled below did not", stopMiss.gapPerShare < 0);
+
+  // The decomposition. Without it, a rung set behind the market scores as
+  // brilliant execution -- which is exactly what the one real alert in the
+  // live database did, at +80%.
+  const slow = eff.scoreExit(exitRow({ trigger_price: 11, actual_price: 10.5 }));
+  check("Overshoot is how far past the level the price already was",
+    Math.abs(slow.overshootPerShare - 0.25) < 1e-9);
+  check("Slippage is what happened between the alert and the sale",
+    Math.abs(slow.slippagePerShare - -0.5) < 1e-9);
+  check("...and the two sum exactly to the gap",
+    Math.abs(slow.overshootPerShare + slow.slippagePerShare - slow.gapPerShare) < 1e-9);
+
+  const stale = eff.scoreExit(exitRow({ planned_price: 50, trigger_price: 90.19, actual_price: 90.19 }));
+  check("A rung far behind the market is flagged stale", stale.stale === true);
+  check("...its whole gap is overshoot", Math.abs(stale.overshootPerShare - stale.gapPerShare) < 1e-9);
+  check("...and none of it is slippage", stale.slippagePerShare === 0);
+  check("A rung filled at its level is not stale", eff.scoreExit(exitRow()).stale === false);
+
+  // Discipline. The two kinds of decline mean opposite things and must not be
+  // averaged together: 'invalid' says the rung was wrong, 'judgement' says the
+  // plan was ignored. Conflating them penalises correcting a mistake.
+  const judged = eff.scoreExit(exitRow({ resolution: "declined", decline_kind: "judgement", transaction_id: null, actual_price: null }));
+  check("A rung declined on judgement counts as skipped", judged.skipped && !judged.followed);
+  check("...has no gap, because there was no sale", judged.gapPerShare === null);
+  check("...but records what the plan asked for", Math.abs(judged.notionalSkipped - 1075) < 1e-9);
+
+  const invalid = eff.scoreExit(exitRow({ resolution: "declined", decline_kind: "invalid", transaction_id: null, actual_price: null }));
+  check("A rung declined as invalid is neither followed nor skipped",
+    !invalid.followed && !invalid.skipped);
+  check("...and carries no notional", invalid.notionalSkipped === null);
+
+  const unanswered = eff.scoreExit(exitRow({ resolution: null, transaction_id: null, actual_price: null }));
+  check("An unanswered alert is pending, not a decision either way",
+    unanswered.pending && !unanswered.followed && !unanswered.skipped);
+
+  // Entries. Buying BELOW the stated ceiling beats the plan.
+  const entry = eff.scoreEntry({
+    transaction_id: 5, actual_date: "2026-08-01", actual_price: 9.95, actual_quantity: 200,
+    is_paper_trade: 0, watched_item_id: 2, planned_price: 10, planned_floor: null,
+    symbol: "XYZ", source_id: 3, source_name: "Telegram group", strategy_id: null, strategy_title: null,
+  });
+  check("Buying below the limit beats the plan", entry.gapPerShare > 0);
+  check("...by the amount saved per share", Math.abs(entry.gapPerShare - 0.05) < 1e-9);
+  check("...totalled over the shares bought", Math.abs(entry.gapTotal - 10) < 1e-9);
+  check("An entry has no trigger to decompose around", entry.slippagePerShare === null);
+
+  // Aggregation: sample size is reported, and unmeasurable events do not
+  // silently dilute the average towards zero.
+  const holderRow = db
+    .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Efficiency Test', 0) RETURNING *")
+    .get();
+  const empty = eff.efficiencyReport(holderRow.id);
+  check("A holder with no plans reports no events", empty.overall.events === 0);
+  check("...with null figures rather than zeros", empty.overall.gapTotal === null);
+  check("...and null is not a rate of 0%", empty.overall.followedRate === null);
+  check("The sign convention is stated in the payload", /better than the plan/.test(empty.convention));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n25. The efficiency report says how much to trust itself");
+// These are not cosmetic checks. This report becomes useful at a sample size
+// small enough to badly mislead, and its single real event in the live
+// database is a stale rung scoring +80% -- a number that is arithmetically
+// correct and means nothing. If the view ever stops undercutting figures like
+// that, the report becomes actively worse than having none.
+{
+  const R = await import("../public/js/modules/efficiency/render.js");
+
+  const base = {
+    events: 1, scoredEvents: 1, gapTotal: 1607.6, gapAverage: 1607.6,
+    slippageEvents: 1, slippageTotal: 0, slippageAverage: 0,
+    overshootTotal: 1607.6, staleCount: 1,
+    gapPercentAverage: 0.8038, beatPlanCount: 1, beatPlanRate: 1,
+    decidedEvents: 1, followedCount: 1, followedRate: 1,
+    skippedCount: 0, notionalSkipped: 0, pendingCount: 0,
+  };
+  const html = R.renderEfficiencySummary({ overall: base, exits: base });
+
+  check("Every headline figure carries its sample size", (html.match(/1 event/g) || []).length >= 3);
+  check("A single event is not pluralised into looking like many", !html.includes("1 events"));
+  check("Money is formatted with separators", html.includes("$1,607.60"));
+  check("The slippage decomposition is shown beside the gap", /of which slippage/i.test(html));
+  check("...so a gap that is all overshoot cannot read as good execution", html.includes("+$0.00"));
+  check("Stale rungs are surfaced, not quietly folded in", /Stale rungs/.test(html));
+
+  // Empty must read as "nothing measured", never as a confident zero.
+  const empty = {
+    events: 0, scoredEvents: 0, gapTotal: null, gapAverage: null,
+    slippageEvents: 0, slippageTotal: null, slippageAverage: null,
+    overshootTotal: null, staleCount: 0, gapPercentAverage: null,
+    beatPlanCount: null, beatPlanRate: null, decidedEvents: 0,
+    followedCount: null, followedRate: null, skippedCount: 0,
+    notionalSkipped: 0, pendingCount: 0,
+  };
+  const emptyHtml = R.renderEfficiencySummary({ overall: empty, exits: empty });
+  check("With no events it says so in words", /Nothing to measure yet/.test(emptyHtml));
+  check("...and shows no percentages at all", !emptyHtml.includes("%"));
+  check("...and no zero-dollar totals", !emptyHtml.includes("$0.00"));
+
+  // Thin samples are MARKED, not hidden. Hiding them would misrepresent how
+  // much evidence the totals rest on.
+  const thin = R.renderEfficiencyGroups(
+    [{ key: 1, label: "Telegram group", ...base }],
+    { emptyMessage: "none" },
+  );
+  check("A group with under five events is tagged thin", /thin/.test(thin));
+  check("...but still shown, with its figures", thin.includes("Telegram group") && thin.includes("+$1,607.60"));
+
+  const solid = R.renderEfficiencyGroups(
+    [{ key: 1, label: "Telegram group", ...base, events: 12, scoredEvents: 12 }],
+    { emptyMessage: "none" },
+  );
+  check("A group with enough events is not tagged", !/thin-tag/.test(solid));
+
+  // Event rows.
+  const rows = R.renderEfficiencyEvents([
+    { kind: "EXIT", symbol: "INTC", rungKind: "TAKE_PROFIT", sourceName: null, strategyTitle: null,
+      plannedPrice: 50, actualPrice: 90.19, quantity: 40, gapTotal: 1607.6,
+      resolution: "accepted", declineKind: null, pending: false, stale: true,
+      actualDate: "2026-08-21", triggeredAt: "2026-08-21 18:34:33" },
+    { kind: "EXIT", symbol: "XYZ", rungKind: "STOP", sourceName: "Telegram group",
+      plannedPrice: 8, actualPrice: null, quantity: 100, gapTotal: null,
+      resolution: "declined", declineKind: "judgement", pending: false, stale: false,
+      actualDate: null, triggeredAt: "2026-08-12 10:00:00" },
+    { kind: "EXIT", symbol: "ABC", rungKind: "TAKE_PROFIT", sourceName: "Book X",
+      plannedPrice: 20, actualPrice: null, quantity: 10, gapTotal: null,
+      resolution: null, declineKind: null, pending: true, stale: false,
+      actualDate: null, triggeredAt: "2026-08-20 09:00:00" },
+    { kind: "EXIT", symbol: "DEF", rungKind: "STOP", sourceName: "Book X",
+      plannedPrice: 5, actualPrice: null, quantity: 10, gapTotal: null,
+      resolution: "declined", declineKind: "invalid", pending: false, stale: false,
+      actualDate: null, triggeredAt: "2026-08-19 09:00:00" },
+  ]);
+  check("A stale event is marked on its own row", /stale-row/.test(rows));
+  check("A declined event reads as declined", rows.includes("declined"));
+  check("An unanswered event says it is waiting on you", rows.includes("awaiting you"));
+  check(
+    "A rung declined as WRONG is not shown as a discipline failure",
+    rows.includes("rung was wrong"),
+  );
+  check("An event with no fill shows a dash, not a zero price", (rows.match(/—/g) || []).length >= 2);
+  check("Events with no measurable gap show a dash rather than $0.00", !rows.includes("+$0.00"));
+
+  check(
+    "No events renders an empty row, not a broken table",
+    /empty-row/.test(R.renderEfficiencyEvents([])),
+  );
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
