@@ -15,55 +15,54 @@ look authoritative, is not an improvement here even if it would be elsewhere.
 
 ---
 
-## Tier 1 — things that are currently wrong or missing, in order
+## Status, 2026-08-21 (second pass)
 
-### 1. The monthly import audit cannot complete
+Much of the original Tier 1 and Tier 3 was built during the session that
+followed. Rewritten against what the code actually does now, verified rather
+than remembered.
 
-Import exists to catch typos in hand-entered trades. `match.js` finds them
-precisely — it produces `differences: [{field, ledger: 79.49, broker: 79.94}]`
-— and then **nothing can act on them.** `approveBatch` writes only rows
-classified `new`; `needs_review` rows are skipped by design.
+**Done since this file was written:** the monthly import audit now completes
+(`applyCorrection`, wired to the preview UI); unknown market value renders as
+an em dash instead of break-even, on every surface and now in one shared
+renderer; the migration runner exists with a `schema_migrations` ledger and an
+`assertMigratable()` guard; the backup has been restored for real, which is
+what turned up that guard; `notification_cooldown_minutes` is gone and the two
+default-percentage settings pre-fill the exit ladder.
 
-`updateTransaction` already does exactly the needed job, and its own docstring
-says so: correcting a typo'd purchase price fixes the realized P&L of past
-sales rather than leaving the books inconsistent. Both halves exist; nothing
-connects them.
+---
 
-**Why it is first:** it is the one workflow Joe has said he will run every
-month, and it currently dead-ends.
+## Tier 1 — still open, in order
 
-### 2. No benchmark anywhere
+### 1. FIFO sells ignore plan boundaries
+
+Selling draws down the oldest lot regardless of which thesis opened it, so a
+sale attributed to one source can silently consume another's position. Nothing
+in `transactionsService.js` references `plan_id` at all.
+
+**Why it is now first.** Every other item here is a missing output -- annoying,
+but the underlying data stays true and the report can be built later. This one
+corrupts the attribution *as trades are logged*, and attribution is the entire
+point of the app. Records written wrong today cannot be repaired later without
+the operator remembering which lot was meant. It gets more expensive every day
+the app is used.
+
+### 2. Execution efficiency should be the headline report
+
+Still the first genuinely useful *output* the app can produce, and the thing
+Joe described first when asked what he wanted: signal says buy at $10, fill at
+$9.95, sell signal at $10.75, missed. `alerts` records when a level was reached
+and at what price; trades record what happened. Nothing joins them.
+
+Needs a handful of trades to be meaningful, unlike source reliability which
+needs hundreds -- so it is the report that becomes useful soonest.
+
+### 3. No benchmark anywhere
 
 "This source returned 8%" cannot be judged without "the market did 11% over the
-same holding period." Across different periods, a source measured in a bull run
-beats a better one measured in chop. `historical_prices` already holds what a
-same-period baseline needs, so this is a query rather than a schema change.
-
-Without it, every source comparison is confounded by market regime, which means
-the headline output of the app is not trustworthy.
-
-### 3. Execution efficiency should be the headline report
-
-Already argued in the plan-vs-actual constraints: source reliability needs
-hundreds of trades to be measurable, execution gap needs a handful. The data
-now exists to compute it — `alerts` records when a level was reached and at
-what price, trades record what actually happened.
-
-This is the first genuinely useful *output* the app can produce. Everything
-built so far has been input plumbing.
-
-### 4. FIFO sells ignore plan boundaries
-
-Tracked in `V2_BACKLOG.md`. Selling can silently draw down the wrong thesis's
-lot, which corrupts attribution — the thing the app exists to do.
-
-### 5. Unknown market value reads as break-even
-
-`summaryService` falls back to `market_value ?? cost_basis`, so a position with
-no quote displays as market value equal to cost and **unrealized P&L of exactly
-$0.00**. That is not "unknown", it is a specific and wrong claim, and it is the
-same failure family as everything else caught this session: a plausible number
-that nothing throws on. Missing data should read as `—`.
+same holding period." Without it every source comparison is confounded by
+market regime, which means the headline output is not trustworthy.
+`historical_prices` already holds what a same-period baseline needs, so this is
+a query, not a schema change.
 
 ---
 
@@ -71,48 +70,17 @@ that nothing throws on. Missing data should read as `—`.
 
 - **`securities.asset_type` is never set** (`BUGS.md` #14). Every mutual fund
   and money-market sweep is recorded as a stock, while the Fidelity parser
-  already computes the classification and discards it.
-- **Three dead Settings controls** (`BUGS.md` #13) — default take-profit,
-  default stop-loss, notification cooldown. All saved, none consumed. The first
-  two now have an obvious home: pre-filling the exit ladder.
+  already computes the classification and throws it away.
 - **No fetch timeout anywhere.** A hung provider call blocks a scheduler tick
-  indefinitely. The re-entrancy guard added today stops ticks piling up, but the
-  underlying stall remains.
-- **No market-holiday calendar.** Known and documented; costs a couple of wasted
-  polls a year.
+  indefinitely. The re-entrancy guard stops ticks piling up; the stall remains.
+- **Non-trade cash rows are not imported** -- deposits, fees, interest. Harmless
+  while every such row predates an opening balance, which is true today and
+  will not stay true. See `V2_BACKLOG.md`.
+- **No market-holiday calendar.** Costs a couple of wasted polls a year.
 - **`dividends.pay_date` cannot be filled** from the current provider
-  (`BUGS.md` #15).
-
----
-
-## Tier 3 — operational, and one of these is more urgent than it looks
-
-### The backup has never been restored
-
-`deploy/backup-db.sh` runs nightly and refuses to write if the NAS is
-unmounted, which is careful. But **no restore has ever been performed or
-tested.** A backup you have never restored is a hypothesis, not a backup, and
-the moment it matters is the worst moment to discover the gzip is truncated or
-the schema is three versions stale.
-
-Worth doing once, deliberately: restore last night's file into a scratch
-database, start an instance against it, confirm the accounts are there. An
-afternoon, once.
-
-### There is no migration system
-
-Every schema change is applied by hand. Two were applied by hand today (v12 and
-v13), and a third exists as a one-off script (v14). It worked because the
-database is nearly empty; it will not stay that way.
-
-`assertSchemaCurrent` currently tells you to **delete the data directory and
-rebuild**, which is reasonable advice today and catastrophic advice the day
-after the first real import. A forward-only migration runner — numbered SQL
-files, a `schema_migrations` table, applied in order at startup — is perhaps
-150 lines and removes an entire category of future accident.
-
-**Recommendation: do this before the first real import, not after.** It is the
-cheapest it will ever be, and the failure mode it prevents is total.
+  (`BUGS.md` #15). Drop the column or change provider.
+- **`theme` is dead in both directions** (`BUGS.md` #16). Remove it, or build
+  the theme it implies.
 
 ---
 
