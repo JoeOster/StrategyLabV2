@@ -55,6 +55,10 @@ CREATE TABLE securities (
   data_source   TEXT,                     -- 'yahoo' | 'finnhub' | 'manual'
   first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
   profile_updated_at TEXT,                -- last time company_profile fields were refreshed
+  -- Subsumed by the UNIQUE idx_securities_symbol index (see SECTION 6) and
+  -- kept only because dropping a table constraint means rebuilding the table.
+  -- On its own this never worked: exchange_id is NULL for almost every row,
+  -- and NULLs do not compare equal.
   UNIQUE (symbol, exchange_id)
 );
 
@@ -405,7 +409,17 @@ CREATE TABLE app_settings (
 -- SECTION 6: Indexes
 -- ============================================================================
 
-CREATE INDEX idx_securities_symbol           ON securities(symbol);
+-- UNIQUE, not just an index. `UNIQUE (symbol, exchange_id)` on the table above
+-- does not constrain what this app actually does: most callers pass no
+-- exchange, exchange_id is then NULL, and SQLite treats every NULL as distinct
+-- -- so that constraint permits unlimited duplicate rows for the same ticker.
+-- The app reads securities by symbol alone and takes the first match, so a
+-- duplicate does not error, it just hides whatever is attached to the other row.
+--
+-- Uniqueness on symbol alone matches how the app genuinely behaves. It forgoes
+-- listing one ticker on two exchanges, which nothing here supports anyway:
+-- there is one lookup path and it is by symbol. (BUG 6)
+CREATE UNIQUE INDEX idx_securities_symbol    ON securities(symbol);
 CREATE INDEX idx_historical_prices_security   ON historical_prices(security_id, date);
 CREATE INDEX idx_dividends_security           ON dividends(security_id);
 CREATE INDEX idx_watched_items_holder_status  ON watched_items(holder_id, status);

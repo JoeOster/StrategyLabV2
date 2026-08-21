@@ -100,6 +100,84 @@ check("Watched item created via addWatchedItem (no network call)", item.id != nu
 check("addWatchedItem's targetPrice convenience set buy_price_high", item.buy_price_high === 11);
 check("Watched item starts in WATCHING status", item.status === "WATCHING");
 
+console.log("\n2c. Securities uniqueness (BUG 6)");
+const priceSvcEarly = await import("../services/priceService.js");
+
+// The DB-level guarantee. `UNIQUE (symbol, exchange_id)` on the table permits
+// this, because exchange_id is NULL on almost every row and NULLs never
+// compare equal -- which is exactly why duplicates were possible at all.
+db.prepare(
+  "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('DUPE', NULL, 'Dupe Co', 'manual')",
+).run();
+let duplicateSymbolRejected = false;
+try {
+  db.prepare(
+    "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('DUPE', NULL, 'Dupe Co Again', 'manual')",
+  ).run();
+} catch {
+  duplicateSymbolRejected = true;
+}
+check("A second securities row with the same symbol is rejected", duplicateSymbolRejected);
+
+let duplicateAcrossExchangesRejected = false;
+try {
+  db.prepare(
+    "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('DUPE', ?, 'Dupe Co Elsewhere', 'manual')",
+  ).run(exchangeId);
+} catch {
+  duplicateAcrossExchangesRejected = true;
+}
+check(
+  "...and so is the same symbol under a different exchange",
+  duplicateAcrossExchangesRejected,
+);
+
+// The deterministic half of BUG 6, which needed no concurrency at all: a row
+// stored with exchange_id NULL was invisible to a lookup that supplied an
+// exchange, so a second row got inserted. Reaching the network here at all
+// means the lookup missed -- this suite has no network, so it would fail.
+const foundDespiteExchange = await priceSvcEarly.getOrCreateSecurity("DUPE", {
+  exchangeCode: "NYSE",
+});
+check(
+  "A NULL-exchange row is found even when an exchangeCode is supplied",
+  foundDespiteExchange.symbol === "DUPE" && foundDespiteExchange.name === "Dupe Co",
+);
+check(
+  "...and no second row was created for it",
+  db.prepare("SELECT COUNT(*) AS n FROM securities WHERE symbol = 'DUPE'").get().n === 1,
+);
+
+// The concurrent half: overlapping calls share one in-flight promise, so both
+// callers get the identical object. Two independent calls would each build a
+// fresh row object, so reference equality is what distinguishes them.
+const [shared1, shared2] = await Promise.all([
+  priceSvcEarly.getOrCreateSecurity("DUPE"),
+  priceSvcEarly.getOrCreateSecurity("DUPE"),
+]);
+check("Concurrent lookups for one symbol share a single in-flight call", shared1 === shared2);
+
+// A failed lookup must not leave a poisoned entry that later calls await
+// forever. NOSUCH is not in the DB, so this reaches the network and fails --
+// what matters is that the second attempt still gets to try.
+let firstFailed = false;
+let secondAlsoRan = false;
+try {
+  await priceSvcEarly.getOrCreateSecurity("NOSUCHTICKERXYZ");
+} catch {
+  firstFailed = true;
+}
+try {
+  await priceSvcEarly.getOrCreateSecurity("NOSUCHTICKERXYZ");
+} catch {
+  secondAlsoRan = true;
+}
+check("A failed lookup does not poison later attempts for that symbol", firstFailed && secondAlsoRan);
+
+// Cleaned up so the securities table is back to just NVDA: a later check in
+// section 5b counts rows globally, and leaving DUPE behind breaks it.
+db.prepare("DELETE FROM securities WHERE symbol = 'DUPE'").run();
+
 console.log("\n2b. Watchlist (named list) checks");
 const defaultList = getOrCreateDefaultWatchlist(holder.id);
 check(

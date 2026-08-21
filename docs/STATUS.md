@@ -5,6 +5,14 @@ and the four real broker exports now import correctly end to end).
 **Read "Picking this back up after a break" directly below — it is current as
 of this entry.** Highlights:
 
+- **Schema v12: `idx_securities_symbol` is now UNIQUE** (BUG 6). The table's
+  `UNIQUE (symbol, exchange_id)` never constrained anything, because
+  `exchange_id` is NULL on nearly every row and NULLs do not compare equal, so
+  the same ticker could be inserted twice — silently, since the app reads by
+  symbol and takes the first match. **Applied in place, not by rebuilding**:
+  it is only an index, and a rebuild would have destroyed the six registered
+  accounts (`init-db.js` does not seed those). See `docs/BUGS.md` for the
+  exact commands.
 - **The import write path is built and verified.** Staging, approval and the
   four routes exist; all four accounts import correctly and the IRA still
   reconciles **6/6**. Nothing has been imported into the live database yet —
@@ -88,7 +96,7 @@ Restart with `systemctl --user restart strategylab` — the old
 `npm run stop`/`restart` scripts were Windows-only and have been removed.
 
 **The database is still empty of user data, now by choice rather than by
-blocker.** Schema v11, six accounts registered, zero transactions. Real broker
+blocker.** Schema v12, six accounts registered, zero transactions. Real broker
 exports sit in `files/` (gitignored): both Fidelity accounts, E*TRADE, and
 Robinhood. They parse, reconcile, stage and approve correctly — verified
 repeatedly against `VACUUM INTO` snapshots — but the live database has

@@ -20,9 +20,6 @@ const insertExchange = db.prepare(
 // silently fails to find existing rows in the common case (caller just
 // passes a ticker, no exchange). Most callers won't specify an exchange, so
 // that path needs to actually work.
-const getSecurityByExchange = db.prepare(
-  "SELECT * FROM securities WHERE symbol = ? AND exchange_id = ?",
-);
 const getSecurityAnySymbol = db.prepare(
   "SELECT * FROM securities WHERE symbol = ? ORDER BY id LIMIT 1",
 );
@@ -61,11 +58,38 @@ function normalizeExchangeCode(raw) {
  */
 export async function getOrCreateSecurity(symbol, opts = {}) {
   const upperSymbol = symbol.trim().toUpperCase();
+
+  // BUG 6, second half: an in-flight call is shared rather than duplicated.
+  // The await below sits between the "does it exist?" check and the insert, so
+  // two concurrent calls for a brand-new ticker (two browser tabs, a Journal
+  // add racing a Watchlist add) both used to miss the check and both insert.
+  // Returning the same promise means one lookup, one insert, one row, and both
+  // callers get the identical object.
+  const inFlight = securityLookupsInFlight.get(upperSymbol);
+  if (inFlight) return inFlight;
+
+  const work = createSecurity(upperSymbol, opts).finally(() => {
+    // finally: a failed lookup must not leave a poisoned entry behind that
+    // every later call for that symbol would await forever.
+    securityLookupsInFlight.delete(upperSymbol);
+  });
+  securityLookupsInFlight.set(upperSymbol, work);
+  return work;
+}
+
+// Keyed on symbol alone, matching the uniqueness the schema now enforces.
+const securityLookupsInFlight = new Map();
+
+async function createSecurity(upperSymbol, opts) {
   let exchangeId = resolveExchangeId(opts.exchangeCode ?? null);
 
-  const existing = exchangeId != null
-    ? getSecurityByExchange.get(upperSymbol, exchangeId)
-    : getSecurityAnySymbol.get(upperSymbol);
+  // BUG 6, first half, and not a race at all: this used to look up by
+  // (symbol, exchange_id) whenever an exchange was supplied. A row stored
+  // earlier with exchange_id NULL -- which is almost all of them, since most
+  // callers pass no exchange -- would not be found, and a second row for the
+  // same ticker was inserted. Deterministic, silent, and reachable without any
+  // concurrency. Symbol is the key; look it up that way, always.
+  const existing = getSecurityAnySymbol.get(upperSymbol);
   if (existing) return existing;
 
   // Tagged so callers can tell a genuine symbol-resolution failure (an
@@ -85,17 +109,29 @@ export async function getOrCreateSecurity(symbol, opts = {}) {
     exchangeId = resolveExchangeId(resolvedExchangeCode);
   }
 
-  return insertSecurity.get({
-    symbol: upperSymbol,
-    exchangeId,
-    name: profile.name,
-    currency: profile.currency,
-    sector: profile.sector,
-    industry: profile.industry,
-    logoUrl: profile.logoUrl,
-    description: profile.description,
-    dataSource: "yahoo",
-  });
+  try {
+    return insertSecurity.get({
+      symbol: upperSymbol,
+      exchangeId,
+      name: profile.name,
+      currency: profile.currency,
+      sector: profile.sector,
+      industry: profile.industry,
+      logoUrl: profile.logoUrl,
+      description: profile.description,
+      dataSource: "yahoo",
+    });
+  } catch (err) {
+    // The in-memory guard above only covers this process, and scripts run
+    // against the same database file while the server is up -- the importer
+    // resolves a symbol per ticker (docs/IMPORTS.md), so that is a real
+    // scenario, not a hypothetical. If another process inserted the row while
+    // we were off fetching the profile, the unique index rejects ours and the
+    // right answer is theirs.
+    const winner = getSecurityAnySymbol.get(upperSymbol);
+    if (winner) return winner;
+    throw err;
+  }
 }
 
 const upsertQuote = db.prepare(`

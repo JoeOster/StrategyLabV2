@@ -2,9 +2,9 @@
 
 ## Open (found via code review, 2026-08-09)
 
-**Seven of the nine were fixed on 2026-08-21** (#4, 5, 7, 8, 9, 11, 12) and are
-recorded below under "Fixed". The two left here are the ones that need a
-decision rather than a patch.
+**Eight of the nine were fixed on 2026-08-21** (#4, 5, 6, 7, 8, 9, 11, 12) and
+are recorded below under "Fixed". The one left here needs a product decision
+rather than a patch.
 
 Found by reading `server.js`, every `services/*.js` file, and the frontend
 under `public/js/` cold, cross-checked against `schema.sql`'s own
@@ -15,24 +15,6 @@ same-day (see `applySplitToOpenLots`/`recordBuy` in
 `services/transactionsService.js`, verified by `6j`/`6k` in
 `scripts/test-offline.js`); the webhook one is recorded below as a
 deliberate deferral, not an open bug.
-
-### 6. Concurrent "add ticker" for a brand-new symbol can create duplicate `securities` rows
-
-**File:** `services/priceService.js:62-88` (`getOrCreateSecurity`)
-
-`securities` is `UNIQUE (symbol, exchange_id)`, but most callers pass no
-exchange, so `exchange_id` is `NULL` -- and SQLite treats two `NULL`s as
-distinct, so the constraint doesn't catch it. Two concurrent calls for the
-same brand-new symbol (two browser tabs, or a Journal-idea add racing a
-Watchlist add) can both miss the pre-insert lookup and both insert, since
-`await yahoo.getProfile()` sits in between the check and the insert. A later
-`getSecurityBySymbol().get()` (single row, no tie-break) silently picks one,
-hiding whatever's attached to the other.
-
-**Fix:** either a real DB-level uniqueness guard on `symbol` alone (a
-partial unique index `WHERE exchange_id IS NULL`), or serialize
-`getOrCreateSecurity` calls per-symbol in app code (e.g. an in-memory lock
-map keyed by symbol) for the lifetime of one request.
 
 ### 10. `escape_price` / second take-profit target are stored but never evaluated
 
@@ -78,6 +60,66 @@ moment to harden this API generally rather than as an isolated patch now.
 ---
 
 ## Fixed (historical record)
+
+### 6. Duplicate `securities` rows (2026-08-21) — schema v12
+
+Reported as a concurrency bug. It was two bugs, and the one that was *not* a
+race was the easier one to hit.
+
+**The deterministic half.** `getOrCreateSecurity` looked up by
+`(symbol, exchange_id)` whenever an exchange was supplied, and by symbol alone
+otherwise. Almost every row is stored with `exchange_id` NULL, because almost
+no caller passes an exchange — so a single call that *did* supply one missed
+the existing row and inserted a second. No concurrency required, fully
+repeatable, and silent: the app reads by symbol and takes the first match, so
+the duplicate does not error, it just hides whatever is attached to the other
+row.
+
+**The race.** `await yahoo.getProfile()` sits between the existence check and
+the insert, so two overlapping calls for a brand-new ticker both missed and
+both inserted.
+
+**Fixed in three layers**, because each covers a case the others do not:
+
+1. **Lookup is by symbol alone, always.** Symbol is how this app identifies a
+   security everywhere else; the exchange-qualified path only ever created
+   duplicates. This closes the deterministic half outright.
+2. **`idx_securities_symbol` is now UNIQUE** (schema v12). The table's
+   `UNIQUE (symbol, exchange_id)` never constrained anything real: NULLs do not
+   compare equal, so it permitted unlimited duplicates. It is kept, annotated
+   as subsumed, because dropping a table constraint means rebuilding the table.
+   The cost is forgoing one ticker on two exchanges, which nothing supports.
+3. **An in-flight promise map**, keyed on symbol, so overlapping calls share one
+   lookup and both receive the same row. Cleared in a `finally`, or a failed
+   lookup would poison every later call for that symbol.
+
+Plus a catch-and-requery around the insert: the in-memory map covers one
+process, and scripts run against the same database while the server is up —
+the importer resolves a security per ticker, so a cross-process race is real
+rather than theoretical. If another process won, its row is the right answer.
+
+**Migration.** This is the first schema change applied *in place* rather than
+by rebuilding. It is only an index, so no table rebuild was needed and no data
+moved:
+
+```
+node -e "import('./lib/db.js').then(m=>m.default.exec(\"VACUUM INTO 'data/backups/strategylab_pre-v12.db'\"))"
+systemctl --user stop strategylab
+node -e "import('./lib/db.js').then(m=>{const d=m.default;d.exec('DROP INDEX IF EXISTS idx_securities_symbol');d.exec('CREATE UNIQUE INDEX idx_securities_symbol    ON securities(symbol)')})"
+npm run db:stamp
+systemctl --user start strategylab
+```
+
+Check for duplicate symbols *before* creating the index — it will refuse if any
+exist. There were none (zero securities rows at the time). The six registered
+accounts survived, which a rebuild would have destroyed: `init-db.js` seeds
+exchanges, a holder and a watchlist, but **not** accounts.
+
+**Regression tests:** six checks in `test-offline.js` section 2c, covering the
+unique constraint, the NULL-exchange lookup, in-flight sharing, and that a
+failed lookup does not poison later attempts. Verified to fail without the fix.
+
+
 
 ### 4, 5, 7, 8, 9, 11, 12 — the contained half of the code-review batch (2026-08-21)
 
