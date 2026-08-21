@@ -7,6 +7,7 @@ import { initializePaperTradeModule, reloadPaperTradeView } from "./modules/pape
 import { initializeAlertsModule } from "./modules/alerts/index.js";
 import { initPlansUi } from "./modules/plans/dialog.js";
 import { initializeNotificationsModule, reloadNotificationsView } from "./modules/notifications/index.js";
+import { initializeImportsModule, reloadImportsView } from "./modules/imports/index.js";
 
 document.addEventListener("DOMContentLoaded", async () => {
   try {
@@ -19,6 +20,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     await initializeAlertsModule();
     // Deciding on an alert can record a sale, so the position views need to
     // reload behind it.
+    // Importing writes trades, so the position views reload behind it.
+    await initializeImportsModule({
+      onChange: () => Promise.all([reloadOrdersView(), reloadDashboardView()]),
+    });
     await initializeNotificationsModule({
       onChange: () => Promise.all([reloadOrdersView(), reloadPaperTradeView(), reloadDashboardView()]),
     });
@@ -50,6 +55,7 @@ function setupViewSwitching() {
     orders: document.getElementById("view-orders"),
     journal: document.getElementById("view-journal"),
     papertrade: document.getElementById("view-papertrade"),
+    imports: document.getElementById("view-imports"),
     notifications: document.getElementById("view-notifications"),
     settings: document.getElementById("view-settings"),
   };
@@ -78,6 +84,7 @@ function setupViewSwitching() {
       else if (target === "journal") await reloadJournalView();
       else if (target === "papertrade") await reloadPaperTradeView();
       else if (target === "notifications") await reloadNotificationsView();
+      else if (target === "imports") await reloadImportsView();
       else await reloadWatchlistView();
     });
   }

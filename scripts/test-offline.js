@@ -3017,6 +3017,7 @@ const uiModules = [
   "public/js/modules/alerts/index.js",
   "public/js/modules/plans/dialog.js",
   "public/js/modules/notifications/index.js",
+  "public/js/modules/imports/index.js",
 ];
 let idsChecked = 0;
 const missingIds = [];

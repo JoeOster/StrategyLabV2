@@ -16,6 +16,7 @@
         <button type="button" class="view-btn" data-view="orders">Orders</button>
         <button type="button" class="view-btn" data-view="journal">Journal</button>
         <button type="button" class="view-btn" data-view="papertrade">Paper Trade</button>
+        <button type="button" class="view-btn" data-view="imports">Import</button>
         <button type="button" class="view-btn" data-view="notifications">Notifications</button>
         <button type="button" class="view-btn" data-view="settings">Settings</button>
       </nav>
@@ -271,6 +272,34 @@
         <p class="panel-hint">A strategy is a specific idea from a source -- a chapter, a rule, a specific call -- that ideas can be tagged with.</p>
         <ul id="journal-strategies-list" class="settings-list"></ul>
       </div>
+    </main>
+  </section>
+
+  <section id="view-imports" hidden>
+    <main>
+      <div class="panel-head"><h2>Import statements</h2></div>
+      <p class="panel-hint">
+        A monthly audit, not a loader. Most rows will be trades you already recorded &mdash;
+        the job is finding the ones that are missing or wrong. Nothing is written until you say so.
+      </p>
+      <p id="import-banner" class="status-banner" hidden></p>
+
+      <div class="field-row">
+        <label>Account
+          <select id="import-account"></select>
+        </label>
+        <label>Statement file(s)
+          <input type="file" id="import-files" accept=".csv" multiple />
+        </label>
+        <button type="button" id="import-upload-btn" class="primary">Stage</button>
+      </div>
+      <p class="panel-hint">
+        Several files for one account are staged together on purpose: a sell in one export is often
+        covered by a buy in another, and staging them separately would orphan it.
+      </p>
+
+      <div id="import-currency"></div>
+      <div id="import-preview"></div>
     </main>
   </section>
 

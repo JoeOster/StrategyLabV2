@@ -436,6 +436,14 @@ app.get("/api/accounts", (req, res) => {
   res.json(accounts.listAccounts(holder.id));
 });
 
+// Which account a statement filename belongs to, or null when ambiguous.
+// Ambiguity must not be guessed at: attaching a statement to the wrong account
+// misfiles every trade in it.
+app.get("/api/accounts/match", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  res.json(accounts.matchAccountByFilename(holder.id, String(req.query.filename || "")) ?? {});
+});
+
 app.post("/api/accounts", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   try {
