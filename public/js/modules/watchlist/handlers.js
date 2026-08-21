@@ -26,6 +26,7 @@ export function makeAddTickerHandler({
     const symbol = formData.get("symbol");
     const orderType = formData.get("orderType");
     const targetPrice = formData.get("targetPrice");
+    const escapePrice = formData.get("escapePrice");
     const notes = formData.get("notes");
     const selected = Number(formData.get("watchlistId"));
     const watchlistId = Number.isFinite(selected) && selected > 0 ? selected : getActiveWatchlistId();
@@ -41,7 +42,7 @@ export function makeAddTickerHandler({
         }
       }
 
-      await api.addWatchedItem({ symbol, orderType, targetPrice, notes, watchlistId });
+      await api.addWatchedItem({ symbol, orderType, targetPrice, escapePrice, notes, watchlistId });
       form.reset();
       dialog.close();
       await onItemAdded();

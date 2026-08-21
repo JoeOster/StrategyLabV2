@@ -213,6 +213,10 @@ function updateTargetPriceVisibility() {
   els.ideaTargetPriceLabel.hidden = isWatch;
   els.ideaForm.elements.targetPrice.required = !isWatch;
   if (isWatch) els.ideaForm.elements.targetPrice.value = "";
+  // Same reasoning as the watchlist dialog: a WATCH idea never alerts, so it
+  // cannot carry a stop that would fire.
+  document.getElementById("idea-escape-price-label").hidden = isWatch;
+  if (isWatch) els.ideaForm.elements.escapePrice.value = "";
 }
 
 async function handleIdeaSubmit(event) {

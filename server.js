@@ -111,10 +111,23 @@ app.get("/api/watched-items/check", (req, res) => {
   res.json({ matches });
 });
 
+// Shared by the watched-items and journal-idea routes, which record the same
+// kind of plan from two different entry points.
+function validateStop(escapePrice, targetPrice) {
+  const hasStop = escapePrice != null && escapePrice !== "";
+  const hasTarget = targetPrice != null && targetPrice !== "";
+  if (!hasStop || !hasTarget) return null;
+  if (Number(escapePrice) >= Number(targetPrice)) {
+    return `Stop-loss ($${Number(escapePrice)}) must be below the target price ($${Number(targetPrice)}).`;
+  }
+  return null;
+}
 app.post("/api/watched-items", async (req, res) => {
   const holder = getOrCreateDefaultHolder();
-  const { symbol, orderType, targetPrice, watchlistId, watchlistName, notes, isPaperTrade } =
-    req.body || {};
+  const {
+    symbol, orderType, targetPrice, watchlistId, watchlistName, notes, isPaperTrade,
+    escapePrice, takeProfit2Low,
+  } = req.body || {};
 
   if (!symbol || !symbol.trim()) {
     return res.status(400).json({ error: "symbol is required" });
@@ -125,6 +138,10 @@ app.post("/api/watched-items", async (req, res) => {
   if (orderType !== "WATCH" && (targetPrice == null || targetPrice === "")) {
     return res.status(400).json({ error: "targetPrice is required for BUY_LIMIT/SELL_LIMIT" });
   }
+  // A stop at or above the target is a typo, not a strategy: it would fire the
+  // instant it was evaluated and read as the feature being broken.
+  const stopError = validateStop(escapePrice, targetPrice);
+  if (stopError) return res.status(400).json({ error: stopError });
 
   try {
     const item = await addWatchedItem({
@@ -132,6 +149,11 @@ app.post("/api/watched-items", async (req, res) => {
       symbol: symbol.trim(),
       orderType,
       targetPrice: targetPrice != null ? Number(targetPrice) : undefined,
+      // Forwarded rather than dropped: the service has always stored these,
+      // but nothing sent them and nothing evaluated them (BUG 10).
+      escapePrice: escapePrice != null && escapePrice !== "" ? Number(escapePrice) : undefined,
+      takeProfit2Low:
+        takeProfit2Low != null && takeProfit2Low !== "" ? Number(takeProfit2Low) : undefined,
       watchlistId: watchlistId != null ? Number(watchlistId) : undefined,
       watchlistName,
       notes,
@@ -528,7 +550,8 @@ app.get("/api/journal/ideas", (req, res) => {
 
 app.post("/api/journal/ideas", async (req, res) => {
   const holder = getOrCreateDefaultHolder();
-  const { symbol, orderType, targetPrice, sourceId, strategyId, notes } = req.body || {};
+  const { symbol, orderType, targetPrice, sourceId, strategyId, notes, escapePrice } =
+    req.body || {};
 
   if (!symbol || !symbol.trim()) {
     return res.status(400).json({ error: "symbol is required" });
@@ -539,6 +562,10 @@ app.post("/api/journal/ideas", async (req, res) => {
   if (orderType !== "WATCH" && (targetPrice == null || targetPrice === "")) {
     return res.status(400).json({ error: "targetPrice is required for BUY_LIMIT/SELL_LIMIT" });
   }
+  // A stop at or above the target is a typo, not a strategy: it would fire the
+  // instant it was evaluated and read as the feature being broken.
+  const stopError = validateStop(escapePrice, targetPrice);
+  if (stopError) return res.status(400).json({ error: stopError });
   if (!sourceId) {
     return res.status(400).json({ error: "sourceId is required" });
   }
@@ -549,6 +576,7 @@ app.post("/api/journal/ideas", async (req, res) => {
       symbol: symbol.trim(),
       orderType,
       targetPrice: targetPrice != null ? Number(targetPrice) : undefined,
+      escapePrice: escapePrice != null && escapePrice !== "" ? Number(escapePrice) : undefined,
       sourceId: Number(sourceId),
       strategyId: strategyId ? Number(strategyId) : undefined,
       notes,

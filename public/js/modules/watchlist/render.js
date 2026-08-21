@@ -13,6 +13,7 @@ export const ALL_COLUMNS = [
   { key: "security_name", label: "Name" },
   { key: "order_type", label: "Type" },
   { key: "target", label: "Target" },
+  { key: "escape_price", label: "Stop" },
   { key: "last_price", label: "Last Price" },
   { key: "change_pct", label: "Change" },
   { key: "history_days", label: "History" },
@@ -75,6 +76,8 @@ const CELL_RENDERERS = {
   order_type: (item) =>
     `<td><span class="type-pill type-${item.order_type.toLowerCase()}">${escapeHtml(orderTypeLabel(item.order_type))}</span></td>`,
   target: (item) => `<td>${renderTargetCell(item)}</td>`,
+  escape_price: (item) =>
+    `<td class="price-cell">${item.escape_price == null ? "—" : formatPrice(item.escape_price)}</td>`,
   last_price: (item) =>
     `<td class="price-cell" title="${escapeHtml(buildPriceTooltip(item))}">${formatPrice(item.last_price)}</td>`,
   change_pct: (item) => {

@@ -86,6 +86,8 @@ export async function initializeWatchlistModule() {
   els.orderTypeSelect = document.getElementById("add-form-order-type");
   els.targetPriceInput = els.addForm.elements.targetPrice;
   els.targetPriceLabel = document.getElementById("add-form-target-price-label");
+  els.escapePriceInput = els.addForm.elements.escapePrice;
+  els.escapePriceLabel = document.getElementById("add-form-escape-price-label");
 
   await loadWatchlists();
   await loadItems();
@@ -321,6 +323,13 @@ function updateTargetPriceVisibility() {
   els.targetPriceLabel.hidden = isWatch;
   els.targetPriceInput.required = !isWatch;
   if (isWatch) els.targetPriceInput.value = "";
+
+  // The stop follows the target: a WATCH item never alerts, so offering a
+  // stop-loss on one would promise an alert that by definition cannot fire.
+  // Cleared as well as hidden, or a value typed before switching to WATCH
+  // would be submitted invisibly.
+  els.escapePriceLabel.hidden = isWatch;
+  if (isWatch) els.escapePriceInput.value = "";
 }
 
 /**

@@ -2,9 +2,8 @@
 
 ## Open (found via code review, 2026-08-09)
 
-**Eight of the nine were fixed on 2026-08-21** (#4, 5, 6, 7, 8, 9, 11, 12) and
-are recorded below under "Fixed". The one left here needs a product decision
-rather than a patch.
+**All nine were fixed on 2026-08-21.** Every one is recorded below under
+"Fixed". Nothing from this review is outstanding.
 
 Found by reading `server.js`, every `services/*.js` file, and the frontend
 under `public/js/` cold, cross-checked against `schema.sql`'s own
@@ -15,25 +14,6 @@ same-day (see `applySplitToOpenLots`/`recordBuy` in
 `services/transactionsService.js`, verified by `6j`/`6k` in
 `scripts/test-offline.js`); the webhook one is recorded below as a
 deliberate deferral, not an open bug.
-
-### 10. `escape_price` / second take-profit target are stored but never evaluated
-
-**File:** `services/watchlistService.js` -- `insertWatchedItem`/
-`addWatchedItem` accept and store `escape_price`, `take_profit_2_low`,
-`take_profit_2_high`; `getActiveWatching`'s column list omits all three, and
-`isTriggered` never reads them.
-
-A stop-loss (`escape_price`) or second take-profit target you set would
-silently never fire -- no error, the data's just structurally excluded from
-alert evaluation. Not reachable from the current UI (no `public/js` file
-references these fields), so today's actual impact is low, but the backend
-gap is real for any future caller (API integration, a UI that does add
-these fields).
-
-**Fix:** either wire these into `getActiveWatching`/`isTriggered`, or drop
-the columns/inputs until there's a UI for them, so the schema doesn't
-promise something the app doesn't do.
-
 
 ---
 
@@ -60,6 +40,72 @@ moment to harden this API generally rather than as an isolated patch now.
 ---
 
 ## Fixed (historical record)
+
+### 10. Stop-loss and second take-profit never evaluated (2026-08-21) — schema v13
+
+`addWatchedItem` accepted and stored `escape_price`, `take_profit_2_low` and
+`take_profit_2_high`. `getActiveWatching` did not select them and `isTriggered`
+never read them, so **a stop-loss you set was structurally incapable of
+firing** — no error, no alert, the data simply excluded from evaluation. For a
+stop, silence is the worst possible failure mode.
+
+Wired up on Joe's instruction ("having a stoploss in place is going to be
+commonly recorded"). Three things had to happen, and only the first was the
+reported bug:
+
+1. **The fields are selected and evaluated.** `isTriggered` is now a thin
+   wrapper over `triggerReason`, which returns *which* level was crossed:
+   `STOP`, `BUY`, `TAKE_PROFIT` or `TAKE_PROFIT_2`. The alert message names it
+   — "target hit" is ambiguous once an item carries an entry, two take-profits
+   and a stop, and a stop is the one you least want to read as good news.
+
+   A regression check asserts mechanically that every `item.<field>`
+   `triggerReason` reads is a column `getActiveWatching` selects. The unit
+   tests pass plain objects straight in, so they would *not* have caught the
+   original bug — the evaluator was correct, it was just never given the data.
+
+2. **`alerts.trigger_reason`** (schema v13), a column rather than something to
+   parse back out of `message`. This app exists to judge how reliable a source
+   or methodology turned out to be, and an idea that hit its stop is the
+   opposite outcome from one that hit its target. That has to be a `GROUP BY`.
+
+3. **Items in `ALERT` status are still evaluated** — this one was found while
+   testing, and without it the fix would have been cosmetic. `status` records
+   what has *already* fired; it was also, wrongly, acting as "stop looking."
+   So a plan that hit its take-profit dropped out of evaluation permanently,
+   and its stop-loss could never fire afterwards. That is precisely the
+   scenario the feature is for: the signal went out, the exit was missed, and
+   the price then fell through the floor — in silence. It also made
+   `take_profit_2` unreachable, since the first target is always crossed first.
+
+   Now `WATCHING` and `ALERT` are both evaluated, with one alert per *level*
+   per item (`alertAlreadyFiredForLevel`), so nothing re-fires on every
+   15-minute poll while a price sits in a band. `EXECUTED`/`CANCELLED`/
+   `EXPIRED` stay excluded — those plans are closed. Acknowledging an alert
+   still does not re-arm anything, which was a deliberate earlier decision and
+   is untouched.
+
+**Entry points.** Both dialogs that record a plan — Watchlist "Add Ticker" and
+Journal "New Idea" — now have an optional stop-loss field, and both routes
+forward it. A stop at or above the target is rejected on both sides: it would
+fire the instant it was evaluated and read as the feature being broken. The
+field is hidden and cleared for `WATCH` items, which by definition never alert.
+The watchlist table gained an optional "Stop" column.
+
+**Migration.** v13 applied in place, like v12. `alerts` was empty, so the table
+was dropped and recreated from `schema.sql` verbatim rather than `ALTER`-ed —
+`ALTER TABLE ADD COLUMN` works and preserves the CHECK, but appends the column
+in a different position than a fresh install, and a migrated database that
+differs structurally from a new one is a puzzle waiting to happen. Backup
+first, service stopped, `npm run db:stamp` after.
+
+**Regression tests:** 26 checks — the trigger matrix, stop-outranks-target,
+BUY_LIMIT stops, WATCH never firing, the reason persisting as a column, and the
+missed-exit sequence (target fires, is missed, stop still fires, both on the
+record). The structural invariant in point 1 was verified to fail without the
+fix, naming the three fields it would have caught.
+
+
 
 ### 6. Duplicate `securities` rows (2026-08-21) — schema v12
 

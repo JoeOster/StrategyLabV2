@@ -72,6 +72,65 @@ check(
   isTriggered({ order_type: "WATCH", buy_price_high: null, take_profit_low: null }, 999999) === false,
 );
 
+console.log("\n1b. Stop-loss and second take-profit (BUG 10)");
+// These were stored by addWatchedItem and then omitted from getActiveWatching's
+// column list, so isTriggered never saw them: a stop-loss you set was
+// structurally incapable of firing. Silent, which for a stop is the worst
+// possible failure.
+const { triggerReason } = await import("../services/watchlistService.js");
+
+const stopOnSell = { order_type: "SELL_LIMIT", take_profit_low: 20, escape_price: 9 };
+check("Stop-loss fires when price falls to it", triggerReason(stopOnSell, 9) === "STOP");
+check("Stop-loss fires when price falls below it", triggerReason(stopOnSell, 8.25) === "STOP");
+check("Stop-loss does not fire above it", triggerReason(stopOnSell, 9.01) === null);
+check("Take-profit still fires normally alongside a stop", triggerReason(stopOnSell, 21) === "TAKE_PROFIT");
+
+// A journal, not an execution path: a broken thesis is worth recording whether
+// the plan was to buy or to sell.
+const stopOnBuy = { order_type: "BUY_LIMIT", buy_price_high: 11, escape_price: 9 };
+check("Stop-loss fires on a BUY_LIMIT plan too", triggerReason(stopOnBuy, 8.5) === "STOP");
+check("...and the buy target still fires in its own range", triggerReason(stopOnBuy, 10.5) === "BUY");
+
+// WATCH means never alert. A stop on one would promise an alert that cannot fire.
+check(
+  "A stop on a WATCH item never fires",
+  triggerReason({ order_type: "WATCH", escape_price: 50 }, 10) === null,
+);
+
+// Stop outranks everything: if both a stop and a target match, the stop is the
+// fact that matters.
+check(
+  "Stop-loss outranks a take-profit that also matches",
+  triggerReason({ order_type: "SELL_LIMIT", take_profit_low: 5, escape_price: 9 }, 9) === "STOP",
+);
+
+const tp2 = { order_type: "SELL_LIMIT", take_profit_low: 20, take_profit_2_low: 30 };
+check("First take-profit fires in its range", triggerReason(tp2, 21) === "TAKE_PROFIT");
+check("Second take-profit fires when only it matches", triggerReason({ order_type: "SELL_LIMIT", take_profit_2_low: 30 }, 31) === "TAKE_PROFIT_2");
+check("Neither take-profit fires below both", triggerReason(tp2, 19) === null);
+
+check(
+  "isTriggered still agrees with triggerReason",
+  isTriggered(stopOnSell, 8) === true && isTriggered(stopOnSell, 15) === false,
+);
+
+// The unit checks above pass plain objects straight to triggerReason, so they
+// would NOT have caught the actual bug: the fields were real, stored and
+// evaluated correctly -- they were simply missing from getActiveWatching's
+// SELECT, so the evaluator never received them. Every field triggerReason
+// reads must therefore be a column that query fetches, and that invariant is
+// worth asserting mechanically rather than remembering.
+const wlSource = fs.readFileSync(path.join(process.cwd(), "services/watchlistService.js"), "utf8");
+const activeWatchingSql = /const getActiveWatching = db\.prepare\(`([\s\S]*?)`\)/.exec(wlSource)[1];
+const reasonBody = /export function triggerReason\(item, price\) \{([\s\S]*?)^\}/m.exec(wlSource)[1];
+const fieldsRead = [...new Set([...reasonBody.matchAll(/item\.(\w+)/g)].map((m) => m[1]))];
+const notSelected = fieldsRead.filter((f) => !activeWatchingSql.includes(f));
+check(
+  `getActiveWatching selects every field triggerReason reads (${fieldsRead.length} fields)`,
+  notSelected.length === 0,
+);
+if (notSelected.length) console.log(`      missing from the query: ${notSelected.join(", ")}`);
+
 console.log("\n2. DB wiring checks (no network -- security pre-seeded)");
 db.prepare("INSERT INTO exchanges (code, name) VALUES ('NASDAQ','Nasdaq')").run();
 const exchangeId = db.prepare("SELECT id FROM exchanges WHERE code='NASDAQ'").get().id;
@@ -177,6 +236,80 @@ check("A failed lookup does not poison later attempts for that symbol", firstFai
 // Cleaned up so the securities table is back to just NVDA: a later check in
 // section 5b counts rows globally, and leaving DUPE behind breaks it.
 db.prepare("DELETE FROM securities WHERE symbol = 'DUPE'").run();
+
+console.log("\n2d. Alerts record WHICH level was crossed (BUG 10)");
+// The reason is stored as a column, not left to be read back out of the
+// message. The point of the app is judging how reliable a source turned out to
+// be, and "hit its stop" is the opposite outcome from "hit its target" -- so
+// that has to be a GROUP BY, not a text search.
+const stopItem = await addWatchedItem({
+  holderId: holder.id,
+  symbol: "NVDA",
+  orderType: "SELL_LIMIT",
+  targetPrice: 100,
+  escapePrice: 40,
+  skipBackfill: true,
+});
+check("addWatchedItem stores the stop-loss", stopItem.escape_price === 40);
+
+const stopFired = applyAlertIfTriggered({ ...stopItem, symbol: "NVDA" }, 38);
+check("A price through the stop fires an alert", stopFired !== null);
+check("...tagged as a STOP", stopFired.reason === "STOP");
+check("...with a message naming the stop, not a generic 'target hit'", /stop-loss/i.test(stopFired.message));
+
+const storedAlert = db
+  .prepare("SELECT * FROM alerts WHERE watched_item_id = ? ORDER BY id DESC LIMIT 1")
+  .get(stopItem.id);
+check("The reason is persisted as a column", storedAlert.trigger_reason === "STOP");
+check("The trigger price is persisted", storedAlert.trigger_price === 38);
+check(
+  "Outcomes are attributable by reason without parsing prose",
+  db.prepare("SELECT COUNT(*) AS n FROM alerts WHERE trigger_reason = 'STOP'").get().n === 1,
+);
+
+// A plan whose target fires and is then MISSED must still have a live stop.
+// This is the case the feature exists for: the signal went out, the exit did
+// not happen, and the price then fell through the floor. Firing the take-profit
+// used to take the item out of evaluation permanently, so the stop stayed
+// silent exactly when it mattered most.
+const missedItem = await addWatchedItem({
+  holderId: holder.id,
+  symbol: "NVDA",
+  orderType: "SELL_LIMIT",
+  targetPrice: 10.75,
+  escapePrice: 9,
+  skipBackfill: true,
+});
+const hitTarget = applyAlertIfTriggered({ ...missedItem, symbol: "NVDA" }, 10.75);
+check("The take-profit fires first", hitTarget?.reason === "TAKE_PROFIT");
+check(
+  "The item is marked ALERT",
+  db.prepare("SELECT status FROM watched_items WHERE id = ?").get(missedItem.id).status === "ALERT",
+);
+check(
+  "The same level does not fire twice while the price sits there",
+  applyAlertIfTriggered({ ...missedItem, symbol: "NVDA" }, 10.8) === null,
+);
+const hitStop = applyAlertIfTriggered({ ...missedItem, symbol: "NVDA" }, 8.9);
+check("...but the stop STILL fires after a missed exit", hitStop?.reason === "STOP");
+check(
+  "Both outcomes are on the record for this plan",
+  db.prepare("SELECT COUNT(*) AS n FROM alerts WHERE watched_item_id = ?").get(missedItem.id).n === 2,
+);
+
+// An item that has already alerted must stay in the evaluation set, or none of
+// the above can happen in the real polling path.
+const activeSql = /const getActiveWatching = db\.prepare\(`([\s\S]*?)`\)/.exec(
+  fs.readFileSync(path.join(process.cwd(), "services/watchlistService.js"), "utf8"),
+)[1];
+check("getActiveWatching still evaluates items that have already alerted", /ALERT/.test(activeSql));
+
+db.prepare("DELETE FROM alerts WHERE watched_item_id = ?").run(missedItem.id);
+db.prepare("DELETE FROM watched_items WHERE id = ?").run(missedItem.id);
+
+// Cleaned up: later sections count watched_items and alerts globally.
+db.prepare("DELETE FROM alerts WHERE watched_item_id = ?").run(stopItem.id);
+db.prepare("DELETE FROM watched_items WHERE id = ?").run(stopItem.id);
 
 console.log("\n2b. Watchlist (named list) checks");
 const defaultList = getOrCreateDefaultWatchlist(holder.id);

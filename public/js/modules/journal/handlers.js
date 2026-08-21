@@ -14,6 +14,10 @@ export function ideaFormToPayload(formData) {
   };
   if (orderType !== "WATCH") {
     payload.targetPrice = toNumber(formData.get("targetPrice"));
+    // Optional, unlike targetPrice -- an idea without a stop is still a valid
+    // idea. Only sent when actually filled in.
+    const escape = emptyToNull(formData.get("escapePrice"));
+    if (escape !== null) payload.escapePrice = toNumber(escape);
   }
   return payload;
 }
@@ -25,6 +29,15 @@ export function validateIdeaPayload(payload) {
   if (!["BUY_LIMIT", "SELL_LIMIT", "WATCH"].includes(payload.orderType)) return "Choose an idea type.";
   if (payload.orderType !== "WATCH" && !(payload.targetPrice > 0)) {
     return "Target price must be greater than zero.";
+  }
+  if (payload.escapePrice != null) {
+    if (!(payload.escapePrice > 0)) return "Stop-loss must be greater than zero.";
+    // Caught here as well as server-side: a stop at or above the target fires
+    // the moment it is evaluated, which reads as the alert being broken rather
+    // than as a typo.
+    if (payload.targetPrice != null && payload.escapePrice >= payload.targetPrice) {
+      return "Stop-loss must be below the target price.";
+    }
   }
   return null;
 }

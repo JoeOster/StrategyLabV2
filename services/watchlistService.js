@@ -241,6 +241,8 @@ const insertWatchedItem = db.prepare(`
  * @param {string} [input.watchlistName] find-or-create a list by name (ignored if watchlistId given). Defaults to DEFAULT_WATCHLIST_NAME.
  * @param {boolean} [input.isPaperTrade=false]
  * @param {number} [input.targetPrice] convenience: sets buy_price_high (BUY_LIMIT) or take_profit_low (SELL_LIMIT). Ignored for WATCH.
+ * @param {number} [input.escapePrice] stop-loss. Alerts when price falls to or below it, for BUY_LIMIT and SELL_LIMIT alike.
+ * @param {number} [input.takeProfit2Low] a second, further-out take-profit. Independent of the first.
  */
 export async function addWatchedItem(input) {
   // Adding to the virtual Orders list is meaningless -- membership comes from
@@ -558,12 +560,28 @@ export function deleteWatchedItems(holderId, ids) {
   });
 }
 
+// escape_price and the second take-profit are in this list deliberately: they
+// were stored by addWatchedItem and then omitted here, so a stop-loss you set
+// was structurally excluded from ever being evaluated. No error, no alert --
+// the single worst failure mode for a stop (BUG 10). Any column added to
+// watched_items that isTriggered reads MUST be added here too.
 const getActiveWatching = db.prepare(`
   SELECT w.id, w.order_type, w.buy_price_low, w.buy_price_high,
-         w.take_profit_low, w.take_profit_high, w.security_id, s.symbol
+         w.take_profit_low, w.take_profit_high,
+         w.take_profit_2_low, w.take_profit_2_high, w.escape_price,
+         w.security_id, s.symbol
   FROM watched_items w
   JOIN securities s ON s.id = w.security_id
-  WHERE w.status = 'WATCHING'
+  -- ALERT as well as WATCHING. status is a record of what has ALREADY fired,
+  -- not a signal to stop looking: an item that hit its take-profit still has a
+  -- live stop-loss, and dropping out of evaluation on first alert means the
+  -- stop goes silent exactly when a plan has gone wrong -- the target was hit,
+  -- the exit was missed, and the price then fell through the floor. It also
+  -- made take_profit_2 unreachable, since the first target is always crossed
+  -- first. Firing once per LEVEL is enforced in applyAlertIfTriggered.
+  --
+  -- EXECUTED/CANCELLED/EXPIRED stay excluded: those plans are closed.
+  WHERE w.status IN ('WATCHING','ALERT')
 `);
 
 // Securities that need a fresh quote: anything actively watched, PLUS
@@ -581,48 +599,99 @@ const getSecuritiesNeedingQuotes = db.prepare(`
 `);
 
 const insertAlert = db.prepare(`
-  INSERT INTO alerts (watched_item_id, trigger_price, message)
-  VALUES (@watchedItemId, @triggerPrice, @message)
+  INSERT INTO alerts (watched_item_id, trigger_price, trigger_reason, message)
+  VALUES (@watchedItemId, @triggerPrice, @triggerReason, @message)
 `);
 
 const markAlerted = db.prepare(`UPDATE watched_items SET status = 'ALERT' WHERE id = ?`);
+
+// One alert per level per item. Without this, keeping ALERT items in
+// evaluation would re-fire the same target on every 15-minute poll for as
+// long as the price stayed there.
+const alertAlreadyFiredForLevel = db.prepare(
+  "SELECT 1 FROM alerts WHERE watched_item_id = ? AND trigger_reason = ?",
+);
 
 // Exported (not just internal) specifically so it can be unit-tested with
 // plain objects and prices, no DB or network involved -- this is the part
 // of the whole watchlist feature most worth getting right and cheapest to
 // verify in isolation.
 export function isTriggered(item, price) {
+  return triggerReason(item, price) !== null;
+}
+
+/**
+ * Which target a price crossed, or null for none.
+ *
+ * Split out from isTriggered so the alert can say WHICH level was hit. "target
+ * hit" is ambiguous once an item can carry an entry, two take-profits and a
+ * stop -- and a stop being hit is the one you least want to mistake for good
+ * news.
+ *
+ * @returns {'STOP'|'BUY'|'TAKE_PROFIT'|'TAKE_PROFIT_2'|null}
+ */
+export function triggerReason(item, price) {
+  // Stop-loss is checked FIRST and for both plan directions. This app is a
+  // journal, not an execution path -- an alert here is "notice this and write
+  // it down", not "sell now" -- so a stop breach is worth surfacing whether the
+  // plan was to buy or to sell, and it outranks any other level that happens to
+  // match at the same price.
+  if (item.order_type !== "WATCH" && item.escape_price != null && price <= item.escape_price) {
+    return "STOP";
+  }
+
   if (item.order_type === "BUY_LIMIT" && item.buy_price_high != null) {
     const aboveFloor = item.buy_price_low == null || price >= item.buy_price_low;
-    return price <= item.buy_price_high && aboveFloor;
+    if (price <= item.buy_price_high && aboveFloor) return "BUY";
   }
-  if (item.order_type === "SELL_LIMIT" && item.take_profit_low != null) {
-    const belowCeiling = item.take_profit_high == null || price <= item.take_profit_high;
-    return price >= item.take_profit_low && belowCeiling;
+
+  if (item.order_type === "SELL_LIMIT") {
+    // Each take-profit is independent: the second is a further-out target, not
+    // a refinement of the first, and either one alone is a valid setup.
+    if (item.take_profit_low != null) {
+      const belowCeiling = item.take_profit_high == null || price <= item.take_profit_high;
+      if (price >= item.take_profit_low && belowCeiling) return "TAKE_PROFIT";
+    }
+    if (item.take_profit_2_low != null) {
+      const belowCeiling2 = item.take_profit_2_high == null || price <= item.take_profit_2_high;
+      if (price >= item.take_profit_2_low && belowCeiling2) return "TAKE_PROFIT_2";
+    }
   }
+
   // WATCH items (and anything else with no target set) fall through here --
   // intentional, not a gap. "Just watching" means never alerting.
-  return false;
+  return null;
 }
+
+const TRIGGER_MESSAGES = {
+  STOP: (item, price) => `${item.symbol} fell to $${price} — stop-loss level $${item.escape_price} reached`,
+  BUY: (item, price) => `${item.symbol} at $${price} — buy target $${item.buy_price_high} reached`,
+  TAKE_PROFIT: (item, price) => `${item.symbol} at $${price} — take-profit $${item.take_profit_low} reached`,
+  TAKE_PROFIT_2: (item, price) =>
+    `${item.symbol} at $${price} — second take-profit $${item.take_profit_2_low} reached`,
+};
 
 /**
  * Evaluates one watched_item against a price and, if triggered, writes the
  * alert + status update as a single transaction. Split out from checkAlerts
  * so the DB-write path can be exercised directly in tests without needing a
  * live quote first.
- * @returns {{watchedItemId: number, symbol: string, price: number} | null}
+ * @returns {{watchedItemId: number, symbol: string, price: number,
+ *   reason: string, message: string} | null}
  */
 export function applyAlertIfTriggered(item, price) {
-  if (!isTriggered(item, price)) return null;
+  const reason = triggerReason(item, price);
+  if (reason === null) return null;
+  // Already fired for this level -- the price simply has not left the band yet.
+  if (alertAlreadyFiredForLevel.get(item.id, reason)) return null;
+  const message = TRIGGER_MESSAGES[reason](item, price);
   withTransaction(() => {
-    insertAlert.run({
-      watchedItemId: item.id,
-      triggerPrice: price,
-      message: `${item.symbol} ${item.order_type} target hit at $${price}`,
-    });
+    insertAlert.run({ watchedItemId: item.id, triggerPrice: price, triggerReason: reason, message });
     markAlerted.run(item.id);
   });
-  return { watchedItemId: item.id, symbol: item.symbol, price };
+  // `reason` rides along so callers -- the bell, the Home Assistant webhook --
+  // can tell a stop from a profit target without re-deriving it from prose.
+  return { watchedItemId: item.id, symbol: item.symbol, price, reason, message };
 }
 
 const listUnacknowledgedAlertsQuery = db.prepare(`

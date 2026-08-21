@@ -96,7 +96,7 @@ Restart with `systemctl --user restart strategylab` — the old
 `npm run stop`/`restart` scripts were Windows-only and have been removed.
 
 **The database is still empty of user data, now by choice rather than by
-blocker.** Schema v12, six accounts registered, zero transactions. Real broker
+blocker.** Schema v13, six accounts registered, zero transactions. Real broker
 exports sit in `files/` (gitignored): both Fidelity accounts, E*TRADE, and
 Robinhood. They parse, reconcile, stage and approve correctly — verified
 repeatedly against `VACUUM INTO` snapshots — but the live database has

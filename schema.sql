@@ -302,6 +302,16 @@ CREATE TABLE alerts (
   watched_item_id   INTEGER NOT NULL REFERENCES watched_items(id) ON DELETE CASCADE,
   triggered_at      TEXT NOT NULL DEFAULT (datetime('now')),
   trigger_price     REAL NOT NULL,
+  -- WHICH level was crossed: 'STOP' | 'BUY' | 'TAKE_PROFIT' | 'TAKE_PROFIT_2'.
+  --
+  -- A column rather than something to read back out of `message`, because this
+  -- is outcome data, not display text. The whole point of the app is judging
+  -- how reliable a source or methodology turned out to be, and an idea that hit
+  -- its stop is the opposite result from one that hit its take-profit -- so
+  -- "how did source X's ideas end up?" has to be a GROUP BY, not a text search.
+  -- Nullable: rows written before this column existed have no answer, and
+  -- guessing one from prose would invent data.
+  trigger_reason    TEXT CHECK (trigger_reason IN ('STOP','BUY','TAKE_PROFIT','TAKE_PROFIT_2')),
   message           TEXT,
   acknowledged_at   TEXT
 );
