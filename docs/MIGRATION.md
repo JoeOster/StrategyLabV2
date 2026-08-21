@@ -103,10 +103,9 @@ which means offsite protection for free.
 
 ## Post-move follow-ups
 
-- **`npm run stop` / `npm run restart` are Windows-only** -- they shell out to
-  `scripts/stop-server.ps1` (PowerShell). Dead on Linux. `systemctl --user
-  restart strategylab` replaces them; the npm scripts should be removed or made
-  cross-platform so they aren't a trap later.
+- ~~`npm run stop` / `npm run restart` are Windows-only~~ -- **done 2026-08-21**:
+  `scripts/stop-server.ps1` and both npm scripts are removed. Use
+  `systemctl --user restart strategylab`.
 - **No auth, binds `0.0.0.0`.** Unchanged from the PC, and it has to stay
   LAN-reachable because the browser UI is used from the PC -- there is no
   reverse proxy on that box. This matches the existing `homepage` /

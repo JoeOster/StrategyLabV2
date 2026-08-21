@@ -640,11 +640,10 @@ app.listen(PORT, () => {
 // that's in the middle of closing. Mirrors the pattern from the old
 // Strategy_Lab project's server.js.
 //
-// Note (Windows): Ctrl+C in the same terminal reliably delivers SIGINT, so
-// this handler runs in the common case. A signal sent from *outside* that
-// terminal (e.g. `taskkill /PID <pid>` without `/F`) is not guaranteed to
-// reach a Windows console app the same way -- see scripts/stop-server.ps1's
-// comments for what that means for restarting after a detached process.
+// The app now runs as a user-level systemd unit on the orchestrator NUC, so
+// `systemctl --user restart strategylab` is what delivers SIGTERM here. The
+// old Windows caveat about `taskkill` not reliably reaching a console app no
+// longer applies -- that path, and scripts/stop-server.ps1 with it, is gone.
 function shutdown(signal) {
   console.log(`\n[server] ${signal} received, shutting down...`);
   scheduler.stopScheduler();

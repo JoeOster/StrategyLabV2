@@ -39,15 +39,12 @@ Two things worth knowing before diving back in:
     and the process exits almost immediately (not force-killed), and
     confirmed a second instance can rebind the same port right away, so the
     old one isn't left holding it.
-  - `npm run stop` (`scripts/stop-server.ps1`) finds whatever's listening
-    on the app's port and stops it — graceful `Stop-Process` first (which
-    is what lets the new SIGINT/SIGTERM handler above actually run), then
-    force-kills after 2s if it's still there. `npm run restart` is
-    `stop` + `start` chained. **Confirmed working on Joe's machine
-    (2026-07-27)**: both `npm run stop` and `npm run restart` were run for
-    real, no issues. This was the one piece built without the sandbox being
-    able to test it directly (no Windows/PowerShell there) -- now verified
-    live rather than just on review.
+  - ~~`npm run stop` / `npm run restart` (`scripts/stop-server.ps1`)~~ —
+    **removed 2026-08-21** along with the PowerShell script, when the app
+    moved onto the orchestrator NUC. They were Windows-only and dead on
+    Linux. The systemd unit replaces them:
+    `systemctl --user restart strategylab`, which delivers SIGTERM to the
+    handler above. See `docs/MIGRATION.md`.
 - **The webhook has a real destination picked now, just not typed in yet.**
   Plan (decided with Joe 2026-07-27, see "Where this webhook is actually
   headed" under "Scheduled alerts + webhook delivery" below): notifications
@@ -340,7 +337,6 @@ StrategyLabV2/
     init-db.js                     -- applies schema.sql, seeds NASDAQ/NYSE   (npm run db:init)
     test-offline.js                -- no-network verification suite          (npm run test:offline)
     smoke-test-watchlist.js        -- live end-to-end check against Yahoo     (npm run smoke:watchlist -- SYMBOL)
-    stop-server.ps1                -- finds + stops whatever's on the app's port (npm run stop), confirmed live
   services/
     usageLog.js                    -- logs + soft-throttles provider API calls
     holderService.js               -- getOrCreateDefaultHolder() -- no auth, single-user app

@@ -9,8 +9,6 @@
   },
   "scripts": {
     "start": "node server.js",
-    "stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-server.ps1",
-    "restart": "npm run stop && npm start",
     "db:init": "node scripts/init-db.js",
     "db:stamp": "node scripts/stamp-schema-version.js",
     "smoke:watchlist": "node scripts/smoke-test-watchlist.js",
