@@ -685,6 +685,30 @@ only its owner moved.
   tracking" via the `order_type = 'WATCH'` null-object). The minimal `plans`
   table above is deliberately NOT that -- it owns exits and groups lots, nothing
   more. It is, however, the natural seed for the larger version later.
+**ANSWERED 2026-08-21.** Joe: *"these are monitoring of discussion posts, so
+completely manual unless an api is available and there wasnt when i looked
+before."* So signals exist and are worth recording, but every one is typed by
+hand.
+
+Three consequences:
+
+1. **The paste-to-parse skill is not optional, it is the feature.** A form per
+   call will not survive a busy channel. Paste the message, get a draft plan,
+   accept or discard. Build that WITH the signals table, not after it.
+2. **The calls Joe skips are the ones that will not get logged.** Manual entry
+   is biased toward what you acted on, because that is when you are already in
+   the app. If that happens, source-level numbers measure his filter rather
+   than the source -- constraint 2 above, arriving through the back door. Make
+   skipping cost one paste and one click, and treat any source hit-rate as
+   suspect until skipped calls are genuinely present.
+3. **Worth re-checking the API question, specifically for Telegram.** It has
+   two doors and the obvious one is the wrong one: a BOT can read a group it
+   has been added to (needs admin cooperation), while MTProto client libraries
+   let a user account read channels it already follows -- closer to what is
+   wanted, but that is automating your own account and sits in a greyer area of
+   their terms. Discord splits the same way. Unverified against Joe's actual
+   groups; a lead, not a plan.
+
 - **A `signals` table** recording what a source said and when, independent of
   whether it was acted on. Would make Joe's Telegram example measurable (*"the
   sell signal goes out for $10.75 and I miss it"* -- there is nowhere to record
