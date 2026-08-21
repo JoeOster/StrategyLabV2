@@ -841,28 +841,36 @@ check("Summary counts remaining open lots", summary.positionCount === 1);
 check("Summary totals realized P&L", Math.abs(summary.realizedPnl - (198 + 1395 + 80)) < 1e-6);
 check("Summary totals dividend income", Math.abs(summary.dividendIncome - 42.5) < 1e-9);
 
-console.log("\n6d. Transactions: deletion restores lot state");
+// Orders are never hard-deleted -- schema v7 replaced deleteTransaction with
+// voidTransaction, which keeps the row for the audit trail and stops it
+// counting. This section still called the old function and therefore threw,
+// taking every check after it down with it.
+console.log("\n6d. Transactions: voiding restores lot state");
 const lastSell = tx
   .listTransactions(traderHolder.id, { type: "SELL" })
   .find((t) => t.linked_buy_id === lot2.id);
 const beforeQty = db.prepare("SELECT quantity_remaining FROM transactions WHERE id = ?").get(lot2.id)
   .quantity_remaining;
-tx.deleteTransaction(traderHolder.id, lastSell.id);
+tx.voidTransaction(traderHolder.id, lastSell.id, "test");
 const afterQty = db.prepare("SELECT quantity_remaining FROM transactions WHERE id = ?").get(lot2.id)
   .quantity_remaining;
-check("Deleting a sell returns its shares to the lot", afterQty === beforeQty + lastSell.quantity);
+check("Voiding a sell returns its shares to the lot", afterQty === beforeQty + lastSell.quantity);
+check(
+  "A voided sell is stamped rather than removed",
+  db.prepare("SELECT voided_at FROM transactions WHERE id = ?").get(lastSell.id).voided_at != null,
+);
 
-let deleteSoldBuyBlocked = false;
+let voidSoldBuyBlocked = false;
 try {
-  tx.deleteTransaction(traderHolder.id, lot1.id);
+  tx.voidTransaction(traderHolder.id, lot1.id);
 } catch {
-  deleteSoldBuyBlocked = true;
+  voidSoldBuyBlocked = true;
 }
-check("Cannot delete a buy that has already been sold", deleteSoldBuyBlocked);
+check("Cannot void a buy that has already been sold", voidSoldBuyBlocked);
 
 check(
-  "Cannot delete another holder's transaction",
-  tx.deleteTransaction(holder.id, lot2.id).deleted === 0,
+  "Cannot void another holder's transaction",
+  tx.voidTransaction(holder.id, lot2.id).voided === 0,
 );
 
 console.log("\n6g. Transactions: editing keeps lot accounting consistent");
