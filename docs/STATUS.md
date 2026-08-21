@@ -95,13 +95,53 @@ Code Remote against the same host alias. There is no PC copy any more.
 Restart with `systemctl --user restart strategylab` — the old
 `npm run stop`/`restart` scripts were Windows-only and have been removed.
 
-**The database is still empty of user data, now by choice rather than by
-blocker.** Schema v13, six accounts registered, zero transactions. Real broker
-exports sit in `files/` (gitignored): both Fidelity accounts, E*TRADE, and
-Robinhood. They parse, reconcile, stage and approve correctly — verified
-repeatedly against `VACUUM INTO` snapshots — but the live database has
-deliberately not been written to. Joe wanted to run the real import himself,
-with the Fidelity screenshot in front of him.
+**The database now holds real, reconciled data — on the `plan-exits` branch
+only.** Schema v19, six accounts, all four broker exports imported. Note the
+inversion this creates: `plan-exits` was spun up as the disposable comparison
+copy on port 3114, and it is now the one carrying every real transaction, while
+`main` on 3113 still has zero. Whichever way the merge decision goes, 3114's
+database is the one that must survive.
+
+| account | Strategy Lab | statement | note |
+| --- | --- | --- | --- |
+| Fidelity 146518557 (IRA) | $23,646.37 | $23,677.51 | live price drift |
+| Fidelity 266356256 (IRA, wife) | $15,327.69 | $15,352.65 | live price drift |
+| E*TRADE 7178 | $319.99 | $320.89 | live price drift |
+| Robinhood | $1,636.62 | $1,638.91 | live price drift |
+| Schwab (thinkorswim) | $100.00 | $100.00 | funded, no positions, no parser |
+| TradeStation | $100.00 | $100.00 | funded, no positions, no parser |
+
+Robinhood now reconciles too, but it took a real cash figure to get there and
+the way it failed is worth keeping. Its derived cash sat at -$2,766.79 because
+the export is a window, not a history: 48 of its 156 rows are non-trade cash
+movements the importer does not stage (a $2,000 instant deposit, nine Gold
+subscription fees totalling $45, interest, stock-lending income, futures
+sweeps), and two IONQ sales -- 2 shares on 2025-11-04 and 25 on 2025-11-13 --
+were dropped because their opening purchases predate the file. Recording
+$10.48 as a dated OPENING_BALANCE baselines all of that away, and cash is now
+exact against the app.
+
+Two caveats that survive the reconciliation:
+
+- **Realized P&L is understated for 2026.** The app reports -$1,136.86 against
+  Robinhood's YTD -$1,272.24. The export ends 2026-07-15 and today is
+  2026-08-21, so roughly five weeks of activity are simply not in the file.
+  This is a data-coverage gap, not an arithmetic one; a fresh export closes it.
+- **The dropped IONQ sales cannot be recovered by exporting again.** Their buys
+  predate any window Robinhood will hand back, so those 27 shares have no cost
+  basis and their realized P&L is permanently unknown. `reconcile()` drops them
+  rather than inventing a basis, which is the right call, and the import
+  preview names them explicitly -- they were only invisible here because this
+  import was driven through curl rather than the UI.
+
+Non-trade cash rows being unstaged costs nothing today, because every one of
+them predates the 2026-08-21 baseline and so cannot move the balance. It will
+start to matter the moment an import covers a period after the baseline. See
+`docs/V2_BACKLOG.md`.
+
+Schwab and TradeStation hold $100 each and nothing else. Both have
+`has_parser = 0`, so until a parser exists every trade in them has to be
+logged by hand.
 
 **The import write path is built** (branch `import-write-path`):
 `import_batches` → `import_raw_rows` → approved writes into `transactions`
@@ -110,7 +150,13 @@ basis and the void filter all apply. Routes are `POST /api/imports` (stage),
 `GET /api/imports/:id` (preview), `POST /api/imports/:id/approve`, and
 `GET /api/imports/latest`. Only rows classified `new` are ever written.
 
-**The single next piece of work** is exit parameters on a trade -- a "Set
+**Exit plans are BUILT** (branch `plan-exits`, schema v14, running on port 3114
+alongside main on 3113 for comparison). A trade can carry a ladder of exit
+rungs owned by the thesis that opened it; a rung reaching its band raises an
+alert and never sells. See `docs/IMPROVEMENTS.md` for a full ranked list of what
+is still wrong or missing, and where AI assistance genuinely fits.
+
+The previous next-piece-of-work entry, kept for its reasoning: exit parameters on a trade -- a "Set
 Exits" button opening a ladder of exit rungs owned by a minimal `plans`
 table (exits belong to a THESIS, not to a lot or a position -- see the entry for
 why both obvious answers are wrong here), decided with Joe
@@ -850,7 +896,22 @@ follows that written spec rather than any prior code.
 
 Built: card grid of open position lots (ticker, exchange, qty, entry, value,
 days held, colour-coded P&L), a table view over the same data, filters by
-text and exchange, a sort dropdown, and a portfolio summary strip. Clicking
+text, exchange and **account**, a sort dropdown, and a portfolio summary strip.
+
+The account filter is server-side while the exchange and text filters are
+client-side, and that difference is deliberate rather than incidental. Cash,
+realized P&L and dividend income are computed on the server; narrowing the
+fetched rows in the browser would shrink the table while leaving those three
+figures portfolio-wide. A strip that disagrees with the rows beneath it is
+worse than no strip.
+
+The strip itself now lives in `public/js/modules/shared/summary.js` and is
+rendered by both Dashboard and Orders. Orders had a careful version -- aware
+that an unpriced position makes market value unknown rather than zero, aware
+that cash may only be shown when a single account is in scope -- and the
+Dashboard had a lesser copy using `toFixed(2)` with no thousands separators
+and no notion of either rule. The same portfolio genuinely read differently
+depending on which tab you were on, and only one of them was right. Clicking
 any card or row opens a detail dialog with quote stats, 52-week range and
 position-in-range bar, an inline SVG price chart, the user's lots for that
 ticker, watchlist entries, full trade history and recent dividends.

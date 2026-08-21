@@ -5,15 +5,28 @@ import { initializeDashboardModule, reloadDashboardView } from "./modules/dashbo
 import { initializeJournalModule, reloadJournalView } from "./modules/journal/index.js";
 import { initializePaperTradeModule, reloadPaperTradeView } from "./modules/papertrade/index.js";
 import { initializeAlertsModule } from "./modules/alerts/index.js";
+import { initPlansUi } from "./modules/plans/dialog.js";
+import { initializeNotificationsModule, reloadNotificationsView } from "./modules/notifications/index.js";
+import { initializeImportsModule, reloadImportsView } from "./modules/imports/index.js";
 
 document.addEventListener("DOMContentLoaded", async () => {
   try {
+    initPlansUi(); // shared by Orders and Paper Trade -- one dialog, both tabs
     await initializeDashboardModule();
     await initializeWatchlistModule();
     await initializeOrdersModule();
     await initializeJournalModule();
     await initializePaperTradeModule();
     await initializeAlertsModule();
+    // Deciding on an alert can record a sale, so the position views need to
+    // reload behind it.
+    // Importing writes trades, so the position views reload behind it.
+    await initializeImportsModule({
+      onChange: () => Promise.all([reloadOrdersView(), reloadDashboardView()]),
+    });
+    await initializeNotificationsModule({
+      onChange: () => Promise.all([reloadOrdersView(), reloadPaperTradeView(), reloadDashboardView()]),
+    });
     // Settings changes (renaming a list, deleting a holder) can invalidate
     // what the other views are showing, so they reload on any change.
     await initializeSettingsModule({
@@ -42,6 +55,8 @@ function setupViewSwitching() {
     orders: document.getElementById("view-orders"),
     journal: document.getElementById("view-journal"),
     papertrade: document.getElementById("view-papertrade"),
+    imports: document.getElementById("view-imports"),
+    notifications: document.getElementById("view-notifications"),
     settings: document.getElementById("view-settings"),
   };
   const watchlistActions = document.getElementById("watchlist-actions");
@@ -68,6 +83,8 @@ function setupViewSwitching() {
       else if (target === "dashboard") await reloadDashboardView();
       else if (target === "journal") await reloadJournalView();
       else if (target === "papertrade") await reloadPaperTradeView();
+      else if (target === "notifications") await reloadNotificationsView();
+      else if (target === "imports") await reloadImportsView();
       else await reloadWatchlistView();
     });
   }

@@ -6,6 +6,8 @@ import {
   renderSourcesPanel,
   renderHoldersPanel,
   renderExchangesPanel,
+  renderBrokeragesPanel,
+  renderAccountsPanel,
   renderColumnsPanel,
   SOURCE_NAME_LABELS,
 } from "./render.js";
@@ -31,6 +33,8 @@ export async function initializeSettingsModule({ onChange } = {}) {
   els.sources = document.getElementById("settings-sources");
   els.holders = document.getElementById("settings-holders");
   els.exchanges = document.getElementById("settings-exchanges");
+  els.brokerages = document.getElementById("settings-brokerages");
+  els.accounts = document.getElementById("settings-accounts");
   els.generalForm = document.getElementById("general-settings-form");
   els.columns = document.getElementById("settings-columns");
 
@@ -43,6 +47,8 @@ export async function initializeSettingsModule({ onChange } = {}) {
   els.addSourceBtn = document.getElementById("settings-add-source-btn");
   els.addHolderBtn = document.getElementById("settings-add-holder-btn");
   els.addExchangeBtn = document.getElementById("settings-add-exchange-btn");
+  els.addBrokerBtn = document.getElementById("settings-add-broker-btn");
+  els.addAccountBtn = document.getElementById("settings-add-account-btn");
 
   els.sourceDialog = document.getElementById("source-dialog");
   els.sourceForm = document.getElementById("source-form");
@@ -71,6 +77,10 @@ export async function initializeSettingsModule({ onChange } = {}) {
   els.sources.addEventListener("click", handleSourcesAction);
   els.holders.addEventListener("click", handleHoldersAction);
   els.exchanges.addEventListener("click", handleExchangesAction);
+  els.brokerages.addEventListener("click", handleBrokeragesAction);
+  els.accounts.addEventListener("click", handleAccountsAction);
+  els.addBrokerBtn.addEventListener("click", handleAddBroker);
+  els.addAccountBtn.addEventListener("click", handleAddAccount);
   els.columns.addEventListener("click", handleColumnsAction);
 
   els.addListBtn.addEventListener("click", handleAddList);
@@ -125,6 +135,12 @@ async function refreshActivePanel() {
         break;
       case "holders":
         els.holders.innerHTML = renderHoldersPanel(await api.fetchHolders());
+        break;
+      case "brokerages":
+        els.brokerages.innerHTML = renderBrokeragesPanel(await api.fetchBrokers());
+        break;
+      case "accounts":
+        els.accounts.innerHTML = renderAccountsPanel(await api.fetchAccounts());
         break;
       case "exchanges":
         els.exchanges.innerHTML = renderExchangesPanel(await api.fetchExchanges());
@@ -322,6 +338,56 @@ async function handleAddExchange() {
   const code = await promptFor("New exchange", "Code (e.g. NASDAQ)");
   if (!code) return;
   await run(() => api.createExchange({ code, name: code }), `Exchange ${code} added.`);
+}
+
+// --- Brokerages ------------------------------------------------------------
+
+async function handleAddBroker() {
+  const name = await promptFor("New brokerage", "Name (e.g. Interactive Brokers)");
+  if (!name) return;
+  await run(() => api.createBroker(name), `Brokerage "${name}" added.`);
+}
+
+async function handleBrokeragesAction(event) {
+  const btn = event.target.closest("button[data-action]");
+  if (!btn || btn.dataset.action !== "rename") return;
+  const id = Number(btn.dataset.id);
+
+  // Rename only, deliberately. The slug a brokerage imports under is not
+  // editable: importService selects a parser by it, so changing the label must
+  // never move the wiring.
+  const name = await promptFor("Rename brokerage", "New name");
+  if (!name) return;
+  await run(() => api.renameBroker(id, name), "Brokerage renamed.");
+}
+
+// --- Accounts --------------------------------------------------------------
+
+async function handleAddAccount() {
+  const brokers = await api.fetchBrokers();
+  const choices = brokers.map((b) => b.slug).join(", ");
+  const broker = await promptFor("New account", `Brokerage (${choices})`);
+  if (!broker) return;
+  // Asked for second because it is the field that makes import matching work:
+  // a Fidelity export is named History_for_Account_266356256.csv.
+  const accountNumber = await promptFor("New account", "Account number (as it appears on statements)");
+  const nickname = await promptFor("New account", "Nickname (optional)");
+  await run(
+    () => api.createAccount({ broker, accountNumber, nickname }),
+    "Account added.",
+  );
+}
+
+async function handleAccountsAction(event) {
+  const btn = event.target.closest("button[data-action]");
+  if (!btn || btn.dataset.action !== "edit-account") return;
+  const id = Number(btn.dataset.id);
+
+  // The number is the field most worth correcting: without it the monthly
+  // import cannot tell which account a statement belongs to.
+  const accountNumber = await promptFor("Edit account", "Account number");
+  if (!accountNumber) return;
+  await run(() => api.updateAccount(id, { accountNumber }), "Account updated.");
 }
 
 async function handleExchangesAction(event) {

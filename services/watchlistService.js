@@ -20,6 +20,7 @@ import {
   getHistoryCoverage,
 } from "./priceService.js";
 import { deliverAlertWebhook } from "./notifyService.js";
+import { listPendingExits, exitTriggered, markExitHit } from "./plansService.js";
 import { applySplitToOpenLots } from "./transactionsService.js";
 
 // --- Watchlists (named lists: "Tech", "Dip Buys", etc.) ---------------------
@@ -605,6 +606,13 @@ const insertAlert = db.prepare(`
 
 const markAlerted = db.prepare(`UPDATE watched_items SET status = 'ALERT' WHERE id = ?`);
 
+// A rung alert has no watched_item -- the schema CHECK requires exactly one
+// parent, so this inserts plan_exit_id and leaves watched_item_id null.
+const insertExitAlert = db.prepare(`
+  INSERT INTO alerts (plan_exit_id, trigger_price, trigger_reason, message)
+  VALUES (@planExitId, @triggerPrice, @triggerReason, @message)
+`);
+
 // One alert per level per item. Without this, keeping ALERT items in
 // evaluation would re-fire the same target on every 15-minute poll for as
 // long as the price stayed there.
@@ -694,12 +702,57 @@ export function applyAlertIfTriggered(item, price) {
   return { watchedItemId: item.id, symbol: item.symbol, price, reason, message };
 }
 
+// LEFT JOINs, not INNER, because an alert now has one of two parents: a
+// watched_item (a plan to get IN) or a plan_exit rung (a plan to get OUT).
+// This query used to INNER JOIN watched_items, which would have made every
+// rung alert invisible to the bell and impossible to acknowledge -- the exact
+// "forget one of them" failure the single-table decision was meant to avoid.
+/**
+ * Records that an exit rung was crossed, and marks the rung hit.
+ *
+ * Split out from applyAlertIfTriggered for the same reason that one exists:
+ * so the write path can be exercised directly in tests without needing a live
+ * quote first.
+ *
+ * @returns {{planExitId: number, symbol: string, price: number, reason: string, message: string} | null}
+ */
+export function applyExitAlert(rung, price) {
+  if (!exitTriggered(rung, price)) return null;
+
+  const band =
+    rung.kind === "STOP"
+      ? `$${rung.price_high ?? rung.price_low} or worse`
+      : `$${rung.price_low ?? rung.price_high} or better`;
+  const label = rung.kind === "STOP" ? "stop" : "take-profit";
+  const message =
+    `${rung.symbol} at $${price} \u2014 ${label} rung reached (sell ${rung.quantity} at ${band})`;
+
+  const result = withTransaction(() => {
+    insertExitAlert.run({
+      planExitId: rung.id,
+      triggerPrice: price,
+      triggerReason: rung.kind,
+      message,
+    });
+    markExitHit(rung.id);
+    return { planExitId: rung.id, symbol: rung.symbol, price, reason: rung.kind, message };
+  });
+
+  return result;
+}
+
 const listUnacknowledgedAlertsQuery = db.prepare(`
-  SELECT a.id, a.watched_item_id, a.triggered_at, a.trigger_price, a.message, s.symbol
+  SELECT a.id, a.watched_item_id, a.plan_exit_id, a.triggered_at, a.trigger_price,
+         a.trigger_reason, a.message,
+         COALESCE(ws.symbol, ps.symbol) AS symbol
   FROM alerts a
-  JOIN watched_items w ON w.id = a.watched_item_id
-  JOIN securities s ON s.id = w.security_id
-  WHERE w.holder_id = ? AND a.acknowledged_at IS NULL
+  LEFT JOIN watched_items w ON w.id = a.watched_item_id
+  LEFT JOIN securities ws  ON ws.id = w.security_id
+  LEFT JOIN plan_exits e   ON e.id = a.plan_exit_id
+  LEFT JOIN plans p        ON p.id = e.plan_id
+  LEFT JOIN securities ps  ON ps.id = p.security_id
+  WHERE a.acknowledged_at IS NULL
+    AND COALESCE(w.holder_id, p.holder_id) = ?
   ORDER BY a.triggered_at DESC
 `);
 
@@ -708,10 +761,17 @@ export function listUnacknowledgedAlerts(holderId) {
   return listUnacknowledgedAlertsQuery.all(holderId);
 }
 
+// Ownership resolves through either parent -- see listUnacknowledgedAlertsQuery.
 const acknowledgeAlertStmt = db.prepare(`
   UPDATE alerts SET acknowledged_at = datetime('now')
-  WHERE id = ? AND acknowledged_at IS NULL
-    AND watched_item_id IN (SELECT id FROM watched_items WHERE holder_id = ?)
+  WHERE id = @alertId AND acknowledged_at IS NULL
+    AND (
+      watched_item_id IN (SELECT id FROM watched_items WHERE holder_id = @holderId)
+      OR plan_exit_id IN (
+        SELECT e.id FROM plan_exits e JOIN plans p ON p.id = e.plan_id
+        WHERE p.holder_id = @holderId
+      )
+    )
 `);
 
 /**
@@ -721,17 +781,23 @@ const acknowledgeAlertStmt = db.prepare(`
  * it isn't the same action as re-arming the watch.
  */
 export function acknowledgeAlert(holderId, alertId) {
-  return { acknowledged: acknowledgeAlertStmt.run(alertId, holderId).changes };
+  return { acknowledged: acknowledgeAlertStmt.run({ alertId, holderId }).changes };
 }
 
 const acknowledgeAllAlertsStmt = db.prepare(`
   UPDATE alerts SET acknowledged_at = datetime('now')
   WHERE acknowledged_at IS NULL
-    AND watched_item_id IN (SELECT id FROM watched_items WHERE holder_id = ?)
+    AND (
+      watched_item_id IN (SELECT id FROM watched_items WHERE holder_id = @holderId)
+      OR plan_exit_id IN (
+        SELECT e.id FROM plan_exits e JOIN plans p ON p.id = e.plan_id
+        WHERE p.holder_id = @holderId
+      )
+    )
 `);
 
 export function acknowledgeAllAlerts(holderId) {
-  return { acknowledged: acknowledgeAllAlertsStmt.run(holderId).changes };
+  return { acknowledged: acknowledgeAllAlertsStmt.run({ holderId }).changes };
 }
 
 /**
@@ -765,6 +831,22 @@ export async function checkAlerts(opts = {}) {
     const price = latestPrices.get(item.security_id);
     if (price == null) continue;
     const result = applyAlertIfTriggered(item, price);
+    if (result) firedAlerts.push(result);
+  }
+
+  // Exit rungs. Evaluated here rather than in their own poller so there is one
+  // price fetch, one pass and one notification batch -- a second scheduler
+  // would double the quote traffic and reintroduce the overlap that BUG 7 was
+  // about.
+  //
+  // A rung firing NEVER sells. This is a journal: it records that the plan said
+  // to act, and the gap between that and what actually happened is the whole
+  // measurement. Selling automatically would erase the gap and invent a trade.
+  for (const rung of listPendingExits()) {
+    const price = latestPrices.get(rung.security_id);
+    if (price == null) continue;
+    if (!exitTriggered(rung, price)) continue;
+    const result = applyExitAlert(rung, price);
     if (result) firedAlerts.push(result);
   }
   // Returned as an array for backwards compatibility with existing callers

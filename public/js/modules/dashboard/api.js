@@ -8,7 +8,10 @@ async function handleResponse(res) {
   return res.json();
 }
 
-export const fetchPositions = () => fetch("/api/positions").then(handleResponse);
+export const fetchPositions = ({ accountId = null } = {}) =>
+  fetch(`/api/positions${accountId ? `?accountId=${accountId}` : ""}`).then(handleResponse);
+
+export const fetchAccountsForFilter = () => fetch("/api/accounts").then(handleResponse);
 
 export const fetchTickerDetail = (symbol, days = 180) =>
   fetch(`/api/ticker/${encodeURIComponent(symbol)}?days=${days}`).then(handleResponse);

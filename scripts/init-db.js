@@ -10,6 +10,8 @@ import { SCHEMA_VERSION } from "../lib/schemaVersion.js";
 // Imported from lib/constants.js, NOT from the service -- see that file for
 // why importing a service here would break init.
 import { DEFAULT_WATCHLIST_NAME } from "../lib/constants.js";
+import { baseline } from "../lib/migrate.js";
+import { seedReferenceData } from "../lib/seed.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, "..", "schema.sql");
@@ -17,35 +19,22 @@ const schema = fs.readFileSync(schemaPath, "utf8");
 
 // Seed a couple of exchanges up front -- everything else (securities,
 // holders, accounts) gets created on demand as you actually use the app.
-const SEED_EXCHANGES = [
-  { code: "NASDAQ", name: "Nasdaq", timezone: "America/New_York" },
-  { code: "NYSE", name: "New York Stock Exchange", timezone: "America/New_York" },
-];
 
 try {
   db.exec(schema);
   console.log(`Schema applied to ${process.env.DB_PATH || "./data/strategy_lab.dev.db"}`);
 
-  const insertExchange = db.prepare(
-    "INSERT OR IGNORE INTO exchanges (code, name, timezone) VALUES (@code, @name, @timezone)",
-  );
-  withTransaction(() => {
-    for (const row of SEED_EXCHANGES) insertExchange.run(row);
-  });
-  console.log(`Seeded ${SEED_EXCHANGES.length} exchanges.`);
+  // One shared seed for every path that creates a database -- see lib/seed.js
+  // for why this is not inlined here any more.
+  const seeded = seedReferenceData({ defaultWatchlistName: DEFAULT_WATCHLIST_NAME });
+  console.log(`Seeded ${seeded.exchanges} exchanges and ${seeded.brokers} brokerages.`);
+  console.log(`Seeded default holder and \"${DEFAULT_WATCHLIST_NAME}\" list.`);
 
-  // Seed the default holder and their first watchlist so the app is usable
-  // immediately -- without this you'd have to create a list before adding a
-  // first ticker.
-  withTransaction(() => {
-    db.prepare(
-      "INSERT OR IGNORE INTO account_holders (id, name, is_default) VALUES (1, 'Me', 1)",
-    ).run();
-    db.prepare(
-      "INSERT OR IGNORE INTO watchlists (holder_id, name, sort_order) VALUES (1, ?, 0)",
-    ).run(DEFAULT_WATCHLIST_NAME);
-  });
-  console.log(`Seeded default holder and "${DEFAULT_WATCHLIST_NAME}" list.`);
+  // schema.sql already contains every migration's effect, so they are recorded
+  // as applied rather than replayed -- replaying them here would fail on
+  // "table already exists" and a rebuild step could discard rows.
+  const baselined = baseline();
+  console.log(`Baselined ${baselined.length} migration(s) as already applied.`);
 
   stampSchemaVersion();
   console.log(`Stamped schema version ${SCHEMA_VERSION}.`);

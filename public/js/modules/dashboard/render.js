@@ -2,6 +2,8 @@
 // Includes a hand-rolled inline SVG sparkline -- no chart library, so there's
 // no CDN dependency and nothing to keep in sync.
 
+import { money, signedMoney, formatQty } from "../shared/format.js";
+
 export const TABLE_COLUMNS = [
   { key: "symbol", label: "Ticker" },
   { key: "exchange_code", label: "Exch" },
@@ -282,23 +284,8 @@ export function filterPositions(positions, query, exchange) {
 
 // --- formatting -------------------------------------------------------------
 
-function money(value) {
-  if (value == null) return "—";
-  const n = Number(value);
-  return `${n < 0 ? "-" : ""}$${Math.abs(n).toFixed(2)}`;
-}
 
-function signedMoney(value) {
-  if (value == null) return "—";
-  const n = Number(value);
-  return `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
-}
 
-function formatQty(value) {
-  if (value == null) return "—";
-  const n = Number(value);
-  return Number.isInteger(n) ? String(n) : n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
-}
 
 function escapeHtml(str) {
   return String(str).replace(

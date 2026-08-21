@@ -28,10 +28,17 @@ import { classify, summarize } from "./importers/match.js";
 import { getOrCreateSecurity } from "./priceService.js";
 import { TRANSFER_OUT_REASON } from "../lib/constants.js";
 import { recordBuyWith, recordSellWith, recordDividendWith } from "./transactionsService.js";
+import * as txns from "./transactionsService.js";
 
 const PARSERS = { fidelity, robinhood, etrade };
 
-const getAccount = db.prepare("SELECT * FROM accounts WHERE id = ?");
+// Joined to brokers because the parser is selected by slug. Since v15 the
+// brokerage is a row rather than a CHECK-constrained string on the account.
+const getAccount = db.prepare(`
+  SELECT a.*, b.slug AS broker, b.name AS broker_name, b.has_parser
+  FROM accounts a JOIN brokers b ON b.id = a.broker_id
+  WHERE a.id = ?
+`);
 
 // match.js compares on the economic facts of the trade, so the symbol has to
 // come along rather than the security_id.
@@ -58,7 +65,13 @@ const getBatch = db.prepare("SELECT * FROM import_batches WHERE id = ?");
 // sell would arrive before the lot it draws down and be rejected as an
 // oversell.
 const getRawRows = db.prepare("SELECT * FROM import_raw_rows WHERE batch_id = ? ORDER BY id");
-const setRowMatch = db.prepare("UPDATE import_raw_rows SET matched_transaction_id = ? WHERE id = ?");
+// Reclassified to 'matched' as well as linked. A row that has been written is
+// no longer 'new' -- leaving the status alone made the preview report 87 rows
+// still to add immediately after adding them, which reads as the approval
+// having silently failed.
+const setRowMatch = db.prepare(
+  "UPDATE import_raw_rows SET matched_transaction_id = ?, reconciliation_status = 'matched' WHERE id = ?",
+);
 const setBatchStatus = db.prepare("UPDATE import_batches SET status = ? WHERE id = ?");
 
 // Checked BEFORE any write. Attempting the insert and interpreting the
@@ -96,6 +109,15 @@ export function stageImport({ accountId, files }) {
   if (!account) throw new Error("No such account.");
   if (!files?.length) throw new Error("No files supplied.");
 
+  // has_parser is recorded on the brokerage, so an account held somewhere
+  // without a parser fails here with a straight answer rather than at the
+  // first malformed row.
+  if (account.has_parser === 0) {
+    throw new Error(
+      `No CSV parser has been written for ${account.broker_name}. ` +
+        `Supported: ${Object.keys(PARSERS).join(", ")}.`,
+    );
+  }
   const parser = parserFor(account.broker);
 
   const parsed = files.map((f) => ({ filename: f.filename, ...parser.parse(f.text) }));
@@ -285,6 +307,105 @@ export async function approveBatch(batchId, { rowIds = null } = {}) {
   });
 }
 
+// --- Corrections -----------------------------------------------------------
+//
+// The half of the audit that was missing. `match.js` finds a trade you already
+// recorded whose numbers disagree with the broker's -- {field, ledger, broker}
+// -- and until now nothing could act on it. `approveBatch` writes only rows
+// classified `new`; a `needs_review` row was reported and then dropped.
+//
+// That was right for an automatic loader. The original note says so: silently
+// rewriting history to agree with a CSV is how a journal stops being
+// trustworthy. But this import is a MONTHLY TYPO AUDIT, and correcting the typo
+// is the entire point of running it -- so the answer is not "never apply", it is
+// "apply one row at a time, explicitly, and only what the broker actually
+// disagrees about".
+//
+// It goes through updateTransaction rather than writing columns, which matters
+// more than it looks: correcting a BUY's price recomputes the cost basis of
+// every sell already linked to that lot, so fixing a typo'd purchase also fixes
+// the realized P&L of past sales instead of leaving the books inconsistent.
+
+const getRawRow = db.prepare("SELECT * FROM import_raw_rows WHERE id = ? AND batch_id = ?");
+
+/**
+ * Applies the broker's figures to the transaction a staged row was matched to.
+ *
+ * @param {number} holderId
+ * @param {number} batchId
+ * @param {number} rowId a staged row classified `needs_review`
+ * @param {{fields?: string[]}} opts which differences to apply. Defaults to all
+ *   of them; naming a subset lets you take the price but not the date, which is
+ *   the common case when a broker reports settlement rather than trade date.
+ */
+export function applyCorrection(holderId, batchId, rowId, { fields = null } = {}) {
+  const batch = getBatch.get(batchId);
+  if (!batch) throw new Error("No such import batch.");
+
+  const raw = getRawRow.get(rowId, batchId);
+  if (!raw) throw new Error("That row is not part of this batch.");
+  if (raw.reconciliation_status !== "needs_review") {
+    throw new Error(
+      `Only a row the broker disagrees with can be corrected -- this one is "${raw.reconciliation_status}".`,
+    );
+  }
+  if (!raw.matched_transaction_id) {
+    throw new Error("That row is not matched to a transaction, so there is nothing to correct.");
+  }
+
+  const { differences = [], normalized } = JSON.parse(raw.raw_data);
+  if (differences.length === 0) throw new Error("That row has no differences to apply.");
+
+  const wanted = fields ? new Set(fields) : null;
+  const applying = differences.filter((d) => wanted == null || wanted.has(d.field));
+  if (applying.length === 0) throw new Error("None of the named fields differ on that row.");
+
+  // Only what actually differs. A blanket overwrite would quietly replace
+  // fields the broker never disagreed about -- including ones only the journal
+  // knows, like which source suggested the trade.
+  const patch = {};
+  for (const d of applying) {
+    if (d.field === "quantity") patch.quantity = d.broker;
+    else if (d.field === "price") patch.price = d.broker;
+    else if (d.field === "transaction_date") patch.transactionDate = d.broker;
+  }
+
+  const before = txns.getTransactionById(holderId, raw.matched_transaction_id);
+  if (!before) throw new Error("The matched transaction no longer exists.");
+
+  const after = txns.updateTransaction(holderId, raw.matched_transaction_id, patch);
+
+  // Reclassified so the row cannot be applied twice and the batch's counts stay
+  // honest about what was dealt with.
+  db.prepare("UPDATE import_raw_rows SET reconciliation_status = 'matched' WHERE id = ?").run(rowId);
+
+  return {
+    transactionId: raw.matched_transaction_id,
+    applied: applying,
+    before: { quantity: before.quantity, price: before.price, transaction_date: before.transaction_date },
+    after: { quantity: after.quantity, price: after.price, transaction_date: after.transaction_date },
+    symbol: normalized?.symbol ?? null,
+  };
+}
+
+/** Every row in a batch the broker disagrees with, ready to review. */
+export function listDiscrepancies(batchId) {
+  return getRawRows
+    .all(batchId)
+    .filter((r) => r.reconciliation_status === "needs_review")
+    .map((r) => {
+      const { normalized, differences } = JSON.parse(r.raw_data);
+      return {
+        rowId: r.id,
+        matchedTransactionId: r.matched_transaction_id,
+        symbol: normalized.symbol,
+        transactionType: normalized.transactionType,
+        transactionDate: normalized.transactionDate,
+        differences,
+      };
+    });
+}
+
 /**
  * How current each account's imported data is. Two different questions, both
  * worth showing: how recent the DATA is, and when an import last RAN.
@@ -296,12 +417,13 @@ export async function approveBatch(batchId, { rowIds = null } = {}) {
  * a gap costs data.
  */
 const latestImportedStmt = db.prepare(`
-  SELECT a.id AS account_id, a.nickname, a.broker,
+  SELECT a.id AS account_id, a.nickname, a.account_number, b.name AS broker,
          (SELECT MAX(t.transaction_date) FROM transactions t
            WHERE t.account_id = a.id AND t.voided_at IS NULL) AS latest_transaction_date,
          (SELECT MAX(b.imported_at) FROM import_batches b
            WHERE b.account_id = a.id AND b.status = 'reconciled') AS last_imported_at
   FROM accounts a
+  JOIN brokers b ON b.id = a.broker_id
   ORDER BY a.id
 `);
 

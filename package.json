@@ -11,6 +11,7 @@
     "start": "node server.js",
     "db:init": "node scripts/init-db.js",
     "db:stamp": "node scripts/stamp-schema-version.js",
+    "db:migrate": "node scripts/migrate.js",
     "smoke:watchlist": "node scripts/smoke-test-watchlist.js",
     "test:offline": "node scripts/test-offline.js"
   },

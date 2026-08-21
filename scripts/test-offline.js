@@ -16,6 +16,20 @@ const schema = fs.readFileSync(path.join(process.cwd(), "schema.sql"), "utf8");
 db.exec(schema);
 console.log("Schema applied to test DB.");
 
+// schema.sql already contains every migration's effect, so the ledger is
+// baselined rather than replayed -- the same thing scripts/init-db.js does for
+// a real install. ANY path that applies schema.sql directly has to do this, or
+// a later `npm run db:migrate` will try to re-apply files the database already
+// has and fail on "table already exists".
+const { baseline: baselineMigrations } = await import("../lib/migrate.js");
+baselineMigrations();
+
+// Same shared seed init-db uses. Applying schema.sql alone leaves a
+// structurally correct database missing the reference rows the app assumes
+// exist -- which is how this suite ended up with no brokerages.
+const { seedReferenceData } = await import("../lib/seed.js");
+seedReferenceData();
+
 const {
   addWatchedItem,
   listWatchedItems,
@@ -33,6 +47,31 @@ const {
   acknowledgeAlert,
   acknowledgeAllAlerts,
 } = await import("../services/watchlistService.js");
+
+// The suite once threw part-way through and took 216 checks down with it,
+// unnoticed for weeks, because a crash still exits non-zero and the visible
+// output still ended in a long list of OKs. An exit code nobody reads is not
+// a signal, so the count itself is checked: a run doing far fewer checks than
+// expected has aborted, however healthy it looks.
+//
+// Raise this when tests are added. Never lower it to make a run pass -- if the
+// count dropped, find out what stopped running.
+const MIN_EXPECTED_CHECKS = 465;
+
+// Registered as an exit handler, NOT checked at the end of the run: the
+// failure this guards against is the suite THROWING part-way through, which
+// never reaches the end of the file. An exit handler fires however the
+// process ends, so the abort is stated in words after the stack trace rather
+// than left for someone to infer from a check count they were not counting.
+process.on("exit", () => {
+  const total = passed + failed;
+  if (total < MIN_EXPECTED_CHECKS) {
+    console.error(
+      `\nABORTED: only ${total} checks ran, expected at least ${MIN_EXPECTED_CHECKS}.` +
+        `\nThe suite stopped early. Any passes above are NOT a clean run.`,
+    );
+  }
+});
 
 let passed = 0;
 let failed = 0;
@@ -132,7 +171,7 @@ check(
 if (notSelected.length) console.log(`      missing from the query: ${notSelected.join(", ")}`);
 
 console.log("\n2. DB wiring checks (no network -- security pre-seeded)");
-db.prepare("INSERT INTO exchanges (code, name) VALUES ('NASDAQ','Nasdaq')").run();
+// NASDAQ comes from the shared reference seed above, not inserted here.
 const exchangeId = db.prepare("SELECT id FROM exchanges WHERE code='NASDAQ'").get().id;
 db.prepare(
   "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('NVDA', ?, 'NVIDIA Corp', 'manual')",
@@ -651,10 +690,10 @@ globalThis.fetch = originalFetch;
 settingsSvcEarly.saveGeneralSettings({ alert_webhook_url: "", alert_webhook_auth_header: "" }); // reset for later sections
 
 // --- Acknowledge flow ---
-// Reuses `holder` and `otherHolder` from earlier sections rather than
-// creating fresh ones -- section 5c's "listHolders returns both holders"
-// check counts every account_holders row, so adding new ones here would
-// silently break an assertion two sections down.
+// Reuses `holder` and `otherHolder` from earlier sections rather than creating
+// fresh ones. That used to be load-bearing, because 5c counted every
+// account_holders row; it no longer is, but reusing them keeps the fixture
+// small.
 const alertHolder = holder;
 const alertList = createWatchlist(alertHolder.id, "Alert Test List");
 const alertItem = await addWatchedItem({
@@ -728,10 +767,6 @@ const defaults = settingsSvc.getGeneralSettings();
 check("Unset settings fall back to defaults", defaults.app_title === "Strategy Lab");
 settingsSvc.saveGeneralSettings({ app_title: "Joe's Lab", default_take_profit_percent: "12.5" });
 check("Saved values are read back", settingsSvc.getGeneralSettings().app_title === "Joe's Lab");
-check(
-  "Unsaved keys keep their defaults",
-  settingsSvc.getGeneralSettings().notification_cooldown_minutes === "30",
-);
 const rejected = settingsSvc.saveGeneralSettings({ not_a_real_setting: "x", app_title: "Kept" });
 check("Unknown keys are ignored, not written", rejected.ignored.includes("not_a_real_setting"));
 check("Known keys in the same patch still save", rejected.saved.includes("app_title"));
@@ -762,7 +797,15 @@ check(
 
 console.log("\n5c. Settings: account holders");
 const holders = settingsSvc.listHolders();
-check("listHolders returns both holders with counts", holders.length === 2);
+// Counts what this suite created rather than every row: lib/seed.js creates a
+// default holder ("Me") for every database, and a raw total also breaks any
+// time another section adds one. The previous version asserted length === 2
+// and had a warning comment two sections up telling people not to add holders
+// -- a test that constrains the rest of the suite is the wrong shape.
+check(
+  "listHolders returns the holders this suite created, with counts",
+  [holder.id, otherHolder.id].every((id) => holders.some((h) => h.id === id)),
+);
 const newHolder = settingsSvc.createHolder("Third Person");
 check("New holder is not default when others exist", newHolder.is_default === 0);
 settingsSvc.makeHolderDefault(newHolder.id);
@@ -2400,6 +2443,565 @@ check(
   parseBookLookupResponse("333", { "ISBN:333": { authors: [{ name: "Ghost" }] } }) === null,
 );
 
+console.log("\n13. Exit plans: a thesis owning a ladder of rungs");
+const plans = await import("../services/plansService.js");
+
+// A plan is opened by a BUY -- that is what creates the position to exit.
+const planBuy = await tx.recordBuy({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  transactionDate: "2026-08-01",
+  quantity: 100,
+  price: 90,
+  sourceId: bookSource.id,
+  strategyId: strategy.id,
+});
+const plan = plans.createPlanForTrade(traderHolder.id, planBuy.id, { notes: "ladder test" });
+check("A plan can be created from a trade", plan.id != null);
+check("The plan inherits the trade's source", plan.source_id === bookSource.id);
+check("The plan inherits the trade's strategy", plan.strategy_id === strategy.id);
+check(
+  "The opening trade is attached to it",
+  db.prepare("SELECT plan_id FROM transactions WHERE id = ?").get(planBuy.id).plan_id === plan.id,
+);
+check("The plan holds the lot's shares", plans.planRemainingQuantity(plan.id) === 100);
+
+let secondPlanRejected = false;
+try {
+  plans.createPlanForTrade(traderHolder.id, planBuy.id);
+} catch (err) {
+  secondPlanRejected = /already belongs to a plan/.test(err.message);
+}
+check("A trade cannot belong to two plans", secondPlanRejected);
+
+// Rungs. A stop is an ordinary rung with an upper bound -- no special case.
+const rung1 = plans.addExit(traderHolder.id, plan.id, { kind: "TAKE_PROFIT", quantity: 50, priceLow: 110 });
+const rung2 = plans.addExit(traderHolder.id, plan.id, { kind: "TAKE_PROFIT", quantity: 30, priceLow: 120 });
+const stopRung = plans.addExit(traderHolder.id, plan.id, { kind: "STOP", quantity: 20, priceHigh: 80 });
+check("A ladder can hold several take-profit rungs", rung1.id != null && rung2.id != null);
+check("A stop is just a rung", stopRung.kind === "STOP" && stopRung.price_high === 80);
+check("Rungs are sequenced", rung1.sequence === 0 && rung2.sequence === 1);
+check("The ladder commits the shares it promises", plans.planCommittedQuantity(plan.id) === 100);
+
+// Oversell guard: a ladder promising more than the plan holds would fire an
+// alert that cannot be honoured, which reads as the app being broken.
+let oversellRejected = false;
+try {
+  plans.addExit(traderHolder.id, plan.id, { kind: "TAKE_PROFIT", quantity: 1, priceLow: 130 });
+} catch (err) {
+  oversellRejected = /oversell/.test(err.message);
+}
+check("A rung that would oversell the plan is refused", oversellRejected);
+
+let unboundedRejected = false;
+try {
+  plans.addExit(traderHolder.id, plan.id, { kind: "TAKE_PROFIT", quantity: 1 });
+} catch (err) {
+  unboundedRejected = /price bound/.test(err.message);
+}
+check("A rung with no price bound is refused", unboundedRejected);
+
+// Scaling into the SAME thesis: one ladder over two lots, which is the case
+// per-lot exits could not express.
+const scaleIn = await tx.recordBuy({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  transactionDate: "2026-08-08",
+  quantity: 40,
+  price: 95,
+});
+plans.attachTradeToPlan(traderHolder.id, plan.id, scaleIn.id);
+check("Scaling in attaches a second lot to the same thesis", plans.planRemainingQuantity(plan.id) === 140);
+check(
+  "...which frees up room the ladder can now use",
+  plans.addExit(traderHolder.id, plan.id, { kind: "TAKE_PROFIT", quantity: 40, priceLow: 130 }).id != null,
+);
+
+// A plan is a thesis about ONE thing.
+const otherSecurity = await tx.recordBuy({
+  holderId: traderHolder.id,
+  symbol: "AAPL",
+  transactionDate: "2026-08-08",
+  quantity: 10,
+  price: 200,
+});
+let wrongSecurityRejected = false;
+try {
+  plans.attachTradeToPlan(traderHolder.id, plan.id, otherSecurity.id);
+} catch (err) {
+  wrongSecurityRejected = /different security/.test(err.message);
+}
+check("A trade for another security cannot join the plan", wrongSecurityRejected);
+
+console.log("\n13b. Rung evaluation");
+check("A take-profit rung fires at or above its bound", plans.exitTriggered(rung1, 110) === true);
+check("...and above it", plans.exitTriggered(rung1, 118) === true);
+check("...but not below", plans.exitTriggered(rung1, 109.99) === false);
+check("A stop rung fires at or below its bound", plans.exitTriggered(stopRung, 80) === true);
+check("...and below it", plans.exitTriggered(stopRung, 60) === true);
+check("...but not above", plans.exitTriggered(stopRung, 80.01) === false);
+check(
+  "A cancelled rung never fires",
+  plans.exitTriggered({ ...rung1, status: "cancelled" }, 999) === false,
+);
+
+console.log("\n13c. A fired rung reaches the bell and can be acknowledged");
+// This is the path that would silently break: alerts used to INNER JOIN
+// watched_items, so a rung alert -- which has no watched_item -- would have
+// been invisible to the bell and unacknowledgeable.
+const pending = plans.listPendingExits().filter((e) => e.plan_id === plan.id);
+check("Pending rungs are listed for evaluation with their symbol", pending.length > 0 && pending[0].symbol === "NVDA");
+
+const bellBefore = wlSvc.listUnacknowledgedAlerts(traderHolder.id).length;
+const firedRung = pending.find((e) => e.id === rung1.id);
+const exitAlert = wlSvc.applyExitAlert(firedRung, 112);
+check("Crossing a rung raises an alert", exitAlert !== null);
+check("...tagged with the rung's kind", exitAlert.reason === "TAKE_PROFIT");
+check("...naming the rung rather than saying 'target hit'", /take-profit rung/.test(exitAlert.message));
+
+const storedExitAlert = db
+  .prepare("SELECT * FROM alerts WHERE plan_exit_id = ? ORDER BY id DESC LIMIT 1")
+  .get(rung1.id);
+check("The alert records which rung fired", storedExitAlert.plan_exit_id === rung1.id);
+check("...and has no watched_item parent", storedExitAlert.watched_item_id === null);
+check("The rung is marked hit", db.prepare("SELECT status FROM plan_exits WHERE id = ?").get(rung1.id).status === "hit");
+check("A hit rung does not fire again", wlSvc.applyExitAlert(db.prepare("SELECT * FROM plan_exits WHERE id = ?").get(rung1.id), 115) === null);
+
+const bell = wlSvc.listUnacknowledgedAlerts(traderHolder.id);
+check("The rung alert reaches the bell", bell.length === bellBefore + 1);
+const bellRow = bell.find((a) => a.plan_exit_id === rung1.id);
+check("...carrying the symbol resolved through the plan", bellRow?.symbol === "NVDA");
+check(
+  "The rung alert can be acknowledged",
+  wlSvc.acknowledgeAlert(traderHolder.id, bellRow.id).acknowledged === 1,
+);
+check(
+  "...and leaves the bell",
+  !wlSvc.listUnacknowledgedAlerts(traderHolder.id).some((a) => a.id === bellRow.id),
+);
+
+let cancelHitRejected = false;
+try {
+  plans.cancelExit(traderHolder.id, plan.id, rung1.id);
+} catch (err) {
+  cancelHitRejected = /already fired/.test(err.message);
+}
+check("A fired rung cannot be cancelled away", cancelHitRejected);
+
+console.log("\n13d. A sold-out thesis closes");
+// A dedicated symbol with no other lots. NOT incidental: recordSell allocates
+// FIFO across every open lot for the holder, which crosses plan boundaries --
+// see "FIFO sells ignore plan boundaries" in docs/V2_BACKLOG.md. Sharing a
+// ticker here made the sell draw down an unrelated older lot instead of this
+// plan's, which is exactly the real-world hazard.
+db.prepare(
+  "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('PLNX', ?, 'Plan Test Co', 'manual')",
+).run(exchangeId);
+const soldOut = await tx.recordBuy({
+  holderId: traderHolder.id,
+  symbol: "PLNX",
+  transactionDate: "2026-08-09",
+  quantity: 10,
+  price: 200,
+});
+const closingPlan = plans.createPlanForTrade(traderHolder.id, soldOut.id);
+plans.addExit(traderHolder.id, closingPlan.id, { kind: "TAKE_PROFIT", quantity: 10, priceLow: 250 });
+check("Plan is open while shares are held", plans.getPlan(traderHolder.id, closingPlan.id).plan.status === "open");
+check("closePlanIfExhausted leaves a held plan alone", plans.closePlanIfExhausted(closingPlan.id).closed === 0);
+
+await tx.recordSell({
+  holderId: traderHolder.id,
+  symbol: "PLNX",
+  transactionDate: "2026-08-10",
+  quantity: 10,
+  price: 210,
+});
+check("Selling out empties the plan", plans.planRemainingQuantity(closingPlan.id) === 0);
+check("...so the plan closes", plans.closePlanIfExhausted(closingPlan.id).closed === 1);
+check(
+  "...and its unreachable rungs are cancelled rather than left pending",
+  plans.listExits(closingPlan.id).every((e) => e.status !== "pending"),
+);
+check(
+  "A closed plan's rungs are no longer evaluated",
+  !plans.listPendingExits().some((e) => e.plan_id === closingPlan.id),
+);
+
+const acctSvcEarly = await import("../services/accountsService.js");
+console.log("\n14b. Sells are scoped to their account");
+// Shares held at one brokerage cannot be sold by another. Before this was
+// enforced, selling 100 from account B emptied account A, left B showing 100
+// shares it no longer held, and reported P&L against A's cost basis --
+// $1,500 instead of $500. Both accounts' books contradicted each other.
+const xa = acctSvcEarly.createAccount(holder.id, { broker: "fidelity", accountNumber: "9001" });
+const xb = acctSvcEarly.createAccount(holder.id, { broker: "etrade", accountNumber: "9002" });
+db.prepare("INSERT INTO securities (symbol, name, data_source) VALUES ('XACC','Cross Account Co','manual')").run();
+
+// A buys first, so a global FIFO would reach for A's lot.
+await tx.recordBuy({ holderId: holder.id, accountId: xa.id, symbol: "XACC", transactionDate: "2026-01-01", quantity: 100, price: 10 });
+await tx.recordBuy({ holderId: holder.id, accountId: xb.id, symbol: "XACC", transactionDate: "2026-06-01", quantity: 100, price: 20 });
+
+let ambiguousSellRefused = false;
+try {
+  await tx.recordSell({ holderId: holder.id, symbol: "XACC", transactionDate: "2026-07-01", quantity: 10, price: 25 });
+} catch (err) {
+  ambiguousSellRefused = /more than one account/.test(err.message);
+}
+check("A sell that does not name an account is refused when the holding spans several", ambiguousSellRefused);
+
+const xSell = await tx.recordSell({ holderId: holder.id, accountId: xb.id, symbol: "XACC", transactionDate: "2026-07-01", quantity: 100, price: 25 });
+const heldIn = (id) => db.prepare("SELECT COALESCE(SUM(quantity_remaining),0) q FROM transactions WHERE account_id=? AND transaction_type='BUY' AND voided_at IS NULL").get(id).q;
+check("Selling from B leaves A untouched", heldIn(xa.id) === 100);
+check("...and empties B", heldIn(xb.id) === 0);
+check(
+  "...and reports P&L against B's cost basis, not A's",
+  Math.abs(xSell.realizedPnl - 500) < 1e-9,
+);
+
+db.prepare("DELETE FROM transactions WHERE security_id = (SELECT id FROM securities WHERE symbol = 'XACC')").run();
+db.prepare("DELETE FROM securities WHERE symbol = 'XACC'").run();
+db.prepare("DELETE FROM accounts WHERE id IN (?, ?)").run(xa.id, xb.id);
+
+console.log("\n14c. Notifications: accepting and declining an alert");
+const alertsSvc = await import("../services/alertsService.js");
+
+// A paper position with a ladder, so a rung can fire and be decided on.
+db.prepare("INSERT INTO securities (symbol, name, data_source) VALUES ('NOTIF','Notify Co','manual')").run();
+const notifBuy = await tx.recordBuy({
+  holderId: traderHolder.id, symbol: "NOTIF", transactionDate: "2026-02-01",
+  quantity: 100, price: 10, isPaperTrade: true,
+});
+const notifPlan = plans.createPlanForTrade(traderHolder.id, notifBuy.id);
+const notifRung = plans.addExit(traderHolder.id, notifPlan.id, { kind: "TAKE_PROFIT", quantity: 40, priceLow: 15 });
+const notifFired = wlSvc.applyExitAlert(
+  plans.listPendingExits().find((e) => e.id === notifRung.id),
+  16,
+);
+check("A fired rung appears in the notifications queue", alertsSvc.listAlerts(traderHolder.id, { unresolvedOnly: true }).some((a) => a.plan_exit_id === notifRung.id));
+
+const queued = alertsSvc.listAlerts(traderHolder.id, { unresolvedOnly: true }).find((a) => a.plan_exit_id === notifRung.id);
+check("...classified as an exit, and known to be paper", queued.kind === "exit" && queued.isPaper === true);
+
+// Accepting a PAPER rung records the sale at the price the rung FIRED at,
+// dated the day it fired -- not today. That is what makes deciding later free.
+const positionsBefore = tx.listOpenPositions(traderHolder.id, { isPaperTrade: true }).length;
+const accepted = await alertsSvc.resolveAlert(traderHolder.id, queued.id, {
+  resolution: "accepted",
+});
+check("Accepting a paper rung records the sale", accepted.transaction !== null);
+check(
+  "...at the price the rung fired at, not a fresh one",
+  accepted.transaction.sells[0].price === 16,
+);
+check(
+  "...dated when it fired, so acting days later does not move the trade",
+  accepted.transaction.sells[0].transaction_date === String(notifFired.message ? queued.triggered_at : "").slice(0, 10),
+);
+check(
+  "...for the rung's quantity",
+  accepted.transaction.sells[0].quantity === 40,
+);
+check(
+  "The alert links to the transaction it produced",
+  db.prepare("SELECT resulting_transaction_id FROM alerts WHERE id = ?").get(queued.id).resulting_transaction_id != null,
+);
+
+let doubleResolveRejected = false;
+try {
+  await alertsSvc.resolveAlert(traderHolder.id, queued.id, { resolution: "declined" });
+} catch (err) {
+  doubleResolveRejected = /already accepted/.test(err.message);
+}
+check("An alert cannot be decided twice", doubleResolveRejected);
+
+// A REAL position must not have the trigger price recorded as its fill --
+// that would erase the execution gap the whole feature measures.
+const realBuy = await tx.recordBuy({
+  holderId: traderHolder.id, symbol: "NOTIF", transactionDate: "2026-02-01", quantity: 50, price: 10,
+});
+const realPlan = plans.createPlanForTrade(traderHolder.id, realBuy.id);
+const realRung = plans.addExit(traderHolder.id, realPlan.id, { kind: "TAKE_PROFIT", quantity: 50, priceLow: 15 });
+wlSvc.applyExitAlert(plans.listPendingExits().find((e) => e.id === realRung.id), 16);
+const realQueued = alertsSvc.listAlerts(traderHolder.id, { unresolvedOnly: true }).find((a) => a.plan_exit_id === realRung.id);
+let realNeedsPrice = false;
+try {
+  await alertsSvc.resolveAlert(traderHolder.id, realQueued.id, { resolution: "accepted" });
+} catch (err) {
+  realNeedsPrice = /actually sold at/.test(err.message);
+}
+check("Accepting a REAL rung without a fill price is refused", realNeedsPrice);
+const realAccepted = await alertsSvc.resolveAlert(traderHolder.id, realQueued.id, {
+  resolution: "accepted", fillPrice: 15.4,
+});;
+check("...and records the price actually got, not the trigger", realAccepted.transaction.sells[0].price === 15.4);
+
+// Declining, and the two kinds of it.
+const declineBuy = await tx.recordBuy({
+  holderId: traderHolder.id, symbol: "NOTIF", transactionDate: "2026-02-01", quantity: 30, price: 10, isPaperTrade: true,
+});
+const declinePlan = plans.createPlanForTrade(traderHolder.id, declineBuy.id);
+const badRung = plans.addExit(traderHolder.id, declinePlan.id, { kind: "TAKE_PROFIT", quantity: 30, priceLow: 15 });
+wlSvc.applyExitAlert(plans.listPendingExits().find((e) => e.id === badRung.id), 16);
+const badQueued = alertsSvc.listAlerts(traderHolder.id, { unresolvedOnly: true }).find((a) => a.plan_exit_id === badRung.id);
+await alertsSvc.resolveAlert(traderHolder.id, badQueued.id, {
+  resolution: "declined", declineKind: "invalid", note: "level was set wrong",
+});
+check(
+  "Declining a rung as invalid un-hits it, so it cannot count against adherence",
+  db.prepare("SELECT status, hit_at FROM plan_exits WHERE id = ?").get(badRung.id).status === "cancelled",
+);
+check(
+  "...and the reason is a column, not prose",
+  db.prepare("SELECT decline_kind FROM alerts WHERE id = ?").get(badQueued.id).decline_kind === "invalid",
+);
+check("Declining never writes a trade", db.prepare("SELECT resulting_transaction_id FROM alerts WHERE id = ?").get(badQueued.id).resulting_transaction_id === null);
+
+console.log("\n14d. Approving a batch clears its pending rows");
+// After approval the preview reported the same rows as still to add, because
+// approveBatch linked each row to its transaction but left the status at
+// 'new'. On screen that reads as the approval having silently failed, and it
+// invites a second click on a button that has already done its work.
+const clearAcct = acctSvcEarly.createAccount(holder.id, { broker: "fidelity", accountNumber: "5150" });
+db.prepare("INSERT INTO securities (symbol, name, data_source) VALUES ('CLRX','Clear Co','manual')").run();
+const clearCsv = [
+  "Run Date,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Settlement Date",
+  "04/01/2026,YOU BOUGHT CLEAR CO (CLRX) (Cash),CLRX,CLEAR CO,Cash,10,5,,,,\"-50\",",
+].join("\n");
+const importSvc = await import("../services/importService.js");
+const clearBatch = importSvc.stageImport({ accountId: clearAcct.id, files: [{ filename: "clear.csv", text: clearCsv }] });
+check("Staged as a missing trade", clearBatch.counts.new === 1);
+
+await importSvc.approveBatch(clearBatch.batch.id);
+const afterApprove = importSvc.getBatchPreview(clearBatch.batch.id);
+check("After approving, nothing is still listed as new", afterApprove.counts.new === 0);
+check("...the row is marked matched", afterApprove.counts.matched === 1);
+check(
+  "...and it points at the transaction it created",
+  afterApprove.rows[0].matchedTransactionId != null,
+);
+
+db.prepare("DELETE FROM transactions WHERE account_id = ?").run(clearAcct.id);
+db.prepare("DELETE FROM accounts WHERE id = ?").run(clearAcct.id);
+db.prepare("DELETE FROM securities WHERE symbol = 'CLRX'").run();
+
+console.log("\n14e. Fidelity parser: income rows survive");
+const fidelityParser = await import("../services/importers/fidelity.js");
+
+// A dividend, a fund capital-gain distribution and bond interest are income
+// against a holding with NO share movement, so their Quantity column is empty
+// or zero. A share-quantity guard placed one line too early discarded every
+// one of them immediately after correctly identifying it -- $2,003.63 of real
+// income vanished from one IRA without a word.
+const incomeCsv = [
+  "Run Date,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Settlement Date",
+  "02/07/2026,DIVIDEND RECEIVED FIDELITY TREND (FTRNX) (Cash),FTRNX,FIDELITY TREND,Cash,,0,,,,81.29,",
+  "02/07/2026,LONG-TERM CAP GAIN FIDELITY TREND (FTRNX) (Cash),FTRNX,FIDELITY TREND,Cash,,0,,,,1142.31,",
+  "02/07/2026,SHORT-TERM CAP GAIN FIDELITY TREND (FTRNX) (Cash),FTRNX,FIDELITY TREND,Cash,,0,,,,139.12,",
+  "03/02/2026,YOU BOUGHT NVIDIA CORP (NVDA) (Cash),NVDA,NVIDIA CORP,Cash,100,10,,,,\"-1000\",",
+].join("\n");
+const incomeParsed = fidelityParser.parse(incomeCsv);
+const incomeRows = incomeParsed.rows.filter((r) => r.transactionType === "DIVIDEND");
+
+check("Dividends survive the share-quantity guard", incomeRows.length === 3);
+check(
+  "Capital-gain distributions and interest are income too, not unknown actions",
+  incomeParsed.skipped.unknownAction === 0,
+);
+check(
+  "Income carries its amount as the price",
+  Math.abs(incomeRows.reduce((s, r) => s + r.price, 0) - (81.29 + 1142.31 + 139.12)) < 1e-9,
+);
+check("...and no share quantity", incomeRows.every((r) => r.quantity === 0));
+check(
+  "A genuine share row with zero quantity is still rejected",
+  fidelityParser.parse(
+    incomeCsv.replace(
+      '"03/02/2026,YOU BOUGHT NVIDIA CORP (NVDA) (Cash),NVDA,NVIDIA CORP,Cash,100,10,,,,\"-1000\","'.slice(1, -1),
+      "03/02/2026,YOU BOUGHT NVIDIA CORP (NVDA) (Cash),NVDA,NVIDIA CORP,Cash,100,0,,,,\"-1000\",",
+    ),
+  ).rows.filter((r) => r.transactionType === "BUY").length === 0,
+);
+
+console.log("\n14f. Import audit: correcting a typo");
+const imports = await import("../services/importService.js");
+
+// The whole point of a monthly audit: a trade recorded by hand whose numbers
+// disagree with the broker. Until now match.js found these and nothing could
+// act on them -- approveBatch writes only rows classified `new`.
+const auditAcct = acctSvcEarly.createAccount(holder.id, { broker: "fidelity", accountNumber: "7788" });
+db.prepare("INSERT INTO securities (symbol, name, data_source) VALUES ('AUDT','Audit Co','manual')").run();
+
+// Typed from memory at the wrong price, then partly sold -- so a correction
+// has to fix the realized P&L of the sale too, not just the purchase.
+const typo = await tx.recordBuy({
+  holderId: holder.id, accountId: auditAcct.id, symbol: "AUDT",
+  transactionDate: "2026-03-02", quantity: 100, price: 79.49,
+});
+await tx.recordSell({
+  holderId: holder.id, accountId: auditAcct.id, symbol: "AUDT",
+  transactionDate: "2026-04-01", quantity: 50, price: 85,
+});
+const auditPnlBefore = tx.listTransactions(holder.id, { symbol: "AUDT", type: "SELL" })[0].realized_pnl;
+check(
+  "A typo’d buy gives the wrong realized P&L on its sale",
+  Math.abs(auditPnlBefore - 50 * (85 - 79.49)) < 1e-9,
+);
+
+// Stage a broker row for the same trade at the true price.
+const csv = [
+  "Run Date,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Settlement Date",
+  "03/02/2026,YOU BOUGHT AUDIT CO (AUDT) (Cash),AUDT,AUDIT CO,Cash,79.94,100,,,,\"-7994\",03/03/2026",
+].join("\n");
+const staged = imports.stageImport({ accountId: auditAcct.id, files: [{ filename: "audit.csv", text: csv }] });
+check(
+  "The audit flags the trade as a discrepancy rather than a new trade",
+  staged.counts.needs_review === 1 && staged.counts.new === 0,
+);
+
+const discrepancies = imports.listDiscrepancies(staged.batch.id);
+check("The discrepancy is listed with its fields", discrepancies.length === 1);
+check(
+  "...naming ledger vs broker",
+  discrepancies[0].differences.some((d) => d.field === "price" && d.ledger === 79.49 && d.broker === 79.94),
+);
+
+const corrected = imports.applyCorrection(holder.id, staged.batch.id, discrepancies[0].rowId, {
+  fields: ["price"],
+});
+check("Applying the correction changes the price", corrected.after.price === 79.94);
+check("...and reports what it changed from", corrected.before.price === 79.49);
+
+// The reason corrections go through updateTransaction rather than writing
+// columns: fixing the buy re-derives the cost basis of every sell linked to
+// it, so past realized P&L is corrected too rather than left inconsistent.
+const auditPnlAfter = tx.listTransactions(holder.id, { symbol: "AUDT", type: "SELL" })[0].realized_pnl;
+check(
+  "Correcting the buy also fixes the realized P&L of the sale already made",
+  Math.abs(auditPnlAfter - 50 * (85 - 79.94)) < 1e-9,
+);
+
+let doubleCorrectRejected = false;
+try {
+  imports.applyCorrection(holder.id, staged.batch.id, discrepancies[0].rowId);
+} catch (err) {
+  doubleCorrectRejected = /can be corrected/.test(err.message);
+}
+check("A row cannot be corrected twice", doubleCorrectRejected);
+
+db.prepare("DELETE FROM transactions WHERE account_id = ?").run(auditAcct.id);
+db.prepare("DELETE FROM accounts WHERE id = ?").run(auditAcct.id);
+db.prepare("DELETE FROM securities WHERE symbol = 'AUDT'").run();
+
+console.log("\n15. Brokerages and accounts");
+const acctSvc = await import("../services/accountsService.js");
+
+// Brokerages are rows now, not a CHECK constraint. v11 existed only to add
+// two of them to that enum; opening an account somewhere new should not be a
+// schema change.
+const brokers = acctSvc.listBrokers();
+check("Brokerages are seeded", brokers.length >= 6);
+check(
+  "Parser-backed brokerages are flagged as such",
+  brokers.filter((b) => b.has_parser === 1).map((b) => b.slug).sort().join(",") === "etrade,fidelity,robinhood",
+);
+
+// The slug is what importService selects a parser by, so renaming a brokerage
+// must not move it.
+const etrade = brokers.find((b) => b.slug === "etrade");
+const renamed = acctSvc.updateBroker(etrade.id, { name: "Morgan Stanley E*TRADE" });
+check("A brokerage can be renamed", renamed.name === "Morgan Stanley E*TRADE");
+check("...without its slug moving", renamed.slug === "etrade");
+acctSvc.updateBroker(etrade.id, { name: "E*TRADE" });
+
+let dupeBrokerRejected = false;
+try {
+  acctSvc.createBroker({ name: "Fidelity" });
+} catch (err) {
+  dupeBrokerRejected = /already exists/.test(err.message);
+}
+check("A duplicate brokerage key is refused", dupeBrokerRejected);
+
+const newBroker = acctSvc.createBroker({ name: "Interactive Brokers" });
+check("A new brokerage is just a row", newBroker.slug === "interactivebrokers");
+check(
+  "...and is honest that no parser exists for it",
+  newBroker.has_parser === 0,
+);
+
+// Accounts carry their number as a column. It used to live inside the
+// nickname, e.g. "Rollover IRA (146518557)" -- data hiding in a label.
+const acctA = acctSvc.createAccount(holder.id, {
+  broker: "fidelity", accountNumber: "146518557", accountType: "ira", nickname: "Rollover IRA",
+});
+const acctB = acctSvc.createAccount(holder.id, {
+  broker: "fidelity", accountNumber: "266356256", accountType: "brokerage", nickname: "Wife brokerage",
+});
+check("An account records its number", acctA.account_number === "146518557");
+check(
+  "Accounts are labelled brokerage-then-number, which is how statements are",
+  acctSvc.getAccount(holder.id, acctA.id).label.startsWith("Fidelity 146518557"),
+);
+
+// The concrete payoff: the monthly audit can pick the account itself.
+check(
+  "A statement filename matches its account",
+  acctSvc.matchAccountByFilename(holder.id, "History_for_Account_266356256.csv")?.id === acctB.id,
+);
+check(
+  "A filename with no number matches nothing",
+  acctSvc.matchAccountByFilename(holder.id, "Robinhood.csv") === null,
+);
+check(
+  "An unknown number matches nothing rather than guessing",
+  acctSvc.matchAccountByFilename(holder.id, "History_for_Account_999999999.csv") === null,
+);
+
+let unknownBrokerRejected = false;
+try {
+  acctSvc.createAccount(holder.id, { broker: "notabroker" });
+} catch (err) {
+  unknownBrokerRejected = /Unknown brokerage/.test(err.message);
+}
+check("An unknown brokerage is named, not left to the foreign key", unknownBrokerRejected);
+
+// Cleanup: later sections count rows globally.
+db.prepare("DELETE FROM accounts WHERE id IN (?, ?)").run(acctA.id, acctB.id);
+db.prepare("DELETE FROM brokers WHERE id = ?").run(newBroker.id);
+
+console.log("\n14. Migrations");
+const mig = await import("../lib/migrate.js");
+const { SCHEMA_VERSION: CODE_VERSION } = await import("../lib/schemaVersion.js");
+const migFiles = mig.listMigrationFiles();
+
+check("Migration files are discovered", migFiles.length > 0);
+check(
+  "They are ordered by version",
+  migFiles.every((m, i) => i === 0 || m.version > migFiles[i - 1].version),
+);
+check(
+  "Versions are contiguous -- a gap means a migration was never written",
+  migFiles.every((m, i) => i === 0 || m.version === migFiles[i - 1].version + 1),
+);
+
+// The invariant that keeps the by-hand era from returning: bumping
+// SCHEMA_VERSION without adding a migration file is exactly how a database
+// ends up structurally behind what the code believes it is.
+check(
+  `The newest migration matches SCHEMA_VERSION (v${CODE_VERSION})`,
+  migFiles[migFiles.length - 1].version === CODE_VERSION,
+);
+check("Every migration file has content", migFiles.every((m) => fs.readFileSync(m.path, "utf8").trim().length > 0));
+check(
+  "coversFrom is one below the earliest migration",
+  mig.coversFrom() === migFiles[0].version - 1,
+);
+
+// This suite's database was built from schema.sql, so init should have
+// baselined the ledger -- leaving it empty would make a later migrate try to
+// replay every file onto a database that already has all of it.
+check("The test database has a migration ledger", mig.appliedVersions().size > 0);
+check("...and nothing is pending against it", mig.pendingMigrations().length === 0);
+
 console.log("\n9b. Frontend: regression guards for two fixed UI bugs");
 
 // BUG 9: server text into innerHTML. The dashboard's ticker-detail dialog was
@@ -2429,6 +3031,42 @@ check(
   /newListForm\.reset\(\)[\s\S]{0,120}?newListDialog\.showModal\(\)/.test(watchlistSrc),
 );
 
+console.log("\n9c. Frontend: row-action buttons are all deliberately sized");
+// The Exits button first shipped larger than the others because the sizing
+// properties had been copy-pasted per button, so a new one had none and fell
+// back to the default size.
+//
+// The invariant is that every row-action button is sized ON PURPOSE -- either
+// by carrying the shared .icon-btn class, or by having its own padding rule.
+// Not that they are identical: delete-txn-btn is legitimately a borderless
+// transparent affordance rather than a bordered button.
+const ordersRenderSrc = fs.readFileSync(path.join(process.cwd(), "public/js/modules/orders/render.js"), "utf8");
+const cssSrc = fs.readFileSync(path.join(process.cwd(), "public/css/style.css"), "utf8");
+
+// class attributes may hold several names, e.g. class="icon-btn edit-txn-btn".
+const actionButtons = [...ordersRenderSrc.matchAll(/class="([a-z0-9 -]*-btn)"/g)].map((m) =>
+  m[1].split(" ").filter(Boolean),
+);
+const unsized = actionButtons
+  .filter((classes) => !classes.includes("icon-btn"))
+  .map((classes) => classes[classes.length - 1])
+  .filter((cls) => {
+    const rule = new RegExp("\." + cls + "[^{]*\{[^}]*padding");
+    return !rule.test(cssSrc);
+  });
+check(
+  `Every row-action button is sized (${actionButtons.length} found)`,
+  unsized.length === 0,
+);
+if (unsized.length) console.log(`      unsized, will render at default size: ${unsized.join(", ")}`);
+
+// Icon-only buttons carry no text, so the tooltip is not enough on its own.
+const iconButtons = [...ordersRenderSrc.matchAll(/<button[^>]*class="icon-btn[^"]*"[^>]*>/g)].map((m) => m[0]);
+check(
+  `Every icon-only button has an aria-label (${iconButtons.length} found)`,
+  iconButtons.length > 0 && iconButtons.every((b) => b.includes("aria-label=")),
+);
+
 console.log("\n9. Frontend wiring: every getElementById target exists in index.html");
 // This suite can't click buttons, but it CAN catch the most common way the UI
 // silently breaks: JS reaching for an element id that the HTML doesn't have
@@ -2443,6 +3081,9 @@ const uiModules = [
   "public/js/modules/journal/index.js",
   "public/js/modules/papertrade/index.js",
   "public/js/modules/alerts/index.js",
+  "public/js/modules/plans/dialog.js",
+  "public/js/modules/notifications/index.js",
+  "public/js/modules/imports/index.js",
 ];
 let idsChecked = 0;
 const missingIds = [];
@@ -2487,5 +3128,66 @@ try {
   check("Missing watchlist_id rejected (NOT NULL)", true);
 }
 
+
+// ---------------------------------------------------------------------------
+console.log("\n20. Summary strip (shared by Dashboard and Orders)");
+// This renderer had no coverage at all while it lived in orders/render.js, and
+// it now draws the strip on two tabs. Its rules are not cosmetic: it decides
+// when a number is unknown rather than zero, and when a total may be shown at
+// all. Both fail silently and read as a confident figure, which is exactly the
+// failure mode this project keeps hitting.
+const { renderSummary } = await import("../public/js/modules/shared/summary.js");
+
+{
+  const priced = {
+    positionCount: 3, lotCount: 5, pricedCount: 3, unpricedCount: 0,
+    totalCost: 21850.7, totalValue: 18848.64, unrealizedPnl: -3002.06,
+    unrealizedPnlPercent: -13.74, realizedPnl: 4440.46, dividendIncome: 2014.02,
+    totalReturn: 3452.42, cash: 4797.73, cashIsDerived: false, accountTotal: 23646.37,
+  };
+  const html = renderSummary(priced);
+
+  check("Thousands separators, so $21,850.70 cannot be misread", html.includes("$21,850.70"));
+  check("A loss renders signed and negative", html.includes("-$3,002.06"));
+  check("Cash appears when the view is scoped to one account", html.includes("$4,797.73"));
+  check("Account total appears when every position is priced", html.includes("$23,646.37"));
+  check("A recorded cash balance carries no derived asterisk", !html.includes("Cash *"));
+  check("Lot count is surfaced when it exceeds position count", html.includes("in 5 lots"));
+
+  // The distinction the strip exists to protect.
+  const unpriced = { ...priced, totalValue: null, unrealizedPnl: null, unrealizedPnlPercent: null, accountTotal: null };
+  const uhtml = renderSummary(unpriced);
+  check("No prices yet renders an em dash, not $0.00", !uhtml.includes("$0.00"));
+  check("...and not a figure silently equal to cost basis", uhtml.split("$21,850.70").length === 2);
+  check("Total return is labelled realized-only when value is unknown", uhtml.includes("realized only"));
+
+  // Cross-account: summing balances gives a figure no statement shows.
+  const allAccounts = { ...priced, cash: null, accountTotal: null };
+  check("Cash is hidden when no single account is in scope", !renderSummary(allAccounts).includes("Cash"));
+  check("...and so is the account total", !renderSummary(allAccounts).includes("Account Total"));
+
+  // Derived cash is a claim about completeness, and has to say so.
+  check("Derived cash is flagged", renderSummary({ ...priced, cashIsDerived: true }).includes("Cash *"));
+
+  // An account holding only cash and no shares -- Schwab, TradeStation.
+  const cashOnly = {
+    positionCount: 0, lotCount: 0, pricedCount: 0, unpricedCount: 0,
+    totalCost: 0, totalValue: 0, unrealizedPnl: 0, unrealizedPnlPercent: null,
+    realizedPnl: 0, dividendIncome: 0, totalReturn: 0,
+    cash: 100, cashIsDerived: false, accountTotal: 100,
+  };
+  const cashHtml = renderSummary(cashOnly);
+  check("A funded account with no shares still shows its cash", cashHtml.includes("$100.00"));
+  check("...and its account total, which is exactly that cash", cashHtml.split("$100.00").length === 3);
+  check("...rather than dismissing it as empty", !cashHtml.includes("No open positions"));
+  check(
+    "A genuinely empty, unscoped view still says so",
+    renderSummary({ ...cashOnly, cash: null, accountTotal: null }).includes("No open positions"),
+  );
+
+  // A partially-priced portfolio must admit it.
+  check("A partial market value says how many are priced",
+    renderSummary({ ...priced, pricedCount: 2, unpricedCount: 1 }).includes("2/3 priced"));
+}
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

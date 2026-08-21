@@ -1,11 +1,13 @@
 // The "Conductor" for the Orders view. Owns panel/sort/filter state and
 // wires listeners; markup comes from render.js, server calls from api.js.
+import { openExitsDialog } from "../plans/dialog.js";
 import * as api from "./api.js";
 import {
   POSITION_COLUMNS,
   HISTORY_COLUMNS,
   renderHeaderRow,
   renderPositionsRows,
+  renderPositionsFooter,
   renderHistoryRows,
   renderSummary,
   renderSourceOptions,
@@ -32,6 +34,12 @@ const state = {
   positionsSort: { key: "symbol", dir: "asc" },
   historySort: { key: "transaction_date", dir: "desc" },
   positionsFilter: "",
+  // security_ids whose individual lots are showing. A Set so it survives
+  // re-renders -- the table redraws on every price refresh and filter change.
+  expandedGroups: new Set(),
+  // null means every account. Explicit rather than undefined so the filter has
+  // one source of truth from the first render.
+  accountId: null,
   sources: [],
   strategies: [],
   // Non-null when the order dialog is editing an existing transaction rather
@@ -59,7 +67,9 @@ export async function initializeOrdersModule() {
 
   els.positionsThead = document.getElementById("positions-thead-row");
   els.positionsTbody = document.getElementById("positions-tbody");
+  els.positionsTfoot = document.getElementById("positions-tfoot");
   els.positionsFilter = document.getElementById("positions-filter");
+  els.positionsAccount = document.getElementById("positions-account");
   els.positionsCount = document.getElementById("positions-count");
   els.refreshPricesBtn = document.getElementById("orders-refresh-prices-btn");
   els.positionsColumnsBtn = document.getElementById("positions-columns-btn");
@@ -101,6 +111,11 @@ export async function initializeOrdersModule() {
   els.historyThead.addEventListener("click", (e) => handleSort(e, "historySort", renderHistory));
   els.positionsTbody.addEventListener("click", handlePositionsAction);
   els.historyTbody.addEventListener("click", handleHistoryAction);
+
+  els.positionsAccount.addEventListener("change", () => {
+    state.accountId = els.positionsAccount.value ? Number(els.positionsAccount.value) : null;
+    reloadOrdersView();
+  });
 
   els.positionsFilter.addEventListener("input", () => {
     state.positionsFilter = els.positionsFilter.value;
@@ -151,7 +166,72 @@ export async function initializeOrdersModule() {
   els.orderDeleteBtn.addEventListener("click", handleDeleteFromDialog);
   els.refreshPricesBtn.addEventListener("click", handleRefreshPrices);
 
+  await populateAccountFilter();
   await reloadOrdersView();
+}
+
+/**
+ * Why this account has nothing in it.
+ *
+ * Three different situations look identical in an empty table: the account was
+ * never imported, an import was staged and never approved, or it is genuinely
+ * flat. The default message told the user to log a trade, which is the wrong
+ * answer to two of the three -- and actively unhelpful when 133 rows are
+ * sitting in a pending batch.
+ */
+/**
+ * Which tickers are showing their individual lots.
+ *
+ * Held in module state rather than the DOM so a price refresh or a filter
+ * change does not collapse everything the user opened -- the table re-renders
+ * constantly and losing your place each time would make the feature useless.
+ */
+function toggleGroup(securityId) {
+  if (state.expandedGroups.has(securityId)) state.expandedGroups.delete(securityId);
+  else state.expandedGroups.add(securityId);
+  renderPositions();
+}
+
+function emptyPositionsMessage() {
+  if (state.accountId == null) {
+    return 'No open positions. Use "+ Log Order" to record a purchase, or import a statement.';
+  }
+  const account = (state.accounts ?? []).find((a) => a.id === state.accountId);
+  if (!account) return "No open positions in this account.";
+  if (account.pending_import_rows > 0) {
+    return (
+      `Nothing imported for ${account.label} yet — but ${account.pending_import_rows} row(s) are staged ` +
+      `and waiting to be approved on the Import tab.`
+    );
+  }
+  if (!account.last_imported_at) {
+    return `Nothing has been imported for ${account.label}. Use the Import tab, or log a trade by hand.`;
+  }
+  return `No open positions in ${account.label} — everything imported has been sold.`;
+}
+
+/**
+ * Fills the account filter.
+ *
+ * Lists every registered account rather than only those with trades: an
+ * account showing nothing is a useful answer -- it says the import has not been
+ * run for it -- whereas its absence looks like the filter is broken.
+ */
+async function populateAccountFilter() {
+  const accounts = await api.fetchAccountsForFilter();
+  // Kept so the empty state can explain ITSELF rather than guessing.
+  state.accounts = accounts;
+  els.positionsAccount.innerHTML =
+    '<option value="">All accounts</option>' +
+    accounts
+      .map((a) => `<option value="${a.id}">${a.label.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</option>`)
+      .join("");
+  // Driven FROM state, never read back into it. Chrome restores <select>
+  // values across a reload without firing `change`, so reading the DOM as the
+  // source of truth let the dropdown show one account while the table showed
+  // another -- the control and the data silently disagreeing, which is worse
+  // than either being wrong on its own.
+  els.positionsAccount.value = state.accountId == null ? "" : String(state.accountId);
 }
 
 export async function reloadOrdersView() {
@@ -180,7 +260,7 @@ async function handleTabClick(event) {
 
 async function loadPositions() {
   try {
-    const { positions, summary } = await api.fetchPositions();
+    const { positions, summary } = await api.fetchPositions({ accountId: state.accountId ?? null });
     state.positions = positions;
     state.summary = summary;
     els.summary.innerHTML = renderSummary(summary);
@@ -201,7 +281,13 @@ function renderPositions() {
     state.positionsSort.key,
     state.positionsSort.dir,
   );
-  els.positionsTbody.innerHTML = renderPositionsRows(visible, state.positionColumns);
+  els.positionsTbody.innerHTML = renderPositionsRows(visible, state.positionColumns, {
+    emptyMessage: emptyPositionsMessage(),
+    expanded: state.expandedGroups,
+  });
+  // Totals the VISIBLE rows, so the footer agrees with the filter above it
+  // rather than contradicting the rows it sits under.
+  els.positionsTfoot.innerHTML = renderPositionsFooter(visible, state.positionColumns);
   els.positionsCount.textContent =
     visible.length === state.positions.length
       ? `${state.positions.length} lot(s)`
@@ -266,6 +352,14 @@ function handleSort(event, sortStateKey, rerender) {
 }
 
 async function handlePositionsAction(event) {
+  const toggle = event.target.closest(".group-toggle");
+  if (toggle) return toggleGroup(Number(toggle.dataset.securityId));
+
+  const exitsBtn = event.target.closest(".exits-btn");
+  if (exitsBtn) {
+    return openExitsDialog(Number(exitsBtn.dataset.id), exitsBtn.dataset.symbol, () => reloadOrdersView());
+  }
+
   const editBtn = event.target.closest(".edit-txn-btn");
   if (editBtn) return openEditDialog(Number(editBtn.dataset.id));
 

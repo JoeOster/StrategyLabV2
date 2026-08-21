@@ -58,7 +58,6 @@ export function generalFormToPayload(formData) {
     app_title: String(formData.get("app_title") || "").trim(),
     default_take_profit_percent: String(formData.get("default_take_profit_percent") || "").trim(),
     default_stop_loss_percent: String(formData.get("default_stop_loss_percent") || "").trim(),
-    notification_cooldown_minutes: String(formData.get("notification_cooldown_minutes") || "").trim(),
     nightly_refresh_enabled: String(formData.get("nightly_refresh_enabled") ?? "1"),
     nightly_refresh_hour: String(formData.get("nightly_refresh_hour") || "1").trim(),
     alert_check_enabled: String(formData.get("alert_check_enabled") ?? "1"),

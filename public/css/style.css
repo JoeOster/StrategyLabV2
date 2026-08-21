@@ -217,9 +217,21 @@ body {
 .type-txn-sell { background: #fae8ff; color: #86198f; }
 .type-txn-dividend { background: #dcfce7; color: #166534; }
 
-.sell-lot-btn {
-  padding: 0.2rem 0.55rem;
-  font-size: 0.8rem;
+/* Row-action buttons in a table's actions cell.
+
+   ONE sizing rule rather than a near-identical block per button. There were
+   three copies of these exact three properties, so a new button added without
+   its own rule rendered at full size next to the others -- which is precisely
+   what happened when the Exits button was added. Hover colours stay separate
+   below, since those are genuinely per-button. */
+.icon-btn {
+  /* Square, so four of them line up regardless of glyph width -- a '$' and an
+     up-down arrow have very different advances. min-width rather than width so
+     a longer glyph is never clipped. */
+  min-width: 1.85rem;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.95rem;
+  line-height: 1.1;
   border-color: var(--border);
 }
 
@@ -236,21 +248,12 @@ body {
 
 .delete-txn-btn:hover { background: #fee2e2; border-color: #fecaca; color: var(--danger); }
 
-.edit-txn-btn {
-  padding: 0.2rem 0.55rem;
-  font-size: 0.8rem;
-  border-color: var(--border);
-}
 
 .edit-txn-btn:hover { background: #e8effd; border-color: #bfdbfe; color: var(--accent); }
 
-.promote-txn-btn {
-  padding: 0.2rem 0.55rem;
-  font-size: 0.8rem;
-  border-color: var(--border);
-}
 
 .promote-txn-btn:hover { background: #dcfce7; border-color: #86efac; color: #166534; }
+.exits-btn:hover { background: #fef3c7; border-color: #fcd34d; color: #92400e; }
 
 .actions-cell { white-space: nowrap; }
 
@@ -782,3 +785,87 @@ dialog input, dialog select, dialog textarea {
 /* Pushes Delete to the far left, away from Save, so it can't be hit by
    accident when reaching for the primary action. */
 .form-actions-spacer { flex: 1; }
+
+/* The account scope sits above the summary strip because it governs it. */
+.account-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.account-scope label {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+/* Totals row. Separated by a rule rather than a background so it reads as a
+   summation of the rows above, not as another row of data. */
+.totals-row td {
+  border-top: 2px solid var(--border);
+  padding-top: 0.5rem;
+}
+
+/* Consolidated holding rows, and the individual lots behind them. */
+.group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.group-caret {
+  color: var(--muted);
+  font-size: 0.75rem;
+  width: 0.7rem;
+}
+
+/* Lots read as belonging to the row above: indented, quieter, and without the
+   heavy top border that separates one holding from the next. */
+.lot-row td {
+  background: #fafbfc;
+  color: var(--muted);
+  font-size: 0.92em;
+}
+.lot-row td:first-child {
+  padding-left: 2rem;
+}
+.lot-row td strong {
+  font-weight: 400;
+}
+.group-open td {
+  border-bottom: none;
+}
+
+/* Account markers. Letter plus last four, not a brokerage logo: both Fidelity
+   accounts are Rollover IRAs, so a Fidelity mark on each would identify
+   neither -- the NUMBER is what tells them apart. */
+.acct-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.18rem;
+  margin-left: 0.45rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  background: #eef1f5;
+  color: #475569;
+  border: 1px solid #dde3ea;
+}
+.acct-num { font-weight: 400; opacity: 0.85; }
+
+/* Colour by brokerage so rows can be grouped by eye without reading. */
+.acct-fidelity     { background: #e6f4ea; color: #166534; border-color: #bfe3ca; }
+.acct-etrade       { background: #e8effd; color: #1e40af; border-color: #c7d8f8; }
+.acct-robinhood    { background: #e9fbf1; color: #047857; border-color: #c3f0d8; }
+.acct-schwab       { background: #eaf2fb; color: #1d4ed8; border-color: #cbdcf5; }
+.acct-tradestation { background: #fdf2e9; color: #9a3412; border-color: #f6ddc4; }
+.acct-multi        { background: #f3e8ff; color: #6b21a8; border-color: #e4d0fa; }

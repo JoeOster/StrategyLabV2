@@ -1,4 +1,6 @@
 // The "HTML" file for orders. Pure functions: data in, markup out.
+import { money, signedMoney, formatQty, formatPrice } from "../shared/format.js";
+
 import { renderStrategyOptions } from "../journal/render.js";
 export { renderStrategyOptions };
 
@@ -57,7 +59,7 @@ export function renderHeaderRow(columns, sortKey, sortDir, { trailingBlank = tru
 // string so cell-specific classes/titles stay next to the markup that needs
 // them (mirrors the same pattern in watchlist/render.js).
 const POSITION_CELL_RENDERERS = {
-  symbol: (p) => `<td><strong>${escapeHtml(p.symbol)}</strong></td>`,
+  symbol: (p) => `<td><strong>${escapeHtml(p.symbol)}</strong>${accountBadge(p)}</td>`,
   security_name: (p) => `<td>${escapeHtml(p.security_name || "")}</td>`,
   exchange_code: (p) => `<td>${escapeHtml(p.exchange_code || "—")}</td>`,
   quantity_remaining: (p) => `<td>${formatQty(p.quantity_remaining)}</td>`,
@@ -90,27 +92,250 @@ const POSITION_CELL_RENDERERS = {
  *   adds a "Promote" button (Paper Trade tab only -- turns a paper BUY into
  *   a real one in place, see promotePaperTrade in transactionsService.js).
  */
+// Row-action icons.
+//
+// Glyphs rather than SVG or an icon font: this app runs on two packages, and
+// the void button in the history table is already a bare Unicode cross, so
+// this matches what exists instead of adding a third way to draw a button.
+//
+// Each carries U+FE0E (text presentation selector) to stop platforms promoting
+// them to full-colour emoji, which would break the line weight beside the
+// others.
+//
+// EXITS had no obvious symbol. An up-down pair says what the ladder actually
+// is -- take-profit rungs above the price and a stop below it -- where a target
+// or a flag would describe only half of it.
+const ACTION_ICONS = {
+  promote: "\u2191\uFE0E", // upward: a paper trade becoming real
+  sell: "$",
+  exits: "\u21C5\uFE0E",
+  edit: "\u270E\uFE0E",
+};
+
+/**
+ * Collapses a ticker's lots into one row, expandable to the individual
+ * purchases -- the shape a broker statement uses, and for the same reason: at a
+ * glance you want the holding, and on demand you want how you got it.
+ *
+ * The per-lot model stays underneath untouched. Each lot keeps its own entry
+ * price, holding period and thesis, and every action still operates on a
+ * specific lot -- the group row is a summary, not a new kind of thing. That is
+ * why the actions live on the lot rows: selling, editing, and above all setting
+ * an exit ladder are per-lot decisions, and a plan belongs to one entry thesis.
+ * A group-level Exits button would quietly imply the lots share a plan.
+ *
+ * A single-lot ticker renders exactly as before, with no disclosure control --
+ * an expander that reveals one row identical to the one above it is noise.
+ */
 export function renderPositionsRows(positions, columns, opts = {}) {
-  const { showPromote = false, emptyMessage = 'No open positions. Use "+ Log Order" to record a purchase.' } = opts;
+  const {
+    showPromote = false,
+    emptyMessage = 'No open positions. Use "+ Log Order" to record a purchase.',
+    expanded = new Set(),
+  } = opts;
+
   if (positions.length === 0) {
     return `<tr><td colspan="${columns.length + 1}" class="empty-row">${escapeHtml(emptyMessage)}</td></tr>`;
   }
-  return positions
-    .map((p) => {
+
+  // Preserve the incoming order -- it is whatever the user sorted by.
+  const groups = [];
+  const byKey = new Map();
+  for (const p of positions) {
+    const key = p.security_id;
+    if (!byKey.has(key)) {
+      const g = { key, lots: [] };
+      byKey.set(key, g);
+      groups.push(g);
+    }
+    byKey.get(key).lots.push(p);
+  }
+
+  return groups
+    .map((g) => {
+      if (g.lots.length === 1) return lotRow(g.lots[0], columns, showPromote, { indented: false });
+
+      const isOpen = expanded.has(g.key);
+      const summary = summariseLots(g.lots);
       const cells = columns
-        .map((col) => (POSITION_CELL_RENDERERS[col.key] || (() => "<td>—</td>"))(p))
+        .map((col) => (GROUP_CELL_RENDERERS[col.key] || (() => "<td></td>"))(summary, isOpen))
         .join("");
-      return `
-        <tr>
+
+      const header = `
+        <tr class="group-row${isOpen ? " group-open" : ""}" data-security-id="${g.key}">
           ${cells}
-          <td class="actions-cell">
-            ${showPromote ? `<button type="button" class="promote-txn-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Turn this into a real purchase">Promote</button>` : ""}
-            <button type="button" class="sell-lot-btn" data-symbol="${escapeHtml(p.symbol)}" data-lot-id="${p.lot_id}" data-qty="${p.quantity_remaining}" title="Sell from this lot">Sell</button>
-            <button type="button" class="edit-txn-btn" data-id="${p.lot_id}" title="Correct this purchase">Edit</button>
-          </td>
+          <td class="actions-cell"></td>
         </tr>`;
+
+      const children = isOpen
+        ? g.lots.map((lot) => lotRow(lot, columns, showPromote, { indented: true })).join("")
+        : "";
+
+      return header + children;
     })
     .join("");
+}
+
+/**
+ * A ticker's lots as one holding.
+ *
+ * Entry is the WEIGHTED average -- total cost over total shares -- not the mean
+ * of the entry prices, which would misreport any position built in unequal
+ * sizes. Unrealized is taken over priced lots only, so a partially-quoted
+ * holding does not compare two different sets of shares.
+ */
+function summariseLots(lots) {
+  const first = lots[0];
+  const shares = lots.reduce((s, l) => s + l.quantity_remaining, 0);
+  const cost = lots.reduce((s, l) => s + l.cost_basis, 0);
+  const priced = lots.filter((l) => l.market_value != null);
+  const value = priced.length ? priced.reduce((s, l) => s + l.market_value, 0) : null;
+  const pricedCost = priced.reduce((s, l) => s + l.cost_basis, 0);
+  const unrealized = value == null ? null : value - pricedCost;
+
+  return {
+    security_id: first.security_id,
+    symbol: first.symbol,
+    accountBadge: groupAccountBadge(lots),
+    security_name: first.security_name,
+    exchange_code: first.exchange_code,
+    last_price: first.last_price,
+    lotCount: lots.length,
+    quantity_remaining: shares,
+    cost_per_share: shares > 0 ? cost / shares : null,
+    cost_basis: cost,
+    market_value: value,
+    unrealized_pnl: unrealized,
+    unrealized_pnl_percent: unrealized != null && pricedCost > 0 ? (unrealized / pricedCost) * 100 : null,
+    // Deliberately absent at group level: lots bought months apart have no
+    // single holding period, and averaging days held invents a number.
+    days_held: null,
+  };
+}
+
+/**
+ * A compact account marker for column one.
+ *
+ * Letter plus the last four digits, not a brokerage logo: real marks would mean
+ * bundling trademarked images into a personal app for no functional gain, and
+ * they would not solve the actual problem anyway. Both Fidelity accounts here
+ * are Rollover IRAs -- a Fidelity logo on each would identify neither. The
+ * NUMBER is what distinguishes them, so the number is what the badge leads on.
+ *
+ * Colour is derived from the brokerage so the eye can group rows without
+ * reading, and the full label is in the title for when reading is needed.
+ */
+function accountBadge(p) {
+  if (!p.broker_slug) return "";
+  const last4 = p.account_number ? String(p.account_number).slice(-4) : "";
+  const initial = (p.broker_name || p.broker_slug).charAt(0).toUpperCase();
+  const full = `${escapeHtml(p.broker_name || p.broker_slug)}${p.account_number ? ` ${escapeHtml(p.account_number)}` : ""}`;
+  return `<span class="acct-badge acct-${escapeHtml(p.broker_slug)}" title="${full}">${initial}${
+    last4 ? `<span class="acct-num">${escapeHtml(last4)}</span>` : ""
+  }</span>`;
+}
+
+/**
+ * The badge for a consolidated row.
+ *
+ * When a holding spans accounts -- RKLB sits in both Fidelity IRAs -- one badge
+ * would be a lie and several would crowd the cell, so it says how many and
+ * names them on hover. Expanding shows which lot is where.
+ */
+function groupAccountBadge(lots) {
+  const distinct = [...new Map(lots.filter((l) => l.broker_slug).map((l) => [l.account_number ?? l.broker_slug, l])).values()];
+  if (distinct.length === 0) return "";
+  if (distinct.length === 1) return accountBadge(distinct[0]);
+  const names = distinct
+    .map((l) => `${l.broker_name}${l.account_number ? ` ${l.account_number}` : ""}`)
+    .join(", ");
+  return `<span class="acct-badge acct-multi" title="Held across: ${escapeHtml(names)}">${distinct.length} accts</span>`;
+}
+
+const GROUP_CELL_RENDERERS = {
+  symbol: (g, isOpen) => `
+    <td>
+      <button type="button" class="group-toggle" data-security-id="${g.security_id}"
+              aria-expanded="${isOpen}"
+              title="${isOpen ? "Hide" : "Show"} the ${g.lotCount} purchases behind this holding">
+        <span class="group-caret">${isOpen ? "\u25BE" : "\u25B8"}</span><strong>${escapeHtml(g.symbol)}</strong>
+      </button>${g.accountBadge}
+    </td>`,
+  security_name: (g) => `<td>${escapeHtml(g.security_name || "")}</td>`,
+  exchange_code: (g) => `<td>${escapeHtml(g.exchange_code || "—")}</td>`,
+  quantity_remaining: (g) => `<td>${formatQty(g.quantity_remaining)}</td>`,
+  cost_per_share: (g) => `<td title="Weighted average across ${g.lotCount} lots">${formatPrice(g.cost_per_share)}</td>`,
+  cost_basis: (g) => `<td>${money(g.cost_basis)}</td>`,
+  last_price: (g) => `<td class="price-cell">${formatPrice(g.last_price)}</td>`,
+  market_value: (g) => `<td>${money(g.market_value)}</td>`,
+  unrealized_pnl: (g) =>
+    `<td class="${g.unrealized_pnl == null ? "" : g.unrealized_pnl >= 0 ? "change-up" : "change-down"}">${signedMoney(g.unrealized_pnl)}</td>`,
+  unrealized_pnl_percent: (g) =>
+    `<td class="${g.unrealized_pnl_percent == null ? "" : g.unrealized_pnl_percent >= 0 ? "change-up" : "change-down"}">${
+      g.unrealized_pnl_percent == null
+        ? "—"
+        : `${g.unrealized_pnl_percent >= 0 ? "+" : ""}${g.unrealized_pnl_percent.toFixed(2)}%`
+    }</td>`,
+  days_held: (g) => `<td class="muted-cell">${g.lotCount} lots</td>`,
+};
+
+/** One purchase. Unchanged from before, except it can be shown as a child. */
+function lotRow(p, columns, showPromote, { indented }) {
+  const cells = columns
+    .map((col) => (POSITION_CELL_RENDERERS[col.key] || (() => "<td>—</td>"))(p))
+    .join("");
+  return `
+    <tr class="${indented ? "lot-row" : ""}">
+      ${cells}
+      <td class="actions-cell">
+        ${showPromote ? `<button type="button" class="icon-btn promote-txn-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Promote to a real purchase" aria-label="Promote ${escapeHtml(p.symbol)} to a real purchase">${ACTION_ICONS.promote}</button>` : ""}
+        <button type="button" class="icon-btn sell-lot-btn" data-symbol="${escapeHtml(p.symbol)}" data-lot-id="${p.lot_id}" data-qty="${p.quantity_remaining}" title="Sell from this lot" aria-label="Sell ${escapeHtml(p.symbol)}">${ACTION_ICONS.sell}</button>
+        <button type="button" class="icon-btn exits-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Exit plan: take-profit and stop rungs" aria-label="Exit plan for ${escapeHtml(p.symbol)}">${ACTION_ICONS.exits}</button>
+        <button type="button" class="icon-btn edit-txn-btn" data-id="${p.lot_id}" title="Correct this purchase" aria-label="Edit ${escapeHtml(p.symbol)} purchase">${ACTION_ICONS.edit}</button>
+      </td>
+    </tr>`;
+}
+
+/**
+ * Totals row for the positions table.
+ *
+ * Sums the rows CURRENTLY DISPLAYED, not the whole portfolio -- so it responds
+ * to the ticker filter as well as the account scope. A footer that ignored the
+ * filter above it would contradict the rows it sits under, which is worse than
+ * having no footer.
+ *
+ * Only genuinely additive columns get a total. Averaging an entry price across
+ * different lot sizes, or summing a percentage, produces a number that looks
+ * meaningful and is not.
+ */
+export function renderPositionsFooter(positions, columns) {
+  if (positions.length === 0) return "";
+
+  const sum = (fn) => positions.reduce((acc, p) => acc + (fn(p) ?? 0), 0);
+  const anyPriced = positions.some((p) => p.market_value != null);
+
+  const totalCost = sum((p) => p.cost_basis);
+  const totalValue = anyPriced ? sum((p) => p.market_value) : null;
+  // Only over priced rows, or the percentage compares different sets.
+  const pricedCost = positions.filter((p) => p.market_value != null).reduce((a, p) => a + p.cost_basis, 0);
+  const totalUnreal = anyPriced ? totalValue - pricedCost : null;
+  const pct = anyPriced && pricedCost > 0 ? (totalUnreal / pricedCost) * 100 : null;
+
+  const TOTALS = {
+    symbol: () => `<td><strong>Total</strong></td>`,
+    quantity_remaining: () => `<td></td>`,
+    cost_basis: () => `<td><strong>${money(totalCost)}</strong></td>`,
+    market_value: () => `<td><strong>${money(totalValue)}</strong></td>`,
+    unrealized_pnl: () =>
+      `<td class="${totalUnreal == null ? "" : totalUnreal >= 0 ? "change-up" : "change-down"}"><strong>${signedMoney(totalUnreal)}</strong></td>`,
+    unrealized_pnl_percent: () =>
+      `<td class="${pct == null ? "" : pct >= 0 ? "change-up" : "change-down"}"><strong>${
+        pct == null ? "—" : `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`
+      }</strong></td>`,
+  };
+
+  const cells = columns.map((col) => (TOTALS[col.key] || (() => "<td></td>"))()).join("");
+  return `<tr class="totals-row">${cells}<td></td></tr>`;
 }
 
 const HISTORY_CELL_RENDERERS = {
@@ -146,7 +371,7 @@ export function renderHistoryRows(rows, columns) {
         .join("");
       const actions = t.voided_at
         ? `<span class="voided-tag" title="${escapeHtml(t.void_reason || "Voided")}">voided</span>`
-        : `<button type="button" class="edit-txn-btn" data-id="${t.id}" title="Edit this transaction">Edit</button>
+        : `<button type="button" class="icon-btn edit-txn-btn" data-id="${t.id}" title="Edit this transaction" aria-label="Edit ${escapeHtml(t.symbol)} transaction">${ACTION_ICONS.edit}</button>
              <button type="button" class="delete-txn-btn" data-id="${t.id}" title="Void this transaction (kept for the audit trail, stops counting)">✕</button>`;
       return `
         <tr class="${t.voided_at ? "voided-row" : ""}">
@@ -157,22 +382,7 @@ export function renderHistoryRows(rows, columns) {
     .join("");
 }
 
-export function renderSummary(s) {
-  if (!s || s.positionCount === 0) {
-    return `<div class="summary-item"><span class="summary-label">No open positions</span></div>`;
-  }
-  const unrealClass = s.unrealizedPnl >= 0 ? "change-up" : "change-down";
-  const realClass = s.realizedPnl >= 0 ? "change-up" : "change-down";
-  const totalClass = s.totalReturn >= 0 ? "change-up" : "change-down";
-  return `
-    <div class="summary-item"><span class="summary-label">Positions</span><span class="summary-value">${s.positionCount}</span></div>
-    <div class="summary-item"><span class="summary-label">Cost Basis</span><span class="summary-value">${money(s.totalCost)}</span></div>
-    <div class="summary-item"><span class="summary-label">Market Value</span><span class="summary-value">${money(s.totalValue)}</span></div>
-    <div class="summary-item"><span class="summary-label">Unrealized</span><span class="summary-value ${unrealClass}">${signedMoney(s.unrealizedPnl)}${s.unrealizedPnlPercent == null ? "" : ` (${s.unrealizedPnlPercent >= 0 ? "+" : ""}${s.unrealizedPnlPercent.toFixed(2)}%)`}</span></div>
-    <div class="summary-item"><span class="summary-label">Realized</span><span class="summary-value ${realClass}">${signedMoney(s.realizedPnl)}</span></div>
-    <div class="summary-item"><span class="summary-label">Dividends</span><span class="summary-value">${money(s.dividendIncome)}</span></div>
-    <div class="summary-item"><span class="summary-label">Total Return</span><span class="summary-value ${totalClass}">${signedMoney(s.totalReturn)}</span></div>`;
-}
+export { renderSummary } from "../shared/summary.js";
 
 export function renderSourceOptions(sources) {
   return (
@@ -219,24 +429,8 @@ export function filterPositions(positions, query) {
 
 // --- formatting -------------------------------------------------------------
 
-function money(value) {
-  if (value == null) return "—";
-  const n = Number(value);
-  return `${n < 0 ? "-" : ""}$${Math.abs(n).toFixed(2)}`;
-}
 
-function signedMoney(value) {
-  if (value == null) return "—";
-  const n = Number(value);
-  return `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
-}
 
-function formatQty(value) {
-  if (value == null) return "—";
-  const n = Number(value);
-  // Whole share counts shouldn't render as "100.0000".
-  return Number.isInteger(n) ? String(n) : n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
-}
 
 function truncate(str, maxLen) {
   const s = str || "";

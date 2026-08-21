@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Runs the offline suite before every commit.
+#
+# This exists because the suite was dead for weeks and nobody noticed: it threw
+# part-way through, 216 checks silently stopped running, and the last line still
+# looked like normal output. The exit code was correct the whole time -- it just
+# was not being read, because nothing ran it.
+#
+# Enabled repo-wide with `git config core.hooksPath deploy/githooks`, so it is
+# versioned rather than living in an untracked .git/hooks a fresh clone lacks.
+#
+# To bypass deliberately: git commit --no-verify
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if [ ! -d node_modules ]; then
+  echo "pre-commit: node_modules missing, skipping tests (run npm install)" >&2
+  exit 0
+fi
+
+echo "pre-commit: running offline suite..."
+if ! output="$(npm run --silent test:offline 2>&1)"; then
+  echo "$output" | tail -25 >&2
+  echo "" >&2
+  echo "pre-commit: SUITE FAILED -- commit blocked." >&2
+  echo "            Fix it, or bypass deliberately with: git commit --no-verify" >&2
+  exit 1
+fi
+
+echo "pre-commit: $(echo "$output" | tail -1)"

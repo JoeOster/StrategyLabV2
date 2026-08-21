@@ -11,6 +11,7 @@ import {
   sortPositions,
   filterPositions,
 } from "./render.js";
+import { renderSummary } from "../shared/summary.js";
 
 const state = {
   positions: [],
@@ -18,6 +19,13 @@ const state = {
   view: "cards",
   filter: "",
   exchange: "",
+  // Server-side, unlike the exchange filter below it. Account scope has to
+  // reach the server because the strip's cash, realized P&L and dividends are
+  // computed there -- filtering the fetched rows in the browser would narrow
+  // the table while leaving those three figures portfolio-wide, which is the
+  // exact mismatch that makes a total untrustworthy.
+  accountId: null,
+  accounts: [],
   sortKey: "symbol",
   sortDir: "asc",
   detailSymbol: null,
@@ -34,6 +42,7 @@ export async function initializeDashboardModule() {
   els.tbody = document.getElementById("dash-tbody");
   els.filter = document.getElementById("dash-filter");
   els.exchangeFilter = document.getElementById("dash-exchange-filter");
+  els.accountFilter = document.getElementById("dash-account-filter");
   els.sortSelect = document.getElementById("dash-sort");
   els.count = document.getElementById("dash-count");
   els.refreshBtn = document.getElementById("dash-refresh-btn");
@@ -52,6 +61,12 @@ export async function initializeDashboardModule() {
   els.exchangeFilter.addEventListener("change", () => {
     state.exchange = els.exchangeFilter.value;
     renderAll();
+  });
+  els.accountFilter.addEventListener("change", async () => {
+    const raw = els.accountFilter.value;
+    state.accountId = raw === "" ? null : Number(raw);
+    // A refetch, not a re-render: the summary figures come from the server.
+    await reloadDashboardView();
   });
   els.sortSelect.addEventListener("change", () => {
     const [key, dir] = els.sortSelect.value.split(":");
@@ -87,12 +102,31 @@ export async function initializeDashboardModule() {
     );
   });
 
+  await populateAccountFilter();
   await reloadDashboardView();
+}
+
+/**
+ * Fills the account dropdown from the server.
+ *
+ * Driven FROM state, never read back into it -- Chrome restores a <select>
+ * value across a reload without firing `change`, so trusting the DOM let the
+ * control show one account while the data showed another.
+ */
+async function populateAccountFilter() {
+  const accounts = await api.fetchAccountsForFilter();
+  state.accounts = accounts;
+  els.accountFilter.innerHTML =
+    '<option value="">All accounts</option>' +
+    accounts
+      .map((a) => `<option value="${a.id}">${a.label.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</option>`)
+      .join("");
+  els.accountFilter.value = state.accountId == null ? "" : String(state.accountId);
 }
 
 export async function reloadDashboardView() {
   try {
-    const { positions, summary } = await api.fetchPositions();
+    const { positions, summary } = await api.fetchPositions({ accountId: state.accountId });
     state.positions = positions;
     state.summary = summary;
 
@@ -113,21 +147,7 @@ export async function reloadDashboardView() {
 }
 
 function renderSummaryStrip() {
-  const s = state.summary;
-  if (!s || s.positionCount === 0) {
-    els.summary.innerHTML = `<div class="summary-item"><span class="summary-label">No open positions</span></div>`;
-    return;
-  }
-  const cls = (v) => (v >= 0 ? "change-up" : "change-down");
-  const money = (v) => `${v < 0 ? "-" : ""}$${Math.abs(v).toFixed(2)}`;
-  const signed = (v) => `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(2)}`;
-  els.summary.innerHTML = `
-    <div class="summary-item"><span class="summary-label">Positions</span><span class="summary-value">${s.positionCount}</span></div>
-    <div class="summary-item"><span class="summary-label">Cost Basis</span><span class="summary-value">${money(s.totalCost)}</span></div>
-    <div class="summary-item"><span class="summary-label">Market Value</span><span class="summary-value">${money(s.totalValue)}</span></div>
-    <div class="summary-item"><span class="summary-label">Unrealized</span><span class="summary-value ${cls(s.unrealizedPnl)}">${signed(s.unrealizedPnl)}${s.unrealizedPnlPercent == null ? "" : ` (${s.unrealizedPnlPercent >= 0 ? "+" : ""}${s.unrealizedPnlPercent.toFixed(2)}%)`}</span></div>
-    <div class="summary-item"><span class="summary-label">Realized</span><span class="summary-value ${cls(s.realizedPnl)}">${signed(s.realizedPnl)}</span></div>
-    <div class="summary-item"><span class="summary-label">Total Return</span><span class="summary-value ${cls(s.totalReturn)}">${signed(s.totalReturn)}</span></div>`;
+  els.summary.innerHTML = renderSummary(state.summary);
 }
 
 function visiblePositions() {

@@ -14,6 +14,7 @@
 import db, { withTransaction } from "../lib/db.js";
 import { getOrCreateSecurity } from "./priceService.js";
 import { TRANSFER_OUT_REASON } from "../lib/constants.js";
+import { cashBalance } from "./cashService.js";
 
 const insertTransaction = db.prepare(`
   INSERT INTO transactions (
@@ -219,11 +220,24 @@ export function recordBuyWith(security, input) {
   });
 }
 
+// Account-scoped. Shares held at one brokerage cannot be sold by another, so a
+// sale must draw only from lots in its own account.
+//
+// Without the scope this was not merely an attribution problem, it was wrong:
+// in a two-account test, selling 100 from account B emptied account A, left B
+// still showing 100 shares it no longer held, and reported realized P&L of
+// $1,500 instead of $500 because it used A's cost basis. The SELL row was
+// labelled account B while drawing down A's lot, so the two accounts' books
+// contradicted each other.
+//
+// `IS` rather than `=` so a NULL accountId means "do not filter" instead of
+// matching nothing.
 const getOpenLots = db.prepare(`
   SELECT * FROM transactions
   WHERE holder_id = @holderId AND security_id = @securityId
     AND transaction_type = 'BUY' AND quantity_remaining > 0
     AND is_paper_trade = @isPaperTrade AND voided_at IS NULL
+    AND (@accountId IS NULL OR account_id IS @accountId)
   ORDER BY transaction_date, id
 `);
 
@@ -269,7 +283,21 @@ export function recordSellWith(security, input) {
       holderId: input.holderId,
       securityId: security.id,
       isPaperTrade,
+      accountId: input.accountId ?? null,
     });
+
+    // No account named, and the holding spans several. Guessing would pick the
+    // oldest lot regardless of where it is held, which is how the bug above
+    // happened. Ask instead -- this app asks rather than assumes.
+    if (input.accountId == null) {
+      const accounts = new Set(lots.map((lot) => lot.account_id));
+      if (accounts.size > 1) {
+        throw new Error(
+          `${security.symbol} is held in more than one account. ` +
+            `Say which account this sale is from -- selling from the wrong one corrupts both.`,
+        );
+      }
+    }
 
     if (input.lotId) {
       lots = lots.filter((lot) => lot.id === Number(input.lotId));
@@ -383,9 +411,15 @@ const openPositionsQuery = db.prepare(`
     s.id AS security_id, s.symbol, s.name AS security_name,
     e.code AS exchange_code,
     q.last_price, q.prev_close, q.fetched_at AS quote_fetched_at,
-    src.name AS source_name, strat.title AS strategy_title
+    src.name AS source_name, strat.title AS strategy_title,
+    -- Which account this lot is in. Carried on every row so an all-accounts
+    -- view can say whose position it is -- otherwise two identical-looking
+    -- RKLB rows give no clue that they are in different brokerages.
+    acc.account_number, br.slug AS broker_slug, br.name AS broker_name
   FROM transactions t
   JOIN securities s ON s.id = t.security_id
+  LEFT JOIN accounts acc ON acc.id = t.account_id
+  LEFT JOIN brokers br ON br.id = acc.broker_id
   LEFT JOIN exchanges e ON e.id = s.exchange_id
   LEFT JOIN quotes_cache q ON q.security_id = t.security_id
   LEFT JOIN advice_sources src ON src.id = t.source_id
@@ -395,6 +429,10 @@ const openPositionsQuery = db.prepare(`
     AND t.quantity_remaining > 0
     AND t.is_paper_trade = @isPaperTrade
     AND t.voided_at IS NULL
+    -- Account scope. NULL means every account, which is the default view; a
+    -- number narrows to one. IS rather than = so the NULL case does not
+    -- silently match nothing.
+    AND (@accountId IS NULL OR t.account_id IS @accountId)
   ORDER BY s.symbol, t.transaction_date
 `);
 
@@ -403,8 +441,10 @@ const openPositionsQuery = db.prepare(`
  * the entry price and holding period of each purchase stay visible -- that's
  * the distinction the old app's "position lot" cards were built around.
  */
-export function listOpenPositions(holderId, { isPaperTrade = false } = {}) {
-  return openPositionsQuery.all({ holderId, isPaperTrade: isPaperTrade ? 1 : 0 }).map((row) => {
+export function listOpenPositions(holderId, { isPaperTrade = false, accountId = null } = {}) {
+  return openPositionsQuery
+    .all({ holderId, isPaperTrade: isPaperTrade ? 1 : 0, accountId })
+    .map((row) => {
     // Cost basis of the *remaining* shares, not the original purchase.
     const costPerShare = row.original_cost_basis / row.original_quantity;
     const costBasis = costPerShare * row.quantity_remaining;
@@ -449,6 +489,9 @@ const transactionsQuery = db.prepare(`
     AND (@type IS NULL OR t.transaction_type = @type)
     AND (@includeVoided = 1 OR t.voided_at IS NULL)
     AND (@needsReviewOnly = 0 OR (t.needs_review = 1 AND t.review_resolved_at IS NULL))
+    -- Account scope, same convention as the positions query: NULL is every
+    -- account, a number narrows to one.
+    AND (@accountId IS NULL OR t.account_id IS @accountId)
   ORDER BY t.transaction_date DESC, t.id DESC
 `);
 
@@ -467,6 +510,7 @@ export function listTransactions(holderId, filters = {}) {
       type: filters.type || null,
       includeVoided: filters.includeVoided ? 1 : 0,
       needsReviewOnly: filters.needsReviewOnly ? 1 : 0,
+      accountId: filters.accountId ?? null,
     })
     .map((row) => ({ ...row, realized_pnl: computeRealizedPnl(row), total: computeTotal(row) }));
 }
@@ -496,33 +540,107 @@ function computeTotal(row) {
   return row.quantity * row.price + (row.fees || 0);
 }
 
-/** Portfolio-level roll-up for the header strip. */
-export function getPortfolioSummary(holderId, { isPaperTrade = false } = {}) {
-  const positions = listOpenPositions(holderId, { isPaperTrade });
+/**
+ * Portfolio-level roll-up for the header strip.
+ *
+ * A position with no quote makes market value UNKNOWN, not equal to cost. This
+ * used to fall back to `p.cost_basis`, so an unpriced portfolio displayed a
+ * market value identical to its cost and unrealized P&L of exactly $0.00 --
+ * a specific, confident, wrong claim rather than an absence.
+ *
+ * It confused the app's own author on the first real import: the ledger said
+ * $21,850.70 market value against $21,850.70 cost while Fidelity said
+ * $18,879.78. Every underlying row was right; only the roll-up lied.
+ *
+ * So the totals now cover the priced positions and say how many they are.
+ * `unpricedCount > 0` means the market figures are partial, and the UI is
+ * expected to say so rather than present them as the whole picture.
+ */
+export function getPortfolioSummary(holderId, { isPaperTrade = false, accountId = null } = {}) {
+  const positions = listOpenPositions(holderId, { isPaperTrade, accountId });
   const totalCost = positions.reduce((sum, p) => sum + p.cost_basis, 0);
-  const totalValue = positions.reduce((sum, p) => sum + (p.market_value ?? p.cost_basis), 0);
-  const realized = listTransactions(holderId, { isPaperTrade, type: "SELL" }).reduce(
+
+  const priced = positions.filter((p) => p.market_value != null);
+  const unpricedCount = positions.length - priced.length;
+
+  // Cost is summed over the SAME positions as value, or the comparison is
+  // between different sets and the difference is meaningless.
+  const pricedCost = priced.reduce((sum, p) => sum + p.cost_basis, 0);
+  const pricedValue = priced.reduce((sum, p) => sum + p.market_value, 0);
+
+  // Three distinct cases, and they must not collapse into each other:
+  //   no positions at all      -> worth exactly zero, which IS known
+  //   positions, none priced   -> unknown, and null says so
+  //   positions, some priced   -> a partial figure, flagged by unpricedCount
+  //
+  // The middle case is why this is not simply a sum. The first case matters for
+  // a funded account holding only cash: its total is the cash, and returning
+  // null there would hide a figure that is perfectly well known.
+  const totalValue = positions.length === 0 ? 0 : priced.length > 0 ? pricedValue : null;
+  const unrealized = positions.length === 0 ? 0 : priced.length > 0 ? pricedValue - pricedCost : null;
+
+  // Scoped the same way as the positions above, or the strip would show one
+  // account's holdings beside every account's realized P&L.
+  const realized = listTransactions(holderId, { isPaperTrade, accountId, type: "SELL" }).reduce(
     (sum, t) => sum + (t.realized_pnl ?? 0),
     0,
   );
-  const dividends = listTransactions(holderId, { isPaperTrade, type: "DIVIDEND" }).reduce(
+  const dividends = listTransactions(holderId, { isPaperTrade, accountId, type: "DIVIDEND" }).reduce(
     (sum, t) => sum + t.price,
     0,
   );
+
   return {
-    positionCount: positions.length,
+    // Lots, not holdings. Three purchases of MRVL are three rows here because
+    // each keeps its own entry price, holding period and thesis -- that is the
+    // whole point of the per-lot model. But it is NOT what a broker means by
+    // "positions", and labelling it so read as 8 holdings against Fidelity's 6.
+    lotCount: positions.length,
+    // Distinct securities. This is what a broker calls a position, and what
+    // the summary strip should show.
+    positionCount: new Set(positions.map((p) => p.security_id)).size,
     totalCost,
     totalValue,
-    unrealizedPnl: totalValue - totalCost,
-    unrealizedPnlPercent: totalCost > 0 ? ((totalValue - totalCost) / totalCost) * 100 : null,
+    // How much of the picture the market figures actually cover.
+    pricedCount: priced.length,
+    unpricedCount,
+    unrealizedPnl: unrealized,
+    unrealizedPnlPercent:
+      unrealized != null && pricedCost > 0 ? (unrealized / pricedCost) * 100 : null,
     realizedPnl: realized,
+    // Cash and the account total are only meaningful for ONE account: summing
+    // balances across accounts would produce a figure no statement shows.
+    cash: accountId != null ? cashBalance(accountId).balance : null,
+    // Flagged, not hidden: a derived balance is usually right and always worth
+    // knowing about, but it must not read as verified.
+    cashIsDerived: accountId != null ? cashBalance(accountId).isDerived : null,
+    // Only when EVERY position is priced. An account total built on a market
+    // value covering one holding in three is not an account total, it is a
+    // fragment with a confident label.
+    accountTotal:
+      accountId != null && totalValue != null && unpricedCount === 0
+        ? totalValue + cashBalance(accountId).balance
+        : null,
     dividendIncome: dividends,
-    // Everything you've actually banked, versus what's still on paper.
-    totalReturn: realized + dividends + (totalValue - totalCost),
+    // Everything banked, versus what is still on paper. Unrealized is omitted
+    // rather than assumed zero when nothing is priced.
+    totalReturn: realized + dividends + (unrealized ?? 0),
   };
 }
 
 const getTransaction = db.prepare("SELECT * FROM transactions WHERE id = ? AND holder_id = ?");
+
+/**
+ * One transaction, scoped to its holder.
+ *
+ * Exported because the CSV audit needs to read a row before and after applying
+ * a correction, to report what actually changed. The holder scope is not
+ * decoration: every read path in this app is holder-scoped, and a getter that
+ * quietly is not would be the one place a stray id could cross the boundary.
+ */
+export function getTransactionById(holderId, id) {
+  return getTransaction.get(id, holderId) ?? null;
+}
 const voidTransactionStmt = db.prepare(
   `UPDATE transactions SET voided_at = datetime('now'), void_reason = ?
      WHERE id = ? AND holder_id = ? AND voided_at IS NULL`,

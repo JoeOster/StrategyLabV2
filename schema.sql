@@ -145,20 +145,39 @@ CREATE TABLE account_holders (
 
 -- A holder can have multiple brokerage accounts (Fidelity, E-Trade,
 -- Robinhood, ...). CSV imports and transactions are tied to one account.
+-- The firms accounts are held with. A TABLE, not a CHECK constraint: this is a
+-- list of companies, which is data. As an enum it was structure, and adding one
+-- meant a schema migration -- v11 exists for no reason other than allowing
+-- 'schwab' and 'tradestation'.
+CREATE TABLE brokers (
+  id          INTEGER PRIMARY KEY,
+  -- Stable machine key. MUST match the BROKER constant exported by the matching
+  -- parser in services/importers/, because importService picks a parser by this
+  -- value. Renaming a brokerage changes `name`, never `slug`.
+  slug        TEXT NOT NULL UNIQUE,
+  name        TEXT NOT NULL UNIQUE,
+  -- Whether a CSV parser exists for it. Recorded rather than inferred at import
+  -- time: an account can be held with a brokerage long before anyone writes a
+  -- parser, and the import screen should say so rather than fail at upload.
+  has_parser  INTEGER NOT NULL DEFAULT 0 CHECK (has_parser IN (0,1)),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE accounts (
-  id            INTEGER PRIMARY KEY,
-  holder_id     INTEGER NOT NULL REFERENCES account_holders(id) ON DELETE CASCADE,
-  -- Add a broker here BEFORE opening an account with them. This CHECK fails
-  -- at insert time, not at startup, so a missing broker looks like "creating
-  -- accounts is broken" rather than "the schema is stale" -- the same trap that
-  -- made ISBN lookup appear broken for weeks (see lib/schemaVersion.js v8).
-  -- schwab and tradestation are listed ahead of use: both accounts exist but
-  -- are unfunded and unused as of 2026-08-21. A CSV parser for each is still
-  -- future work; 'other' is the fallback until then.
-  broker        TEXT NOT NULL CHECK (broker IN ('fidelity','etrade','robinhood','schwab','tradestation','other')),
-  account_type  TEXT,                     -- 'brokerage', 'roth_ira', 'ira', etc.
-  nickname      TEXT,
-  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  id              INTEGER PRIMARY KEY,
+  holder_id       INTEGER NOT NULL REFERENCES account_holders(id) ON DELETE CASCADE,
+  broker_id       INTEGER NOT NULL REFERENCES brokers(id) ON DELETE RESTRICT,
+  -- The brokerage's own number for it. Nullable, because an account can be
+  -- registered before its number is to hand and a wrong number is worse than
+  -- none -- the import matches files like History_for_Account_266356256.csv on
+  -- this, so a guess would attach a statement to the wrong account.
+  --
+  -- A column rather than part of the nickname. It used to live inside strings
+  -- like "Rollover IRA (146518557)", which is data hiding in a display label.
+  account_number  TEXT,
+  account_type    TEXT,                   -- 'brokerage', 'roth_ira', 'ira', etc.
+  nickname        TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ============================================================================
@@ -299,7 +318,16 @@ CREATE TABLE watched_items (
 -- tells you history (and is what "hit me up" notifications get sent from).
 CREATE TABLE alerts (
   id                INTEGER PRIMARY KEY,
-  watched_item_id   INTEGER NOT NULL REFERENCES watched_items(id) ON DELETE CASCADE,
+  -- An alert comes from ONE of two places, never both:
+  --   watched_item_id -- a plan to get IN was reached (entry band)
+  --   plan_exit_id    -- a rung of a plan to get OUT was reached
+  -- Kept in one table rather than two because everything downstream reads
+  -- alerts as a single stream: the bell, the acknowledge endpoints, and the
+  -- Home Assistant webhook. Two tables would mean polling and merging both,
+  -- and forgetting one of them is the kind of omission this codebase has
+  -- already paid for twice.
+  watched_item_id   INTEGER REFERENCES watched_items(id) ON DELETE CASCADE,
+  plan_exit_id      INTEGER REFERENCES plan_exits(id) ON DELETE CASCADE,
   triggered_at      TEXT NOT NULL DEFAULT (datetime('now')),
   trigger_price     REAL NOT NULL,
   -- WHICH level was crossed: 'STOP' | 'BUY' | 'TAKE_PROFIT' | 'TAKE_PROFIT_2'.
@@ -313,12 +341,107 @@ CREATE TABLE alerts (
   -- guessing one from prose would invent data.
   trigger_reason    TEXT CHECK (trigger_reason IN ('STOP','BUY','TAKE_PROFIT','TAKE_PROFIT_2')),
   message           TEXT,
-  acknowledged_at   TEXT
+  -- "Stop showing me this." Says nothing about what was decided.
+  acknowledged_at   TEXT,
+  -- What was DECIDED, which is the interesting part. Declining is data, not a
+  -- dismissal: "the plan said sell at $10.75, I passed, it later fell to $9" is
+  -- the execution gap this app exists to measure, and declining an ENTRY alert
+  -- is "they called it, I passed" -- the skipped-call record that separates a
+  -- source's real hit rate from the user's own filter.
+  --
+  -- Separate from acknowledged_at rather than overloading it: silencing a
+  -- notification and deciding about it are different acts.
+  resolution        TEXT CHECK (resolution IN ('accepted','declined')),
+  resolved_at       TEXT,
+  resolution_note   TEXT,
+  -- WHY a decline happened. Two different facts pointing at different things:
+  --   'invalid'   the level was wrong; the rung should not have fired, must not
+  --               count as hit, and should stop firing. Not a judgement.
+  --   'judgement' the rung was right and the user decided otherwise. On a real
+  --               position that is the execution gap; on a paper leg it is a
+  --               finding about the RULE, since the mechanical plan and what
+  --               the user would actually do have diverged.
+  decline_kind      TEXT CHECK (decline_kind IN ('invalid','judgement')),
+  -- The transaction an accepted alert produced, when it produced one. Lets an
+  -- adherence report join plan -> alert -> what actually happened without
+  -- re-deriving the link from dates and prices.
+  resulting_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
+  -- Exactly one parent. Enforced here rather than trusted to the service layer,
+  -- because an alert belonging to neither is invisible in every query that
+  -- joins, and an alert belonging to both would be counted twice.
+  CHECK ((watched_item_id IS NOT NULL) <> (plan_exit_id IS NOT NULL))
 );
 
 -- ============================================================================
 -- SECTION 4: Transactions & CSV Imports
 -- ============================================================================
+
+-- A plan is ONE ENTRY THESIS: the reason a position was opened, and the rules
+-- for getting back out of it. It owns the exit ladder.
+--
+-- Why exits hang off this and not off a transaction or a position:
+--
+--  * Not a position (holder+security). Buying one ticker twice on two different
+--    sources' recommendations is TWO theses. A position-level ladder merges
+--    them and destroys the attribution -- which is the entire purpose of this
+--    app. transactions.source_id exists per row precisely to keep them apart.
+--  * Not a single lot. Scaling into ONE thesis with two buys a week apart is
+--    one ladder, not two; per-lot ladders would collectively oversell.
+--
+-- So: one plan, one thesis, one or more lots, one ladder. In the common case
+-- (buy once, sell all) a plan is a single lot with a single rung, and the
+-- distinction costs nothing.
+--
+-- Deliberately NOT the larger `plans` redesign discussed in V2_BACKLOG.md --
+-- this does not absorb watchlist membership or journal ideas. It owns exits and
+-- groups lots. It is, however, the natural seed for that later.
+CREATE TABLE plans (
+  id            INTEGER PRIMARY KEY,
+  holder_id     INTEGER NOT NULL REFERENCES account_holders(id) ON DELETE CASCADE,
+  security_id   INTEGER NOT NULL REFERENCES securities(id) ON DELETE RESTRICT,
+  -- Inherited from the opening trade, and both nullable: a trade can exist with
+  -- no plan, and a plan can exist with nobody to credit. A whim trade that
+  -- still carries a stop is a normal thing, not a degraded one.
+  source_id     INTEGER REFERENCES advice_sources(id) ON DELETE SET NULL,
+  strategy_id   INTEGER REFERENCES strategies(id) ON DELETE SET NULL,
+  -- 'closed' means the thesis is done -- rungs exhausted, or the position sold
+  -- out. 'cancelled' means abandoned with the position possibly still open.
+  status        TEXT NOT NULL DEFAULT 'open'
+                   CHECK (status IN ('open','closed','cancelled')),
+  notes         TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One rung of an exit ladder: "sell THIS MUCH when price is in THIS BAND".
+--
+-- Rows, not columns, because partial sells need a quantity per target and
+-- take_profit_2_low/high was already the start of a ladder that would have
+-- grown a _3 and a _4, each with its own branch in the evaluator. That
+-- accretion is what made the second take-profit unreachable in practice
+-- (docs/BUGS.md #10).
+CREATE TABLE plan_exits (
+  id            INTEGER PRIMARY KEY,
+  plan_id       INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  -- A stop is just a rung. One evaluation path, no special case.
+  kind          TEXT NOT NULL CHECK (kind IN ('TAKE_PROFIT','STOP')),
+  sequence      INTEGER NOT NULL DEFAULT 0,   -- display/ladder order
+  quantity      REAL NOT NULL CHECK (quantity > 0),
+  -- A band, same convention as watched_items' existing targets. The rung fires
+  -- when the price sits inside it, so an open end is simply NULL:
+  --   TAKE_PROFIT at 110 or better -> price_low = 110, price_high = NULL
+  --   STOP at 90 or worse          -> price_low = NULL, price_high = 90
+  -- One predicate covers both directions, which is what collapses the old
+  -- four-case triggerReason into "which rung was crossed".
+  price_low     REAL,
+  price_high    REAL,
+  status        TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending','hit','cancelled')),
+  hit_at        TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  -- An unbounded rung would fire on every price forever.
+  CHECK (price_low IS NOT NULL OR price_high IS NOT NULL)
+);
 
 CREATE TABLE transactions (
   id                  INTEGER PRIMARY KEY,
@@ -338,6 +461,12 @@ CREATE TABLE transactions (
   quantity_remaining  REAL,               -- open-lot tracking for BUYs
   linked_buy_id       INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
   import_batch_id     INTEGER REFERENCES import_batches(id) ON DELETE SET NULL,
+  -- The thesis this lot belongs to, if any. Nullable on purpose: a trade can
+  -- exist with no plan, no source and no strategy -- someone bought something
+  -- without writing anything down first, which is a normal trade rather than a
+  -- degraded one. Trades sharing a plan_id were scaled into under one thesis
+  -- and share one exit ladder.
+  plan_id             INTEGER REFERENCES plans(id) ON DELETE SET NULL,
   external_ref        TEXT,               -- broker's own txn id, or a computed fingerprint
   notes               TEXT,
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
@@ -404,6 +533,53 @@ CREATE TABLE import_raw_rows (
   created_at              TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Cash held in the account.
+--
+-- Mostly DERIVED rather than stored: a buy spends cash, a sell and a dividend
+-- add to it, and all of that already lives in `transactions`. This table holds
+-- only what crosses the account boundary -- contributions, withdrawals, and the
+-- opening balance of an account whose history predates the oldest statement on
+-- hand.
+--
+-- Without it the app could not reconcile to a broker at all: every position in
+-- the Rollover IRA matched to within thirteen dollars while the account total
+-- was out by $4,797.73, all of it sitting in the money market sweep.
+CREATE TABLE cash_transactions (
+  id                INTEGER PRIMARY KEY,
+  account_id        INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  transaction_date  TEXT NOT NULL,
+  -- DEPOSIT and OPENING_BALANCE add; WITHDRAWAL and FEE subtract. ONE rule for
+  -- direction, with no exceptions -- an ADJUSTMENT kind that could go either way
+  -- was considered and dropped, because it would have meant amount is positive
+  -- except sometimes, and two rules about sign eventually disagree.
+  --
+  -- DEPOSIT/WITHDRAWAL are real movements. OPENING_BALANCE is the honest way to
+  -- start an account whose history begins before the oldest statement you have:
+  -- it says "this much was already here" rather than inventing deposits that
+  -- cannot be evidenced.
+  kind              TEXT NOT NULL
+                       CHECK (kind IN ('DEPOSIT','WITHDRAWAL','OPENING_BALANCE','FEE')),
+  -- Always positive. Direction comes from `kind`, the same convention
+  -- transactions uses for BUY/SELL -- a signed amount plus a kind gives two
+  -- sources of truth about direction and they eventually disagree.
+  amount            REAL NOT NULL CHECK (amount > 0),
+  external_ref      TEXT,
+  notes             TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  voided_at         TEXT,
+  void_reason       TEXT
+);
+
+CREATE INDEX idx_cash_account ON cash_transactions(account_id, transaction_date);
+
+-- Same partial-unique convention as transactions: re-importing a statement
+-- that contains a movement already recorded must be a no-op, and a voided row
+-- must not keep its slot.
+CREATE UNIQUE INDEX idx_cash_external_ref
+  ON cash_transactions (account_id, external_ref)
+  WHERE voided_at IS NULL;
+
+
 -- ============================================================================
 -- SECTION 5: Settings
 -- ============================================================================
@@ -429,6 +605,17 @@ CREATE TABLE app_settings (
 -- Uniqueness on symbol alone matches how the app genuinely behaves. It forgoes
 -- listing one ticker on two exchanges, which nothing here supports anyway:
 -- there is one lookup path and it is by symbol. (BUG 6)
+CREATE INDEX idx_accounts_broker              ON accounts(broker_id);
+CREATE INDEX idx_accounts_number              ON accounts(account_number);
+CREATE INDEX idx_transactions_plan            ON transactions(plan_id);
+-- The evaluator's hot query is "every pending rung of an open plan".
+CREATE INDEX idx_plan_exits_pending
+  ON plan_exits (plan_id) WHERE status = 'pending';
+CREATE INDEX idx_plans_open ON plans (holder_id) WHERE status = 'open';
+CREATE INDEX idx_alerts_plan_exit ON alerts(plan_exit_id);
+-- The notification queue's hot query: what still needs a decision.
+CREATE INDEX idx_alerts_unresolved ON alerts (triggered_at) WHERE resolution IS NULL;
+
 CREATE UNIQUE INDEX idx_securities_symbol    ON securities(symbol);
 CREATE INDEX idx_historical_prices_security   ON historical_prices(security_id, date);
 CREATE INDEX idx_dividends_security           ON dividends(security_id);
@@ -464,4 +651,10 @@ CREATE TRIGGER trg_app_settings_updated_at
 AFTER UPDATE ON app_settings
 BEGIN
   UPDATE app_settings SET updated_at = datetime('now') WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER trg_plans_updated_at
+AFTER UPDATE ON plans
+BEGIN
+  UPDATE plans SET updated_at = datetime('now') WHERE id = NEW.id;
 END;

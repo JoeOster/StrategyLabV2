@@ -685,6 +685,30 @@ only its owner moved.
   tracking" via the `order_type = 'WATCH'` null-object). The minimal `plans`
   table above is deliberately NOT that -- it owns exits and groups lots, nothing
   more. It is, however, the natural seed for the larger version later.
+**ANSWERED 2026-08-21.** Joe: *"these are monitoring of discussion posts, so
+completely manual unless an api is available and there wasnt when i looked
+before."* So signals exist and are worth recording, but every one is typed by
+hand.
+
+Three consequences:
+
+1. **The paste-to-parse skill is not optional, it is the feature.** A form per
+   call will not survive a busy channel. Paste the message, get a draft plan,
+   accept or discard. Build that WITH the signals table, not after it.
+2. **The calls Joe skips are the ones that will not get logged.** Manual entry
+   is biased toward what you acted on, because that is when you are already in
+   the app. If that happens, source-level numbers measure his filter rather
+   than the source -- constraint 2 above, arriving through the back door. Make
+   skipping cost one paste and one click, and treat any source hit-rate as
+   suspect until skipped calls are genuinely present.
+3. **Worth re-checking the API question, specifically for Telegram.** It has
+   two doors and the obvious one is the wrong one: a BOT can read a group it
+   has been added to (needs admin cooperation), while MTProto client libraries
+   let a user account read channels it already follows -- closer to what is
+   wanted, but that is automating your own account and sits in a greyer area of
+   their terms. Discord splits the same way. Unverified against Joe's actual
+   groups; a lead, not a plan.
+
 - **A `signals` table** recording what a source said and when, independent of
   whether it was acted on. Would make Joe's Telegram example measurable (*"the
   sell signal goes out for $10.75 and I miss it"* -- there is nowhere to record
@@ -692,6 +716,46 @@ only its owner moved.
   no plan is exactly "they called it, I passed". **Open question, unanswered:**
   whether Joe routinely receives and would log such signals. Do not build until
   answered -- an unfilled table is worse than no table.
+
+## FIFO sells ignore plan boundaries (found 2026-08-21 while building exits)
+
+Surfaced by a test that failed for the right reason. `recordSell` allocates
+FIFO across **every open lot the holder has in that security**, oldest first.
+It knows nothing about plans.
+
+So if two theses hold the same ticker -- one from a Telegram call, one from a
+book pattern -- selling shares attributed to thesis A can silently draw down
+thesis B's lot instead, because B's lot happens to be older. The position
+maths stays correct; the *attribution* does not. And attribution is the point
+of the app.
+
+It also breaks the ladder's own accounting: a plan can report shares it no
+longer effectively owns, so `planRemainingQuantity` overstates and the oversell
+guard under-protects.
+
+**Not a bug in the FIFO engine.** FIFO is the correct default for cost basis
+and is what a broker does. The gap is that nothing tells it which thesis a
+sale belongs to.
+
+**The tool already exists.** `recordSell` accepts `lotId` for specific-lot
+selling. A plan-aware sell would constrain allocation to the plan's own lots --
+FIFO *within* the thesis rather than across the account.
+
+Options, roughly in order of increasing honesty and cost:
+
+1. **Do nothing, document it.** Fine while one thesis per ticker is the norm,
+   which it is today. Silently wrong the first time it is not.
+2. **Plan-scoped sells.** Selling against a plan allocates only within that
+   plan's lots. Correct for attribution; diverges from broker FIFO for cost
+   basis, which matters if these numbers are ever compared to a 1099.
+3. **Warn at sell time** when the holder has open lots in that security under
+   more than one plan, and ask which thesis the sale belongs to. Keeps FIFO
+   honest and puts the judgement where it belongs.
+
+(3) fits the app's character best -- it is a journal that asks rather than
+assumes -- but it is a UI decision, so it is Joe's call. Until then the test
+suite pins the current behaviour by using a dedicated ticker in section 13d,
+with a comment saying why.
 
 ## Vocabulary and the trade/plan/source model (Joe, 2026-08-21)
 
@@ -817,7 +881,20 @@ Open questions for the build, not to be guessed:
 - If the paper leg is 100 shares and only 50 were really bought, the legs
   diverge in quantity as well as price. Is that a partial promotion, or two
   independent positions?
-- Does the paper leg auto-sell when its take-profit is reached, or only record
+- **ANSWERED 2026-08-21: the paper leg auto-sells.** Joe: *"yes as this is just
+  set for an ideal scenario."* So the paper leg is a mechanical simulation of
+  the plan followed perfectly, and the real leg is what actually happened. The
+  divergence between them IS the measurement.
+
+  Two things follow. The paper leg must be rigorously excluded from real totals
+  -- `is_paper_trade` already partitions every query, so the machinery exists,
+  but an auto-generated sale is the easiest thing to leak. And an auto-sell is
+  the ONLY sale this app ever creates by itself: everywhere else a rung fires
+  an alert and a human records what really happened. Worth keeping that
+  boundary explicit in the code, because the reasoning for it is the whole
+  design.
+
+- (superseded) Does the paper leg auto-sell when its take-profit is reached, or only record
   that the level was hit? Auto-selling makes "optimal" concrete; recording
   keeps the paper tab honest about being a log rather than a simulator.
 - When does a promoted paper position stop being shown as open?
@@ -841,7 +918,48 @@ dialog (`Paper Trade > + Log Paper Trade`):
 **Question to settle before building #2**, because two readings lead to very
 different work:
 
-**Joe clarified (2026-08-21):** "limit buy is execute at x dollars, not at
+**ANSWERED 2026-08-21.** Joe: *"limit buy - these are always pending, probably
+needs a confirmation of price, same goes for limit sell."*
+
+So a limit order is PENDING until the price is reached, and when it is, the
+actual fill is confirmed by hand rather than assumed to equal the limit. That
+gap -- limit $92, filled at $92.05 -- is entry slippage, the other half of the
+measurement the exit ladder provides.
+
+### This machinery already exists. It is in the wrong tab.
+
+A pending buy at a target price, which alerts when reached and then collects a
+real fill, is exactly a Journal idea of type BUY_LIMIT. `executeJournalIdea`
+already asks for the actual fill rather than reusing the target -- deliberately,
+per its own comment, because a real fill rarely matches. It is built and
+tested.
+
+What is missing is that **Log Paper Trade and Log Order only offer "I already
+bought this"**, so the pending case has nowhere to go from those tabs and would
+otherwise be reinvented beside the one that works.
+
+The model is then symmetric, which is a good sign it is right:
+
+| | trigger | user confirms | measures |
+|---|---|---|---|
+| entry | limit price reached | actual fill price | entry slippage |
+| exit | rung reached | actual sale | exit slippage |
+
+The exit half shipped 2026-08-21 (plans + plan_exits). The entry half exists
+but is reachable only through Journal.
+
+**So the work is exposure, not construction:** the trade dialogs gain a
+pending mode that creates the watched_item rather than a transaction, and the
+confirm-fill step becomes reachable from Orders and Paper Trade instead of
+living only behind Journal's Execute button.
+
+A standalone limit SELL needs nothing new -- it is a one-rung ladder.
+
+This also settles the question raised during the walkthrough about whether
+Journal ideas and paper trades were converging. For the pending case they are
+the same object, and should not be built twice.
+
+**Superseded (kept for the reasoning):** "limit buy is execute at x dollars, not at
 current price necessarily." So the price typed is a TRIGGER, not a fill that
 has already happened. That rules out Reading A below. What is still open is
 whether the position exists immediately at that price, or not until the market
@@ -1019,3 +1137,34 @@ Open questions for the walkthrough, not to be answered by guessing:
   pipeline -- see "Backtesting / AI trade evaluation — multi-agent design"
   above for the researcher/backtester/auditor/chart-agent breakdown and
   suggested build order.
+
+## Import non-trade cash movements
+
+Broker exports carry more than trades. Robinhood's file alone has 48 rows the
+importer parses past: `RTP` and `ACH` transfers, `GOLD` subscription fees,
+`INT` interest, `SLIP` stock-lending income, `FUTSWP` futures sweeps. Fidelity
+and E*TRADE have their own equivalents.
+
+These map cleanly onto `cash_transactions`, which already exists and already
+has the right kinds -- `DEPOSIT`, `WITHDRAWAL`, `FEE`. The mapping is the easy
+part; the reason this is not done yet is that it interacts with the opening
+balance in a way that has to be got right.
+
+`OPENING_BALANCE` is a DATED baseline: only movements on or after its date
+count. Every non-trade row in the current exports predates the 2026-08-21
+baselines, so importing them today would change no balance at all. The moment
+an import covers a period after a baseline, though, an unstaged deposit means
+cash silently drifts from the broker's figure -- and cash drifting quietly is
+precisely the failure this app keeps having to correct after the fact.
+
+So the work is:
+
+1. Extend each parser to emit non-trade rows with a `cashKind`.
+2. Stage them alongside trades so the preview shows them and they can be
+   approved or rejected as a unit.
+3. Skip any row dated before the account's opening balance, and say so in the
+   preview rather than dropping it quietly -- the baseline already accounts
+   for it, and importing it would double-count.
+
+Worth doing before the next monthly import that covers new ground, not urgent
+for the historical backfill that is already reconciled.

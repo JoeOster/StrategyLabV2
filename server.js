@@ -43,6 +43,9 @@ const journal = await import("./services/journalService.js");
 const bookLookup = await import("./services/bookLookupService.js");
 const accounts = await import("./services/accountsService.js");
 const imports = await import("./services/importService.js");
+const plans = await import("./services/plansService.js");
+const cash = await import("./services/cashService.js");
+const alertsSvc = await import("./services/alertsService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -195,6 +198,33 @@ app.post("/api/watched-items/delete", (req, res) => {
 app.get("/api/alerts", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   res.json(listUnacknowledgedAlerts(holder.id));
+});
+
+// The notifications queue. Distinct from the bell, which only lists what has
+// not been silenced: this is every alert with what was DECIDED about it.
+app.get("/api/notifications", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  res.json(
+    alertsSvc.listAlerts(holder.id, {
+      unresolvedOnly: req.query.pending === "1",
+      limit: Number(req.query.limit) || 200,
+    }),
+  );
+});
+
+// Body: { resolution: 'accepted'|'declined', declineKind?, note?, fillPrice?, fillDate? }
+//
+// Accepting a PAPER exit rung records the sale at the price the rung fired at --
+// that is the plan followed mechanically. Accepting a REAL one requires the
+// price actually got: defaulting it to the trigger price would record the ideal
+// as though it were real and erase the very gap being measured.
+app.post("/api/notifications/:id/resolve", async (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(await alertsSvc.resolveAlert(holder.id, Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.post("/api/alerts/:id/acknowledge", (req, res) => {
@@ -375,9 +405,66 @@ app.post("/api/sources/:id/delete", (req, res) => {
 // is what tells you what span to download next, and should be presented as a
 // point to start *before*, since overlapping exports deduplicate safely and a
 // gap silently loses transactions.
+// --- Brokerages ------------------------------------------------------------
+// A table since v15, not a CHECK constraint: opening an account somewhere new
+// is data, and as an enum it was a schema migration (v11 existed only to add
+// two of them).
+
+app.get("/api/brokers", (req, res) => {
+  res.json(accounts.listBrokers());
+});
+
+app.post("/api/brokers", (req, res) => {
+  try {
+    res.status(201).json(accounts.createBroker(req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Rename only. The slug is what importService selects a parser by, so it is
+// deliberately not editable -- renaming the label must not move the wiring.
+app.patch("/api/brokers/:id", (req, res) => {
+  try {
+    res.json(accounts.updateBroker(Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get("/api/accounts", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   res.json(accounts.listAccounts(holder.id));
+});
+
+// Which account a statement filename belongs to, or null when ambiguous.
+// Ambiguity must not be guessed at: attaching a statement to the wrong account
+// misfiles every trade in it.
+// --- Cash --------------------------------------------------------------
+// Cash is mostly derived from the trade ledger. These routes cover only what
+// crosses the account boundary: contributions, withdrawals, and the opening
+// balance of an account whose history predates the statements to hand.
+
+app.get("/api/accounts/:id/cash", (req, res) => {
+  const accountId = Number(req.params.id);
+  res.json({
+    ...cash.cashBalance(accountId),
+    movements: cash.listCashTransactions(accountId),
+  });
+});
+
+// Body: { kind, amount, transactionDate?, notes? }
+app.post("/api/accounts/:id/cash", (req, res) => {
+  try {
+    res.status(201).json(cash.recordCash({ accountId: Number(req.params.id), ...(req.body || {}) }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get("/api/accounts/match", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  res.json(accounts.matchAccountByFilename(holder.id, String(req.query.filename || "")) ?? {});
 });
 
 app.post("/api/accounts", (req, res) => {
@@ -393,6 +480,86 @@ app.put("/api/accounts/:id", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   try {
     res.json(accounts.updateAccount(holder.id, Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// --- Exit plans ------------------------------------------------------------
+// A plan is one entry thesis covering one or more lots, and it owns the exit
+// ladder. A rung firing raises an alert and never sells -- this app is a
+// journal, and the gap between what the rung said and what was actually done
+// is the measurement, so closing it automatically would erase it.
+
+app.get("/api/plans", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const status = req.query.status ? String(req.query.status) : null;
+  res.json(plans.listPlans(holder.id, { status }));
+});
+
+app.get("/api/plans/:id", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(plans.getPlan(holder.id, Number(req.params.id)));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+// Body: { tradeId, notes? }. The plan inherits source/strategy from the trade
+// rather than asking again -- the thesis is why the trade was made, and the
+// trade already records it.
+app.post("/api/plans", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const { tradeId, notes } = req.body || {};
+  if (!tradeId) return res.status(400).json({ error: "tradeId is required" });
+  try {
+    // get-or-create: opening the ladder for a trade that already has one is
+    // not an error, and the dialog should not have to look it up first.
+    res.status(201).json(plans.getOrCreatePlanForTrade(holder.id, Number(tradeId), { notes }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Scaling into the same thesis. Body: { tradeId }.
+app.post("/api/plans/:id/trades", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const { tradeId } = req.body || {};
+  if (!tradeId) return res.status(400).json({ error: "tradeId is required" });
+  try {
+    res.json(plans.attachTradeToPlan(holder.id, Number(req.params.id), Number(tradeId)));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Body: { kind, quantity, priceLow?, priceHigh?, sequence? }
+// A stop is an ordinary rung: kind STOP with priceHigh set.
+app.post("/api/plans/:id/exits", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.status(201).json(plans.addExit(holder.id, Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Cancelled rather than deleted: a rung that has fired is part of the record,
+// and the service refuses to cancel one for that reason.
+app.post("/api/plans/:id/exits/:exitId/cancel", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(plans.cancelExit(holder.id, Number(req.params.id), Number(req.params.exitId)));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/trades/:id/detach-plan", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(plans.detachTradeFromPlan(holder.id, Number(req.params.id)));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -427,6 +594,34 @@ app.get("/api/imports/:id", (req, res) => {
     res.json(imports.getBatchPreview(Number(req.params.id)));
   } catch (err) {
     res.status(404).json({ error: err.message });
+  }
+});
+
+// The rows the broker disagrees with -- the point of a monthly typo audit.
+app.get("/api/imports/:id/discrepancies", (req, res) => {
+  try {
+    res.json(imports.listDiscrepancies(Number(req.params.id)));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+// Body: { fields?: string[] } -- omit to apply every difference, or name a
+// subset to take the price but not the date, which is the common case when a
+// broker reports settlement date rather than trade date.
+//
+// One row at a time and explicitly, never in bulk: silently rewriting history
+// to agree with a CSV is how a journal stops being trustworthy.
+app.post("/api/imports/:id/rows/:rowId/correct", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(
+      imports.applyCorrection(holder.id, Number(req.params.id), Number(req.params.rowId), {
+        fields: Array.isArray(req.body?.fields) ? req.body.fields : null,
+      }),
+    );
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -638,9 +833,12 @@ app.get("/api/summary", (req, res) => {
 app.get("/api/positions", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   const isPaperTrade = req.query.paper === "1";
+  // Orders only. Paper trades are not account-dependent -- they carry no
+  // account_id at all -- so the Paper Trade view never sends this.
+  const accountId = req.query.accountId ? Number(req.query.accountId) : null;
   res.json({
-    positions: txns.listOpenPositions(holder.id, { isPaperTrade }),
-    summary: txns.getPortfolioSummary(holder.id, { isPaperTrade }),
+    positions: txns.listOpenPositions(holder.id, { isPaperTrade, accountId }),
+    summary: txns.getPortfolioSummary(holder.id, { isPaperTrade, accountId }),
   });
 });
 
@@ -655,6 +853,7 @@ app.get("/api/transactions", (req, res) => {
       type: req.query.type,
       includeVoided: req.query.includeVoided === "1",
       needsReviewOnly: req.query.needsReview === "1",
+      accountId: req.query.accountId ? Number(req.query.accountId) : null,
     }),
   );
 });
