@@ -14,6 +14,7 @@
 import db, { withTransaction } from "../lib/db.js";
 import { getOrCreateSecurity } from "./priceService.js";
 import { TRANSFER_OUT_REASON } from "../lib/constants.js";
+import { cashBalance } from "./cashService.js";
 
 const insertTransaction = db.prepare(`
   INSERT INTO transactions (
@@ -595,6 +596,13 @@ export function getPortfolioSummary(holderId, { isPaperTrade = false, accountId 
     unrealizedPnlPercent:
       unrealized != null && pricedCost > 0 ? (unrealized / pricedCost) * 100 : null,
     realizedPnl: realized,
+    // Cash and the account total are only meaningful for ONE account: summing
+    // balances across accounts would produce a figure no statement shows.
+    cash: accountId != null ? cashBalance(accountId).balance : null,
+    accountTotal:
+      accountId != null && totalValue != null
+        ? totalValue + cashBalance(accountId).balance
+        : null,
     dividendIncome: dividends,
     // Everything banked, versus what is still on paper. Unrealized is omitted
     // rather than assumed zero when nothing is priced.

@@ -258,6 +258,14 @@ export function renderSummary(s) {
     <div class="summary-item"><span class="summary-label">Cost Basis</span><span class="summary-value">${money(s.totalCost)}</span></div>
     <div class="summary-item"><span class="summary-label">Market Value</span>${valueCell}</div>
     <div class="summary-item"><span class="summary-label" title="On current holdings only — this is the figure comparable to a broker’s total gain/loss.">Unrealized</span>${unrealCell}</div>
+    ${
+      // Cash and account total only appear for a single account: summing
+      // balances across accounts gives a figure no statement shows.
+      s.cash == null
+        ? ""
+        : `<div class="summary-item"><span class="summary-label">Cash</span><span class="summary-value">${money(s.cash)}</span></div>` +
+          `<div class="summary-item"><span class="summary-label" title="Positions plus cash — the figure comparable to a broker’s account total.">Account Total</span><span class="summary-value">${money(s.accountTotal)}</span></div>`
+    }
     <div class="summary-item"><span class="summary-label">Realized</span><span class="summary-value ${realClass}">${signedMoney(s.realizedPnl)}</span></div>
     <div class="summary-item"><span class="summary-label">Dividends</span><span class="summary-value">${money(s.dividendIncome)}</span></div>
     <div class="summary-item"><span class="summary-label" title="Realized + dividends + unrealized. A broker’s “total gain/loss” is usually unrealized only, so these will not match.">Total Return</span><span class="summary-value ${totalClass}">${signedMoney(s.totalReturn)}${

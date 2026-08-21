@@ -14,7 +14,7 @@
 //    movement generates a REINVESTMENT/DIVIDEND pair against it. Importing
 //    those would invent a holding that does not exist.
 import { parseCsv, num, toIsoDate, fingerprint } from "./csv.js";
-import { TRANSFER_OUT_REASON } from "../../lib/constants.js";
+import { TRANSFER_OUT_REASON, TRANSFER_IN_REASON } from "../../lib/constants.js";
 
 export const BROKER = "fidelity";
 
@@ -104,7 +104,7 @@ export function parse(text) {
       // sale, so this is staged for a human rather than reconciled.
       type = "BUY";
       needsReview = true;
-      reviewReason = "Transferred in from another account -- cost basis unknown (Amount is transfer value, not purchase price).";
+      reviewReason = TRANSFER_IN_REASON;
     } else { skipped.unknownAction++; continue; }
 
     // DIVIDEND is exempt on purpose. A dividend, a fund capital-gain

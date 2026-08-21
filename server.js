@@ -44,6 +44,7 @@ const bookLookup = await import("./services/bookLookupService.js");
 const accounts = await import("./services/accountsService.js");
 const imports = await import("./services/importService.js");
 const plans = await import("./services/plansService.js");
+const cash = await import("./services/cashService.js");
 const alertsSvc = await import("./services/alertsService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -439,6 +440,28 @@ app.get("/api/accounts", (req, res) => {
 // Which account a statement filename belongs to, or null when ambiguous.
 // Ambiguity must not be guessed at: attaching a statement to the wrong account
 // misfiles every trade in it.
+// --- Cash --------------------------------------------------------------
+// Cash is mostly derived from the trade ledger. These routes cover only what
+// crosses the account boundary: contributions, withdrawals, and the opening
+// balance of an account whose history predates the statements to hand.
+
+app.get("/api/accounts/:id/cash", (req, res) => {
+  const accountId = Number(req.params.id);
+  res.json({
+    ...cash.cashBalance(accountId),
+    movements: cash.listCashTransactions(accountId),
+  });
+});
+
+// Body: { kind, amount, transactionDate?, notes? }
+app.post("/api/accounts/:id/cash", (req, res) => {
+  try {
+    res.status(201).json(cash.recordCash({ accountId: Number(req.params.id), ...(req.body || {}) }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get("/api/accounts/match", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   res.json(accounts.matchAccountByFilename(holder.id, String(req.query.filename || "")) ?? {});
