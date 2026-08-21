@@ -512,6 +512,50 @@ separate project, not StrategyLabV2 code:
 
 ---
 
+## AI assistance across the app -- standing directive (2026-08-21)
+
+Joe: Claude/Gemini assistance is wanted broadly through Strategy Lab, so
+opportunities for skills, agents and artifacts should be raised as they are
+noticed rather than waiting to be asked for.
+
+A working principle has already fallen out of the CSV import discussion and is
+worth applying generally (full reasoning in `docs/IMPORTS.md`):
+
+**Let the model produce configuration and judgement, not data.** Anything with
+a single correct answer -- parsing, arithmetic, position maths -- stays
+deterministic, because a plausible wrong number is silent and permanent. The
+model is worth reaching for where the output is a *decision a human reviews*, or
+a *config that gets checked in and reused*, rather than figures that flow
+straight into the ledger.
+
+Two already decided, see `docs/IMPORTS.md`:
+
+- **Unknown-broker column mapping skill** -- reads ~20 sample rows from a
+  broker nobody has written a parser for, emits a column mapping that the
+  deterministic parser then executes forever. Concrete near-term need:
+  TradeStation and thinkorswim accounts exist but are unfunded.
+- **Import discrepancy advisor** -- explains `needs_review` rows in the import
+  screen. Advisory only; it never writes a transaction.
+
+Noticed and not yet scoped:
+
+- **Reconciliation assistant for `needs_review` rows.** Joe is tracking down
+  older Fidelity records that current exports cannot reach. When those arrive,
+  matching them against flagged rows -- transferred-in lots with extrapolated
+  cost basis, sells whose buys predate an export window -- is exactly the
+  fuzzy, one-off, judgement-heavy work a model is good at and a rule is bad at.
+  The flag columns (schema v10) already make the outstanding set queryable.
+- **Journal adherence review.** Distinct from the backtesting and forward-test
+  work above, which asks whether a strategy is any good. This asks a different
+  question: *did you actually follow it?* Reading the journal and the trades
+  together and reporting where they diverge is reasoning over the user's own
+  writing, which is low-risk and squarely a strength.
+
+A caution on artifacts specifically: portfolio and performance reports are an
+obvious fit for the format, but this is real financial data. Artifacts are
+private by default, though they are still hosted -- so treat a published report
+as a deliberate decision each time, not a default output.
+
 ## Other deferred items
 
 - **CSV import** (`import_batches` → `import_raw_rows` → reconciled

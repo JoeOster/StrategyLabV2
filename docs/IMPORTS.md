@@ -167,6 +167,52 @@ a sell whose buy predates the export window is dropped by the importer, but if
 that buy was entered manually it will be found, and the sell becomes `new`
 rather than being discarded.
 
+## Where Claude fits, and where it must not (decided 2026-08-21)
+
+Raised by Joe: should the CSV go to a script or to Claude? Settled as a split,
+because the two halves of the problem have different natures.
+
+**Parsing stays deterministic. The numbers must never pass through a language
+model.** Reading a CSV has a right answer. A model that transcribes 974.33 as
+947.33 produces something plausible, silent and permanent, and nothing
+downstream catches it. The script returns the same output for the same file
+every time, which is worth more than flexibility in a financial record. Every
+hard problem hit while building these parsers was a *format* problem --
+multi-line quoted fields, `--` nulls, TRANSFERRED TO reducing a position --
+each solved once and staying solved. Those are not things to re-reason per
+import.
+
+**A skill earns its place on unknown broker formats.** TradeStation and
+thinkorswim accounts already exist (unfunded as of 2026-08-21) and each will
+need a parser. Rather than hand-writing one per broker, Claude reads ~20 sample
+rows and emits a **column mapping**, which the deterministic parser then
+executes forever after.
+
+That inverts the risk deliberately: the model's output is a config that can be
+read, checked in and diffed -- not per-row numbers that have to be trusted. A
+wrong mapping is wrong visibly and once, rather than silently on row 340 of a
+file nobody re-reads. It is also the same shape `V2_BACKLOG.md` already
+anticipates for a Fidelity browser-sync: another producer feeding
+`import_raw_rows`, with the consumption side indifferent to who wrote the row.
+
+**Claude advises on discrepancies, inside the import screen.** `needs_review`
+rows are genuine judgment -- "ledger 56.69, broker 59.66" could be a typo, a
+different execution price, or a partial fill averaged differently. Explaining
+that is worth a conversation, and `import_raw_rows` already holds the raw JSON,
+the classification and the differences for it to reason over.
+
+**Advisory only.** It explains and recommends; it never writes a transaction.
+The same boundary already drawn for voice: the model reasons, the human commits.
+
+**Not this:** sending a 500-row CSV to a model on every import. Slow, costly,
+and it routes every number through a probabilistic layer to solve something a
+fixed column mapping already solves for free.
+
+**Security note.** A broker CSV is externally-authored content, so
+`becca-orchestrator-voice-delegation.md`'s hard constraint applies: never
+combine untrusted content with actuation in one session. A skill that reads
+broker files must not also hold write access to the ledger.
+
 ## Remaining work
 
 1. **Accounts.** There is no `/api/accounts` route and nothing anywhere inserts
