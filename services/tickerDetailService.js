@@ -36,7 +36,7 @@ const getLotsForSymbol = db.prepare(`
   FROM transactions t
   LEFT JOIN advice_sources src ON src.id = t.source_id
   WHERE t.holder_id = ? AND t.security_id = ?
-    AND t.transaction_type = 'BUY' AND t.quantity_remaining > 0
+    AND t.transaction_type = 'BUY' AND t.quantity_remaining > 0 AND t.voided_at IS NULL
   ORDER BY t.transaction_date
 `);
 
@@ -45,7 +45,7 @@ const getTradeHistoryForSymbol = db.prepare(`
          t.fees, t.cost_basis, t.linked_buy_id, src.name AS source_name
   FROM transactions t
   LEFT JOIN advice_sources src ON src.id = t.source_id
-  WHERE t.holder_id = ? AND t.security_id = ?
+  WHERE t.holder_id = ? AND t.security_id = ? AND t.voided_at IS NULL
   ORDER BY t.transaction_date DESC, t.id DESC
 `);
 

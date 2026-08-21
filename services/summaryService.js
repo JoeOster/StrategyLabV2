@@ -38,6 +38,7 @@ const quoteFreshness = db.prepare(`
   WHERE q.security_id IN (
     SELECT security_id FROM transactions
     WHERE holder_id = ? AND transaction_type = 'BUY' AND quantity_remaining > 0
+      AND voided_at IS NULL
     UNION
     SELECT security_id FROM watched_items
     WHERE holder_id = ? AND status IN ('WATCHING','ALERT')

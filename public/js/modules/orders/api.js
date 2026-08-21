@@ -33,8 +33,13 @@ export const updateTransaction = (id, payload) =>
     body: JSON.stringify(payload),
   }).then(handleResponse);
 
-export const deleteTransaction = (id) =>
-  fetch(`/api/transactions/${id}/delete`, { method: "POST" }).then(handleResponse);
+/** Orders are voided, never deleted -- the row survives for the audit trail. */
+export const voidTransaction = (id, reason = null) =>
+  fetch(`/api/transactions/${id}/void`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  }).then(handleResponse);
 
 export const fetchSources = () => fetch("/api/sources").then(handleResponse);
 

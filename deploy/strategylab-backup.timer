@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily StrategyLab V2 DB backup to the NAS
+
+[Timer]
+# 09:30 UTC. Chosen to land ~50 min BEFORE the NAS's Hyper Backup job
+# (/volume1/brain -> Google Drive, ~10:20-11:20 UTC depending on DST), so each
+# night's backup gets carried offsite the same morning rather than waiting a day.
+# No collision with existing user timers -- nearest are ngn-generate (~05:09)
+# and launchpadlib-cache-clean (18:57).
+OnCalendar=*-*-* 09:30:00
+# The NUC is not always up; run on next boot if a scheduled slot was missed.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

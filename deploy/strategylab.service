@@ -1,0 +1,16 @@
+[Unit]
+Description=StrategyLab V2 (trading dashboard / watchlist / journal, port 3113)
+After=network.target
+
+[Service]
+Type=simple
+# Load-bearing: lib/db.js calls process.loadEnvFile(), which reads .env from
+# the CWD, and DB_PATH in .env is relative (./data/...). A wrong WorkingDirectory
+# silently yields no Finnhub key and a brand-new empty DB somewhere else.
+WorkingDirectory=%h/StrategyLabV2
+ExecStart=/usr/bin/node %h/StrategyLabV2/server.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

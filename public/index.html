@@ -26,7 +26,15 @@
       <div class="header-actions" id="watchlist-actions">
         <button id="refresh-history-btn" type="button">Refresh History</button>
         <button id="refresh-btn" type="button">Refresh Prices</button>
-        <button id="add-ticker-btn" type="button" class="primary">+ Add Ticker</button>
+      </div>
+      <!-- Global: available on every view, unlike #watchlist-actions above. -->
+      <div class="add-menu" id="global-add">
+        <button type="button" id="global-add-btn" class="primary"
+                aria-haspopup="true" aria-expanded="false" aria-controls="global-add-menu">+ Add ▾</button>
+        <div class="add-menu-list" id="global-add-menu" role="menu" hidden>
+          <button type="button" role="menuitem" data-add="watchlist">Ticker to Watchlist</button>
+          <button type="button" role="menuitem" data-add="order">Log Order</button>
+        </div>
       </div>
     </div>
   </header>
@@ -82,6 +90,12 @@
 
     <main>
       <div id="status-banner" class="status-banner" hidden></div>
+      <div class="panel-head">
+        <h2>Watchlist</h2>
+        <div>
+          <button type="button" id="add-ticker-btn" class="primary">+ Add Ticker</button>
+        </div>
+      </div>
       <div class="table-toolbar">
         <input id="filter-input" type="search" placeholder="Filter by symbol, name, notes, status…" autocomplete="off" />
         <select id="type-filter">
@@ -147,6 +161,9 @@
           </select>
           <input id="history-start" type="date" title="From date" />
           <input id="history-end" type="date" title="To date" />
+          <label class="inline-check" title="Voided orders are kept for the audit trail but never count toward positions">
+            <input type="checkbox" id="history-show-voided" /> Show voided
+          </label>
           <button type="button" id="history-clear-btn">Clear</button>
           <button type="button" id="history-columns-btn" title="Show, hide, or reorder columns">⚙ Columns</button>
           <span id="history-count" class="row-count"></span>
@@ -473,7 +490,7 @@
       </label>
       <p id="order-hint" class="panel-hint"></p>
       <div class="form-actions">
-        <button type="button" id="order-delete-btn" class="danger" hidden>Delete</button>
+        <button type="button" id="order-delete-btn" class="danger" hidden>Void order</button>
         <span class="form-actions-spacer"></span>
         <button type="button" id="order-cancel-btn">Cancel</button>
         <button type="submit" class="primary">Save</button>
@@ -543,7 +560,7 @@
       </label>
       <p id="paper-order-hint" class="panel-hint"></p>
       <div class="form-actions">
-        <button type="button" id="paper-order-delete-btn" class="danger" hidden>Delete</button>
+        <button type="button" id="paper-order-delete-btn" class="danger" hidden>Void order</button>
         <span class="form-actions-spacer"></span>
         <button type="button" id="paper-order-cancel-btn">Cancel</button>
         <button type="submit" class="primary">Save</button>

@@ -1,6 +1,6 @@
-import { initializeWatchlistModule, reloadWatchlistView } from "./modules/watchlist/index.js";
+import { initializeWatchlistModule, reloadWatchlistView, openAddTickerDialog } from "./modules/watchlist/index.js";
 import { initializeSettingsModule, refreshSettingsView } from "./modules/settings/index.js";
-import { initializeOrdersModule, reloadOrdersView } from "./modules/orders/index.js";
+import { initializeOrdersModule, reloadOrdersView, openOrderDialog } from "./modules/orders/index.js";
 import { initializeDashboardModule, reloadDashboardView } from "./modules/dashboard/index.js";
 import { initializeJournalModule, reloadJournalView } from "./modules/journal/index.js";
 import { initializePaperTradeModule, reloadPaperTradeView } from "./modules/papertrade/index.js";
@@ -27,6 +27,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         ]),
     });
     setupViewSwitching();
+    setupGlobalAddMenu();
     await applyAppTitle();
   } catch (err) {
     console.error("Failed to initialize app:", err);
@@ -70,6 +71,48 @@ function setupViewSwitching() {
       else await reloadWatchlistView();
     });
   }
+}
+
+
+// The header's add control is global -- it works on every view, unlike
+// #watchlist-actions which main.js hides off the Watchlist. Each item defers to
+// the owning module's own opener so there is one code path per dialog.
+function setupGlobalAddMenu() {
+  const wrap = document.getElementById("global-add");
+  const btn = document.getElementById("global-add-btn");
+  const menu = document.getElementById("global-add-menu");
+  if (!wrap || !btn || !menu) return;
+
+  const close = () => {
+    menu.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+  };
+  const open = () => {
+    menu.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+  };
+
+  btn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (menu.hidden) open();
+    else close();
+  });
+
+  menu.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-add]");
+    if (!item) return;
+    close();
+    if (item.dataset.add === "watchlist") openAddTickerDialog();
+    else openOrderDialog();
+  });
+
+  // Without these the menu strands itself open when you click elsewhere.
+  document.addEventListener("click", (event) => {
+    if (!wrap.contains(event.target)) close();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") close();
+  });
 }
 
 async function applyAppTitle() {

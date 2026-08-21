@@ -144,13 +144,14 @@ export function renderHistoryRows(rows, columns) {
       const cells = columns
         .map((col) => (HISTORY_CELL_RENDERERS[col.key] || (() => "<td>—</td>"))(t))
         .join("");
+      const actions = t.voided_at
+        ? `<span class="voided-tag" title="${escapeHtml(t.void_reason || "Voided")}">voided</span>`
+        : `<button type="button" class="edit-txn-btn" data-id="${t.id}" title="Edit this transaction">Edit</button>
+             <button type="button" class="delete-txn-btn" data-id="${t.id}" title="Void this transaction (kept for the audit trail, stops counting)">✕</button>`;
       return `
-        <tr>
+        <tr class="${t.voided_at ? "voided-row" : ""}">
           ${cells}
-          <td class="actions-cell">
-            <button type="button" class="edit-txn-btn" data-id="${t.id}" title="Edit this transaction">Edit</button>
-            <button type="button" class="delete-txn-btn" data-id="${t.id}" title="Delete this transaction">✕</button>
-          </td>
+          <td class="actions-cell">${actions}</td>
         </tr>`;
     })
     .join("");

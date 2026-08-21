@@ -41,7 +41,7 @@ const getSplitsForSecurity = db.prepare(
 const getOpenLotsForSplit = db.prepare(`
   SELECT * FROM transactions
   WHERE security_id = ? AND transaction_type = 'BUY' AND quantity_remaining > 0
-    AND transaction_date < ?
+    AND transaction_date < ? AND voided_at IS NULL
   ORDER BY transaction_date, id
 `);
 const rescaleLot = db.prepare(
@@ -183,7 +183,7 @@ const getOpenLots = db.prepare(`
   SELECT * FROM transactions
   WHERE holder_id = @holderId AND security_id = @securityId
     AND transaction_type = 'BUY' AND quantity_remaining > 0
-    AND is_paper_trade = @isPaperTrade
+    AND is_paper_trade = @isPaperTrade AND voided_at IS NULL
   ORDER BY transaction_date, id
 `);
 
@@ -322,6 +322,7 @@ const openPositionsQuery = db.prepare(`
     AND t.transaction_type = 'BUY'
     AND t.quantity_remaining > 0
     AND t.is_paper_trade = @isPaperTrade
+    AND t.voided_at IS NULL
   ORDER BY s.symbol, t.transaction_date
 `);
 
@@ -374,6 +375,7 @@ const transactionsQuery = db.prepare(`
     AND (@startDate IS NULL OR t.transaction_date >= @startDate)
     AND (@endDate IS NULL OR t.transaction_date <= @endDate)
     AND (@type IS NULL OR t.transaction_type = @type)
+    AND (@includeVoided = 1 OR t.voided_at IS NULL)
   ORDER BY t.transaction_date DESC, t.id DESC
 `);
 
@@ -390,6 +392,7 @@ export function listTransactions(holderId, filters = {}) {
       startDate: filters.startDate || null,
       endDate: filters.endDate || null,
       type: filters.type || null,
+      includeVoided: filters.includeVoided ? 1 : 0,
     })
     .map((row) => ({ ...row, realized_pnl: computeRealizedPnl(row), total: computeTotal(row) }));
 }
@@ -435,7 +438,10 @@ export function getPortfolioSummary(holderId, { isPaperTrade = false } = {}) {
 }
 
 const getTransaction = db.prepare("SELECT * FROM transactions WHERE id = ? AND holder_id = ?");
-const deleteTransactionStmt = db.prepare("DELETE FROM transactions WHERE id = ? AND holder_id = ?");
+const voidTransactionStmt = db.prepare(
+  `UPDATE transactions SET voided_at = datetime('now'), void_reason = ?
+     WHERE id = ? AND holder_id = ? AND voided_at IS NULL`,
+);
 const restoreLot = db.prepare(
   "UPDATE transactions SET quantity_remaining = quantity_remaining + ? WHERE id = ?",
 );
@@ -464,7 +470,7 @@ const updateDividendStmt = db.prepare(`
 `);
 
 const getLinkedSells = db.prepare(
-  "SELECT id, quantity FROM transactions WHERE linked_buy_id = ? AND transaction_type = 'SELL'",
+  "SELECT id, quantity FROM transactions WHERE linked_buy_id = ? AND transaction_type = 'SELL' AND voided_at IS NULL",
 );
 const setSellCostBasis = db.prepare("UPDATE transactions SET cost_basis = ? WHERE id = ?");
 
@@ -491,6 +497,7 @@ export function updateTransaction(holderId, id, patch = {}) {
   return withTransaction(() => {
     const txn = getTransaction.get(id, holderId);
     if (!txn) throw new Error("Transaction not found.");
+    if (txn.voided_at) throw new Error("This transaction is voided and can't be edited.");
 
     if (patch.transactionType && patch.transactionType !== txn.transaction_type) {
       throw new Error(
@@ -588,22 +595,42 @@ export function updateTransaction(holderId, id, patch = {}) {
  * BUY is refused once any of it has been sold, since that would orphan the
  * sell rows pointing at it.
  */
-export function deleteTransaction(holderId, id) {
+/**
+ * Voids a transaction. **Orders are never hard-deleted** -- the row stays so the
+ * audit trail survives; every read path filters `voided_at IS NULL`, so a voided
+ * order stops affecting positions, FIFO, holdings and quote refresh immediately.
+ *
+ * Note this is for *mistaken entry*, not for selling. Selling is already a
+ * separate SELL row drawing the lot down via quantity_remaining -- a fully sold
+ * BUY keeps its row with quantity_remaining = 0 and is not voided.
+ *
+ * The two guards from the old delete path are kept deliberately:
+ *  - voiding a SELL returns its shares to the lot it came from
+ *  - a BUY can't be voided once any of it has been sold (void the sells first),
+ *    otherwise the drawn-down shares would refer to a lot that no longer counts
+ */
+export function voidTransaction(holderId, id, reason = null) {
   return withTransaction(() => {
     const txn = getTransaction.get(id, holderId);
-    if (!txn) return { deleted: 0 };
+    if (!txn) return { voided: 0 };
+    if (txn.voided_at) throw new Error("This transaction is already voided.");
+
+    // Checked before any mutation so a rejected void changes nothing.
+    if (txn.transaction_type === "BUY" && txn.quantity_remaining < txn.quantity) {
+      throw new Error(
+        "This purchase has already been partly or fully sold. Void the matching sell(s) first.",
+      );
+    }
 
     if (txn.transaction_type === "SELL" && txn.linked_buy_id != null) {
       restoreLot.run(txn.quantity, txn.linked_buy_id);
     }
 
-    if (txn.transaction_type === "BUY" && txn.quantity_remaining < txn.quantity) {
-      throw new Error(
-        "This purchase has already been partly or fully sold. Delete the matching sell(s) first.",
-      );
-    }
-
-    return { deleted: deleteTransactionStmt.run(id, holderId).changes, transaction: txn };
+    const trimmed = reason == null ? null : String(reason).trim() || null;
+    return {
+      voided: voidTransactionStmt.run(trimmed, id, holderId).changes,
+      transaction: txn,
+    };
   });
 }
 
@@ -628,6 +655,7 @@ export function promotePaperTrade(holderId, id) {
   return withTransaction(() => {
     const txn = getTransaction.get(id, holderId);
     if (!txn) throw new Error("Transaction not found.");
+    if (txn.voided_at) throw new Error("This transaction is voided and can't be promoted.");
     if (!txn.is_paper_trade) throw new Error("This is already a real transaction, not a paper trade.");
     if (txn.transaction_type !== "BUY") {
       throw new Error("Only a paper BUY can be promoted -- it's what opens the position.");

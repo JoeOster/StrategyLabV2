@@ -86,6 +86,7 @@ const heldSecuritiesQuery = db.prepare(`
   LEFT JOIN quotes_cache q ON q.security_id = s.id
   WHERE t.holder_id = ? AND t.transaction_type = 'BUY'
     AND t.quantity_remaining > 0 AND t.is_paper_trade = 0
+    AND t.voided_at IS NULL
   GROUP BY s.id
   ORDER BY s.symbol
 `);
@@ -510,7 +511,7 @@ export function listWatchedItems(holderId, filters = {}) {
 const getItemsForDeletion = db.prepare(`
   SELECT w.id, w.order_type, w.status, s.symbol, wl.name AS watchlist_name,
          (SELECT COUNT(*) FROM alerts a WHERE a.watched_item_id = w.id) AS alert_count,
-         (SELECT COUNT(*) FROM transactions t WHERE t.watched_item_id = w.id) AS transaction_count
+         (SELECT COUNT(*) FROM transactions t WHERE t.watched_item_id = w.id AND t.voided_at IS NULL) AS transaction_count
   FROM watched_items w
   JOIN securities s ON s.id = w.security_id
   JOIN watchlists wl ON wl.id = w.watchlist_id
@@ -575,7 +576,7 @@ const getSecuritiesNeedingQuotes = db.prepare(`
   WHERE s.id IN (SELECT security_id FROM watched_items WHERE status IN ('WATCHING','ALERT'))
      OR s.id IN (
        SELECT security_id FROM transactions
-       WHERE transaction_type = 'BUY' AND quantity_remaining > 0
+       WHERE transaction_type = 'BUY' AND quantity_remaining > 0 AND voided_at IS NULL
      )
 `);
 

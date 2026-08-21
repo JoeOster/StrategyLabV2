@@ -115,11 +115,7 @@ export async function initializeWatchlistModule() {
     }),
   );
 
-  els.addBtn.addEventListener("click", () => {
-    els.addFormWatchlistSelect.innerHTML = renderWatchlistOptions(state.watchlists, state.activeWatchlistId);
-    updateTargetPriceVisibility();
-    els.addDialog.showModal();
-  });
+  els.addBtn.addEventListener("click", () => openAddTickerDialog());
   els.orderTypeSelect.addEventListener("change", updateTargetPriceVisibility);
   els.cancelAddBtn.addEventListener("click", () => els.addDialog.close());
   els.cancelListBtn.addEventListener("click", () => els.newListDialog.close());
@@ -331,6 +327,15 @@ function updateTargetPriceVisibility() {
  * Re-fetches lists and items. Called when switching back to this view, or
  * after a settings change that could have renamed/removed a list.
  */
+// Exported so the global header menu can open this from any view, not just the
+// Watchlist -- the button used to live in the header and was reachable anywhere
+// (by accident, via a CSS bug); this makes that reach deliberate.
+export function openAddTickerDialog() {
+  els.addFormWatchlistSelect.innerHTML = renderWatchlistOptions(state.watchlists, state.activeWatchlistId);
+  updateTargetPriceVisibility();
+  els.addDialog.showModal();
+}
+
 export async function reloadWatchlistView() {
   // If the active list was deleted in Settings, fall back to the first
   // remaining one rather than showing an empty table for a dead id.

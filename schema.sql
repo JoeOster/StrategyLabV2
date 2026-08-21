@@ -314,8 +314,20 @@ CREATE TABLE transactions (
   external_ref        TEXT,               -- broker's own txn id, or a computed fingerprint
   notes               TEXT,
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (account_id, external_ref)        -- makes re-importing a CSV a no-op, not a duplicate
+  -- Orders are never hard-deleted. A mistaken entry is *voided*, which keeps the
+  -- audit trail intact; "sold" is not a delete either -- that is a separate SELL
+  -- row drawing the lot down via quantity_remaining. Every read path filters
+  -- `voided_at IS NULL`.
+  voided_at           TEXT,
+  void_reason         TEXT
 );
+
+-- Partial unique, replacing the old table-level UNIQUE (account_id, external_ref):
+-- a voided row must NOT keep its external_ref slot, or re-importing a broker CSV
+-- containing that transaction would silently no-op instead of re-adding it.
+CREATE UNIQUE INDEX idx_transactions_external_ref
+  ON transactions (account_id, external_ref)
+  WHERE voided_at IS NULL;
 
 CREATE TABLE import_batches (
   id            INTEGER PRIMARY KEY,

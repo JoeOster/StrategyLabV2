@@ -365,7 +365,56 @@ body {
 
 .header-right { display: flex; align-items: center; gap: 0.75rem; }
 
-.header-actions { display: flex; gap: 0.5rem; }
+/* :not([hidden]) is load-bearing -- main.js hides this block on non-watchlist
+   views by setting .hidden, but an author-level `display: flex` overrides the
+   UA stylesheet's `[hidden] { display: none }` regardless of specificity, so
+   without this the watchlist-only buttons leak onto every view. Same trap
+   already documented for `dialog label` further down this file. */
+.header-actions:not([hidden]) { display: flex; gap: 0.5rem; }
+
+/* Global add menu -- unlike .header-actions this is visible on every view. */
+/* Voided orders stay visible for the audit trail but must never read as live. */
+.voided-row td { opacity: 0.55; text-decoration: line-through; }
+.voided-row .actions-cell { text-decoration: none; }
+.voided-tag {
+  text-decoration: none;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+}
+.inline-check { display: inline-flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
+
+.add-menu { position: relative; }
+.add-menu-list:not([hidden]) {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 12rem;
+  padding: 0.25rem;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+.add-menu-list button {
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 0.5rem 0.65rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+}
+.add-menu-list button:hover,
+.add-menu-list button:focus-visible { background: var(--row-hover, #eef2ff); }
+
 
 .alerts-bell {
   position: relative;

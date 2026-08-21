@@ -305,9 +305,9 @@ async function handleHistoryAction(event) {
 
   const btn = event.target.closest(".delete-txn-btn");
   if (!btn) return;
-  if (!window.confirm("Delete this paper transaction? Lot quantities will be adjusted to match.")) return;
+  if (!window.confirm("Void this paper transaction? It is kept for the audit trail but stops counting, and lot quantities are adjusted to match.")) return;
   try {
-    await api.deleteTransaction(Number(btn.dataset.id));
+    await api.voidTransaction(Number(btn.dataset.id));
     await reloadPaperTradeView();
     banner("Transaction deleted.", false);
   } catch (err) {
@@ -449,14 +449,14 @@ async function handleDeleteFromDialog() {
   if (!state.editingId) return;
   if (
     !window.confirm(
-      "Delete this paper transaction?\n\nIf it's a sale, the shares go back to the lot it came from. " +
-        "A purchase can't be deleted once any of it has been sold.",
+      "Void this paper transaction?\n\nIt stays in the record for the audit trail but stops counting. If it's a sale, the shares go back to the lot it came from. " +
+        "A purchase can't be voided once any of it has been sold.",
     )
   ) {
     return;
   }
   try {
-    await api.deleteTransaction(state.editingId);
+    await api.voidTransaction(state.editingId);
     els.orderDialog.close();
     await reloadPaperTradeView();
     banner("Transaction deleted.", false);

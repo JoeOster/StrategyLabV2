@@ -1,0 +1,8 @@
+[Unit]
+Description=StrategyLab V2 DB backup -> NAS (/mnt/brain/backups/strategylab)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/StrategyLabV2
+ExecStart=%h/StrategyLabV2/deploy/backup-db.sh

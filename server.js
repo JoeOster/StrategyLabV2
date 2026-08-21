@@ -524,6 +524,7 @@ app.get("/api/transactions", (req, res) => {
       startDate: req.query.startDate,
       endDate: req.query.endDate,
       type: req.query.type,
+      includeVoided: req.query.includeVoided === "1",
     }),
   );
 });
@@ -573,10 +574,13 @@ app.put("/api/transactions/:id", (req, res) => {
   }
 });
 
-app.post("/api/transactions/:id/delete", (req, res) => {
+// Orders are voided, never deleted -- the row survives for the audit trail and
+// simply stops counting. The old /delete path is gone rather than aliased, so
+// nothing can hard-delete a transaction by hitting a stale URL.
+app.post("/api/transactions/:id/void", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   try {
-    res.json(txns.deleteTransaction(holder.id, Number(req.params.id)));
+    res.json(txns.voidTransaction(holder.id, Number(req.params.id), req.body?.reason ?? null));
   } catch (err) {
     res.status(409).json({ error: err.message });
   }

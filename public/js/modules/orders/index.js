@@ -72,6 +72,7 @@ export async function initializeOrdersModule() {
   els.historyStart = document.getElementById("history-start");
   els.historyEnd = document.getElementById("history-end");
   els.historyClearBtn = document.getElementById("history-clear-btn");
+  els.historyShowVoided = document.getElementById("history-show-voided");
   els.historyColumnsBtn = document.getElementById("history-columns-btn");
 
   els.columnDialog = document.getElementById("column-dialog");
@@ -106,7 +107,7 @@ export async function initializeOrdersModule() {
     renderPositions();
   });
 
-  for (const input of [els.historySymbol, els.historyType, els.historyStart, els.historyEnd]) {
+  for (const input of [els.historySymbol, els.historyType, els.historyStart, els.historyEnd, els.historyShowVoided]) {
     input.addEventListener("change", loadHistory);
   }
   els.historySymbol.addEventListener("input", debounce(loadHistory, 300));
@@ -223,6 +224,7 @@ async function loadHistory() {
       type: els.historyType.value,
       startDate: els.historyStart.value,
       endDate: els.historyEnd.value,
+      includeVoided: els.historyShowVoided?.checked ? "1" : "",
     });
     renderHistory();
   } catch (err) {
@@ -285,9 +287,9 @@ async function handleHistoryAction(event) {
 
   const btn = event.target.closest(".delete-txn-btn");
   if (!btn) return;
-  if (!window.confirm("Delete this transaction? Lot quantities will be adjusted to match.")) return;
+  if (!window.confirm("Void this transaction? It is kept for the audit trail but stops counting, and lot quantities are adjusted to match.")) return;
   try {
-    await api.deleteTransaction(Number(btn.dataset.id));
+    await api.voidTransaction(Number(btn.dataset.id));
     await reloadOrdersView();
     banner("Transaction deleted.", false);
   } catch (err) {
@@ -371,7 +373,7 @@ async function handleRefreshPrices() {
   }
 }
 
-async function openOrderDialog(prefill = {}) {
+export async function openOrderDialog(prefill = {}) {
   // Clear any leftover edit state so "+ Log Order" always creates.
   state.editingId = null;
   els.orderTypeSelect.disabled = false;
@@ -449,14 +451,14 @@ async function handleDeleteFromDialog() {
   if (!state.editingId) return;
   if (
     !window.confirm(
-      "Delete this transaction?\n\nIf it's a sale, the shares go back to the lot it came from. " +
-        "A purchase can't be deleted once any of it has been sold.",
+      "Void this transaction?\n\nIt stays in the record for the audit trail but stops counting. If it's a sale, the shares go back to the lot it came from. " +
+        "A purchase can't be voided once any of it has been sold.",
     )
   ) {
     return;
   }
   try {
-    await api.deleteTransaction(state.editingId);
+    await api.voidTransaction(state.editingId);
     els.orderDialog.close();
     await reloadOrdersView();
     banner("Transaction deleted.", false);
