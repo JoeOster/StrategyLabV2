@@ -11,6 +11,12 @@
 const els = {};
 let state = { tradeId: null, symbol: null, plan: null, onChanged: null };
 
+// Settings > General's "Default take profit %" and "Default stop loss %".
+// They were stored, editable and read by nothing at all (docs/BUGS.md #13);
+// Joe: "yes as thats what they are designed for". Fetched once per dialog
+// open rather than per keystroke.
+let defaults = { takeProfitPct: null, stopLossPct: null };
+
 function escapeHtml(str) {
   return String(str ?? "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -34,6 +40,7 @@ export function initPlansUi() {
   els.closeBtn = document.getElementById("exits-close-btn");
 
   els.closeBtn.addEventListener("click", () => els.dialog.close());
+  els.form.elements.kind.addEventListener("change", suggestRung);
   els.form.addEventListener("submit", handleAddRung);
   els.body.addEventListener("click", handleBodyClick);
 }
@@ -63,6 +70,12 @@ export async function openExitsDialog(tradeId, symbol, onChanged) {
   els.dialog.showModal();
 
   try {
+    const general = await api("/api/settings/general").catch(() => ({}));
+    defaults = {
+      takeProfitPct: Number(general.default_take_profit_percent) || null,
+      stopLossPct: Number(general.default_stop_loss_percent) || null,
+    };
+
     const trade = await api(`/api/transactions/${tradeId}`).catch(() => null);
     let planId = trade?.plan_id ?? null;
     if (!planId) {
@@ -112,6 +125,8 @@ function render() {
         })
         .join("")
     : '<tr><td colspan="5" class="empty-row">No rungs yet. Add one below.</td></tr>';
+
+  suggestRung();
 
   els.body.innerHTML = `
     <p class="panel-hint">
@@ -175,4 +190,35 @@ async function handleBodyClick(event) {
   } catch (err) {
     showError(err.message);
   }
+}
+
+/**
+ * Pre-fills the rung form from the defaults and what is left of the position.
+ *
+ * Suggestions only -- every field stays editable, and the numbers are anchored
+ * to the thesis's own average cost rather than the live price, because a
+ * take-profit is a target relative to what was PAID, not to where the price
+ * happens to be while the dialog is open.
+ */
+function suggestRung() {
+  if (!state.plan) return;
+  const { lots, uncommittedQuantity } = state.plan;
+
+  const qtyField = els.form.elements.quantity;
+  if (!qtyField.value && uncommittedQuantity > 0) qtyField.value = uncommittedQuantity;
+
+  const priceField = els.form.elements.price;
+  if (priceField.value) return; // never overwrite something already typed
+
+  const shares = lots.reduce((sum, l) => sum + l.quantity, 0);
+  const cost = lots.reduce((sum, l) => sum + l.cost_basis, 0);
+  if (!(shares > 0) || !(cost > 0)) return;
+  const avgCost = cost / shares;
+
+  const isStop = els.form.elements.kind.value === "STOP";
+  const pct = isStop ? defaults.stopLossPct : defaults.takeProfitPct;
+  if (!pct) return;
+
+  const target = isStop ? avgCost * (1 - pct / 100) : avgCost * (1 + pct / 100);
+  priceField.value = target.toFixed(2);
 }

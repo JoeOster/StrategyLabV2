@@ -881,7 +881,20 @@ Open questions for the build, not to be guessed:
 - If the paper leg is 100 shares and only 50 were really bought, the legs
   diverge in quantity as well as price. Is that a partial promotion, or two
   independent positions?
-- Does the paper leg auto-sell when its take-profit is reached, or only record
+- **ANSWERED 2026-08-21: the paper leg auto-sells.** Joe: *"yes as this is just
+  set for an ideal scenario."* So the paper leg is a mechanical simulation of
+  the plan followed perfectly, and the real leg is what actually happened. The
+  divergence between them IS the measurement.
+
+  Two things follow. The paper leg must be rigorously excluded from real totals
+  -- `is_paper_trade` already partitions every query, so the machinery exists,
+  but an auto-generated sale is the easiest thing to leak. And an auto-sell is
+  the ONLY sale this app ever creates by itself: everywhere else a rung fires
+  an alert and a human records what really happened. Worth keeping that
+  boundary explicit in the code, because the reasoning for it is the whole
+  design.
+
+- (superseded) Does the paper leg auto-sell when its take-profit is reached, or only record
   that the level was hit? Auto-selling makes "optimal" concrete; recording
   keeps the paper tab honest about being a log rather than a simulator.
 - When does a promoted paper position stop being shown as open?

@@ -8,7 +8,21 @@ the write succeeds, the read simply never happens -- so it cannot be found by
 using the app. The sweep is a lead generator, not an oracle: everything below
 was verified by hand, and roughly as many candidates were dismissed.
 
-### 13. Three Settings controls do nothing
+### 13. Three Settings controls do nothing -- TWO NOW FIXED (2026-08-21)
+
+**`default_take_profit_percent` and `default_stop_loss_percent` are consumed.**
+They pre-fill the exit ladder, anchored to the thesis's average cost rather
+than the live price -- a take-profit is a target relative to what was PAID.
+Joe, asked directly: *"yes as thats what they are designed for."*
+
+**`notification_cooldown_minutes` is still dead** and is the worse of the three,
+because it reads as a safety control: someone setting "notify me at most every
+30 minutes" gets no throttling at all. Either wire it up or take it out of the
+UI -- a control that silently does nothing is worse than one that is not there.
+
+Original report follows.
+
+#### Original report
 
 **File:** `public/index.html` (General settings form),
 `services/settingsService.js` (`GENERAL_SETTING_DEFAULTS`)
