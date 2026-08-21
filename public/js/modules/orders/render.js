@@ -90,6 +90,26 @@ const POSITION_CELL_RENDERERS = {
  *   adds a "Promote" button (Paper Trade tab only -- turns a paper BUY into
  *   a real one in place, see promotePaperTrade in transactionsService.js).
  */
+// Row-action icons.
+//
+// Glyphs rather than SVG or an icon font: this app runs on two packages, and
+// the void button in the history table is already a bare Unicode cross, so
+// this matches what exists instead of adding a third way to draw a button.
+//
+// Each carries U+FE0E (text presentation selector) to stop platforms promoting
+// them to full-colour emoji, which would break the line weight beside the
+// others.
+//
+// EXITS had no obvious symbol. An up-down pair says what the ladder actually
+// is -- take-profit rungs above the price and a stop below it -- where a target
+// or a flag would describe only half of it.
+const ACTION_ICONS = {
+  promote: "\u2191\uFE0E", // upward: a paper trade becoming real
+  sell: "$",
+  exits: "\u21C5\uFE0E",
+  edit: "\u270E\uFE0E",
+};
+
 export function renderPositionsRows(positions, columns, opts = {}) {
   const { showPromote = false, emptyMessage = 'No open positions. Use "+ Log Order" to record a purchase.' } = opts;
   if (positions.length === 0) {
@@ -104,10 +124,10 @@ export function renderPositionsRows(positions, columns, opts = {}) {
         <tr>
           ${cells}
           <td class="actions-cell">
-            ${showPromote ? `<button type="button" class="promote-txn-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Turn this into a real purchase">Promote</button>` : ""}
-            <button type="button" class="sell-lot-btn" data-symbol="${escapeHtml(p.symbol)}" data-lot-id="${p.lot_id}" data-qty="${p.quantity_remaining}" title="Sell from this lot">Sell</button>
-            <button type="button" class="exits-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Set take-profit and stop rungs for this position">Exits</button>
-            <button type="button" class="edit-txn-btn" data-id="${p.lot_id}" title="Correct this purchase">Edit</button>
+            ${showPromote ? `<button type="button" class="icon-btn promote-txn-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Promote to a real purchase" aria-label="Promote ${escapeHtml(p.symbol)} to a real purchase">${ACTION_ICONS.promote}</button>` : ""}
+            <button type="button" class="icon-btn sell-lot-btn" data-symbol="${escapeHtml(p.symbol)}" data-lot-id="${p.lot_id}" data-qty="${p.quantity_remaining}" title="Sell from this lot" aria-label="Sell ${escapeHtml(p.symbol)}">${ACTION_ICONS.sell}</button>
+            <button type="button" class="icon-btn exits-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Exit plan: take-profit and stop rungs" aria-label="Exit plan for ${escapeHtml(p.symbol)}">${ACTION_ICONS.exits}</button>
+            <button type="button" class="icon-btn edit-txn-btn" data-id="${p.lot_id}" title="Correct this purchase" aria-label="Edit ${escapeHtml(p.symbol)} purchase">${ACTION_ICONS.edit}</button>
           </td>
         </tr>`;
     })
@@ -147,7 +167,7 @@ export function renderHistoryRows(rows, columns) {
         .join("");
       const actions = t.voided_at
         ? `<span class="voided-tag" title="${escapeHtml(t.void_reason || "Voided")}">voided</span>`
-        : `<button type="button" class="edit-txn-btn" data-id="${t.id}" title="Edit this transaction">Edit</button>
+        : `<button type="button" class="icon-btn edit-txn-btn" data-id="${t.id}" title="Edit this transaction" aria-label="Edit ${escapeHtml(t.symbol)} transaction">${ACTION_ICONS.edit}</button>
              <button type="button" class="delete-txn-btn" data-id="${t.id}" title="Void this transaction (kept for the audit trail, stops counting)">✕</button>`;
       return `
         <tr class="${t.voided_at ? "voided-row" : ""}">

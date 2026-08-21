@@ -224,12 +224,14 @@ body {
    its own rule rendered at full size next to the others -- which is precisely
    what happened when the Exits button was added. Hover colours stay separate
    below, since those are genuinely per-button. */
-.sell-lot-btn,
-.edit-txn-btn,
-.promote-txn-btn,
-.exits-btn {
-  padding: 0.2rem 0.55rem;
-  font-size: 0.8rem;
+.icon-btn {
+  /* Square, so four of them line up regardless of glyph width -- a '$' and an
+     up-down arrow have very different advances. min-width rather than width so
+     a longer glyph is never clipped. */
+  min-width: 1.85rem;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.95rem;
+  line-height: 1.1;
   border-color: var(--border);
 }
 
