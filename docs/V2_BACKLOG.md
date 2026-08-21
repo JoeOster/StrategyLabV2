@@ -556,6 +556,99 @@ obvious fit for the format, but this is real financial data. Artifacts are
 private by default, though they are still hosted -- so treat a published report
 as a deliberate decision each time, not a default output.
 
+## Exit parameters on a trade (Joe, 2026-08-21) -- NEXT PIECE OF WORK
+
+Decided at the end of the flow walkthrough. This is the keystone: nothing in
+plan-vs-actual can be measured until a trade knows where it was meant to exit.
+
+**Shape: a "Set Exits" button on a trade, opening a ladder of exit rungs.**
+Joe's words: *"a plan should be a button on a trade that allows for high/low
+limits/partial sells and the like"*, and then *"basically adding parameters to
+the existing trade."*
+
+### Why this is not columns on `transactions`
+
+Partial sells. "Sell 50 at $110, the other 50 at $120, stop the lot at $90"
+cannot be expressed by price bands alone -- there is nowhere to say how MUCH
+each target sells. `take_profit_2_low/high` was already the beginning of a
+ladder that would otherwise grow a `_3` and a `_4`, each needing its own branch
+in the evaluator. That accretion is exactly what produced BUG 10, where the
+second take-profit was unreachable in practice.
+
+So exits are rows, not columns:
+
+```
+trade_exits
+  transaction_id   the lot these exits belong to
+  kind             TAKE_PROFIT | STOP
+  sequence         rung order
+  quantity         how much this rung sells
+  price_low/high   the band, same convention as the existing targets
+  status           pending | hit | cancelled
+```
+
+A stop is simply a rung with `kind = STOP`, normally for the full remaining
+quantity. One evaluation path, no special case. `take_profit_2` and its enum
+branch retire, and `triggerReason` collapses from four hard-coded cases into
+"which rung was crossed".
+
+### Division of labour with watched_items -- read before building
+
+Exits now exist in two places, which is the shape of BUG 10 and must not become
+it again. The split is by job, and it is clean:
+
+- **`watched_items` exits govern getting IN.** Entry bands, alerting on a
+  position not yet held.
+- **`trade_exits` govern getting OUT.** They cannot exist before there is a
+  position to exit.
+
+Neither is a copy of the other and neither goes stale. If that ever stops being
+true, one of them is wrong.
+
+### What it buys
+
+Adherence becomes exact rather than inferred: *rung 1 said sell 50 at $110; you
+sold 50 at $109.20, two days late.* That is the execution-gap measurement that
+the four constraints (below) say should lead the reporting -- and unlike source
+reliability, it is answerable from a handful of trades.
+
+### Scope
+
+Deliberately self-contained. **No plans table, no signals table, no rewrite.**
+One new table, one button, one dialog, and evaluation reusing the alert engine
+that already exists -- `triggerReason`/`applyAlertIfTriggered` were wired and
+tested on 2026-08-21 and already fire once per level with `alerts.trigger_reason`
+recording which.
+
+Consequences to handle:
+
+- A plan is only finished when its rungs are exhausted or cancelled, so
+  whatever status the ladder carries has to reflect partial completion rather
+  than firing once.
+- Rungs must not oversell: the sum of pending rung quantities should not exceed
+  `quantity_remaining` on the lot.
+- Paper and real trades get this identically -- see the paper/real parity
+  principle below. Put the field handling through the shared mapper.
+
+### Considered and NOT chosen (recorded so it is not re-litigated)
+
+A larger redesign was discussed and set aside as the immediate step:
+
+- **A first-class `plans` table**, splitting the four jobs `watched_items`
+  currently does (watchlist membership, journal idea, trade plan, and
+  "just tracking" via the `order_type = 'WATCH'` null-object). Still
+  attractive; it would retire that enum hack and let one plan own both legs of
+  a promoted paper trade. Deferred as too large for the next step.
+- **A `signals` table** recording what a source said and when, independent of
+  whether it was acted on. This would make Joe's Telegram example measurable
+  (*"the sell signal goes out for $10.75 and I miss it"* -- there is currently
+  nowhere to record that they said it), and it doubles as the fix for the
+  selection-bias constraint, since a signal with no plan is exactly "they
+  called it, I passed". **Open question, unanswered:** whether Joe routinely
+  receives and would log such signals, or whether that example was
+  aspirational. Do not build this table until that is answered -- an unfilled
+  table is worse than no table.
+
 ## Vocabulary and the trade/plan/source model (Joe, 2026-08-21)
 
 **Vocabulary.** A **trade** means both kinds. A paper trade and a real trade
