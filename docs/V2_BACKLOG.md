@@ -1170,7 +1170,28 @@ already enforces.
 `source_code` holds the broker's own label so "what have I paid in subscription
 fees" stays a `GROUP BY` rather than a search through prose.
 
-**Only Robinhood so far.** Fidelity and E*TRADE have their own equivalents and
-their parsers still count those rows as skipped. The shape is general; the
-mapping is per broker.
+**All three brokers now.** The shape is shared; the mapping is per broker,
+because the formats differ in kind.
+
+E*TRADE names its activity in a real column, so its mapping is a lookup.
+Fidelity buries everything in Action prose and its cash rows are identifiable
+only by having no Symbol at all -- which meant they were being discarded by the
+no-symbol skip before the action was ever read. That skip is where
+**$249,648.72 of 401k rollover** was going, along with a $24,600 early
+distribution and $5,400 of tax withheld: the largest figures anywhere in this
+database, silently dropped.
+
+Fidelity's list is explicit rather than "anything without a symbol is cash".
+An action the parser has not been taught is reported as unknown, not booked as
+a deposit for whatever the Amount column happened to say. Guessing the
+direction of money is the one place not to be relaxed.
+
+Direction always comes from the sign, never from the label. A rollover is
+normally money in and a transfer normally either way, but both reverse, and a
+table deciding direction per action books the reversal backwards.
+
+Cash refs are run through `disambiguateRefs` exactly as trades are, which was
+not optional: three separate $0.01 stock-lending payments land on the same day,
+one per security, with otherwise identical refs. Two of the three were being
+swallowed as duplicates of the first.
 

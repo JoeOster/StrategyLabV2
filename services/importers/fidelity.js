@@ -27,6 +27,36 @@ const CASH_SYMBOLS = new Set(["SPAXX", "FDRXX", "FZFXX", "FCASH"]);
 // ticker matches. Used to spot bonds and CDs, which this app cannot represent.
 const CUSIP = /^(?=.*\d)[0-9A-Z]{9}$/;
 
+// Cash movements, matched on the Action prose like everything else in this
+// format. Every one of them carries an empty Symbol and a Quantity of zero,
+// which is what makes them separable at all -- a share row always names its
+// security.
+//
+// The list is explicit rather than "anything with no symbol is cash", because
+// a row this parser has not been taught about should be REPORTED as unknown,
+// not quietly booked as a deposit for whatever the Amount column happened to
+// say. Guessing the direction of money is exactly the wrong place to be
+// relaxed.
+//
+// Longest prefix first: "STATE TAX W/H" and "FED TAX W/H" both need to beat a
+// bare "TAX", and order in this array is the matching order.
+const CASH_ACTIONS = [
+  { prefix: "ROLLOVER", code: "ROLLOVER" },
+  { prefix: "STATE TAX W/H", code: "TAX_WITHHOLDING", fee: true },
+  { prefix: "FED TAX W/H", code: "TAX_WITHHOLDING", fee: true },
+  { prefix: "EARLY DIST", code: "DISTRIBUTION" },
+  { prefix: "DISTRIBUTION", code: "DISTRIBUTION" },
+  { prefix: "ELECTRONIC FUNDS TRANSFER", code: "EFT" },
+  { prefix: "DIRECT DEPOSIT", code: "DEPOSIT" },
+  { prefix: "WIRE", code: "WIRE" },
+  { prefix: "CHECK", code: "CHECK" },
+  { prefix: "FEE", code: "FEE", fee: true },
+];
+
+function cashActionFor(action) {
+  return CASH_ACTIONS.find((c) => action.startsWith(c.prefix)) ?? null;
+}
+
 // Fees and rounding mean quantity*price never exactly equals the cash amount,
 // but they should agree closely. A large gap means the row does not follow
 // share conventions at all -- which is how a $1,000 CD read as $100,000.
@@ -44,6 +74,7 @@ export function parse(text) {
 
   const out = [];
   const skipped = { cash: 0, bond: 0, unknownAction: 0, noSymbol: 0 };
+  const cash = [];
 
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i];
@@ -57,7 +88,33 @@ export function parse(text) {
     const amount = num(r[col["Amount ($)"]]);
     const fees = (num(r[col["Fees ($)"]]) ?? 0) + (num(r[col["Commission ($)"]]) ?? 0);
 
-    if (!symbol) { skipped.noSymbol++; continue; }
+    // Before the no-symbol skip: an empty Symbol is the SHAPE of a cash row
+    // here, not a defect in one. Checked in this order, the $249,648.72 of
+    // 401k rollover in the real IRA export was being counted as "noSymbol"
+    // and discarded.
+    if (!symbol) {
+      const cashAction = cashActionFor(action.toUpperCase());
+      const cashAmount = num(r[col["Amount ($)"]]);
+      if (cashAction && cashAmount != null && cashAmount !== 0) {
+        cash.push({
+          recordType: "CASH",
+          // Direction from the sign, never from the label. A rollover is
+          // normally money in and a distribution money out, but both can
+          // reverse, and a table that decided direction per action would
+          // eventually book a reversal backwards.
+          cashKind: cashAction.fee && cashAmount < 0 ? "FEE" : cashAmount > 0 ? "DEPOSIT" : "WITHDRAWAL",
+          sourceCode: cashAction.code,
+          transactionDate: date,
+          amount: Math.abs(cashAmount),
+          externalRef: fingerprint([date, "CASH", cashAction.code, cashAmount]),
+          description: action.trim() || null,
+          raw: Object.fromEntries(Object.entries(col).map(([h, idx]) => [h, r[idx] ?? ""])),
+        });
+        continue;
+      }
+      skipped.noSymbol++;
+      continue;
+    }
     if (CASH_SYMBOLS.has(symbol)) { skipped.cash++; continue; }
 
     // Bonds and CDs are quoted per $100 of face value, with Quantity carrying
@@ -181,5 +238,5 @@ export function parse(text) {
     });
   }
 
-  return { broker: BROKER, rows: out, skipped };
+  return { broker: BROKER, rows: out, cash, skipped };
 }

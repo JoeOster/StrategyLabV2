@@ -194,7 +194,14 @@ export function stageImport({ accountId, files }) {
   const cashRows = [];
   const cashBeforeBaseline = [];
   const cashAlreadyImported = [];
-  for (const c of parsed.flatMap((p) => p.cash ?? [])) {
+  // Disambiguated for the same reason trades are, and it is not hypothetical:
+  // three separate $0.01 stock-lending payments land on one day, one per
+  // security, and their refs are otherwise identical. Two of the three would
+  // have been silently swallowed as duplicates of the first.
+  //
+  // Run across every file in the batch at once, so a movement appearing in two
+  // overlapping exports still gets the ordinal it would get from either alone.
+  for (const c of disambiguateRefs(parsed.flatMap((p) => p.cash ?? []))) {
     if (baselineDate && c.transactionDate < baselineDate) {
       cashBeforeBaseline.push(c);
     } else if (cashRefAlreadyUsed.get(accountId, c.externalRef)) {

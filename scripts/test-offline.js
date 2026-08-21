@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 676;
+const MIN_EXPECTED_CHECKS = 696;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4291,6 +4291,79 @@ console.log("\n36. Securities know what kind of thing they are");
       .run(exId);
   } catch { rejected = true; }
   check("...and rejects one that is not", rejected);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n37. Fidelity and E*TRADE cash movements");
+// Fidelity's are the largest numbers anywhere in this database: $249,648.72 of
+// 401k rollover in, a $24,600 early distribution out, $5,400 withheld. All of
+// it was being counted as "noSymbol" and discarded, because a cash row has no
+// ticker and the parser skipped on that before ever reading the action.
+{
+  const fid = await import("../services/importers/fidelity.js");
+  const H = "Run Date,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Settlement Date";
+  const parsed = fid.parse([
+    H,
+    '01/08/2025,ROLLOVER CASH DIRECT ROLLOVER FROM PLAN (Cash),,,Cash,,0,,,,105636.78,',
+    '01/13/2025,FED TAX W/H RET FED WTH /WEB (Cash),,,Cash,,0,,,,"-3000",',
+    '01/13/2025,EARLY DIST NO EXCEPT /WEB (Cash),,,Cash,,0,,,,"-24600",',
+    '03/02/2026,YOU BOUGHT NVIDIA CORP (NVDA) (Cash),NVDA,NVIDIA CORP,Cash,100,10,,,,"-1000",',
+  ].join("\n"));
+
+  check("A share row is still a trade", parsed.rows.length === 1);
+  check("Three cash movements are found", parsed.cash.length === 3);
+  check("...and none counted as a missing symbol", parsed.skipped.noSymbol === 0);
+
+  const byCode = Object.fromEntries(parsed.cash.map((c) => [c.sourceCode, c]));
+  check("A rollover in is a deposit", byCode.ROLLOVER.cashKind === "DEPOSIT");
+  check("...for the full amount", byCode.ROLLOVER.amount === 105636.78);
+  check("Tax withheld is a fee", byCode.TAX_WITHHOLDING.cashKind === "FEE");
+  check("A distribution out is a withdrawal", byCode.DISTRIBUTION.cashKind === "WITHDRAWAL");
+  check("...recorded positive, direction living in the kind", byCode.DISTRIBUTION.amount === 24600);
+  check("The action prose is kept as a label", /EARLY DIST/.test(byCode.DISTRIBUTION.description));
+
+  // An action this parser has not been taught is REPORTED, never guessed at.
+  // Booking money in a direction nobody verified is the one place to be strict.
+  const unknown = fid.parse([H, '01/08/2025,SOME NEW THING NOBODY MAPPED (Cash),,,Cash,,0,,,,"-500",'].join("\n"));
+  check("An unmapped cash action is not silently booked", unknown.cash.length === 0);
+  check("...and is counted so it can be seen", unknown.skipped.noSymbol === 1);
+
+  // E*TRADE names its types in a real column, so no prose matching is needed.
+  const et = await import("../services/importers/etrade.js");
+  const EH = "Activity/Trade Date,Transaction Date,Settlement Date,Activity Type,Description,Symbol,Cusip,Quantity #,Price $,Amount $,Commission,Category,Note";
+  const etParsed = et.parse([
+    EH,
+    "12/31/2025,12/31/2025,12/31/2025,Interest Income,INTEREST ON CREDIT BALANCE,--,--,0,0,0.01,0.0,--,--",
+    "06/30/2025,06/30/2025,06/30/2025,Fee,ACCOUNT FEE,--,--,0,0,-9.95,0.0,--,--",
+    "05/21/2026,05/21/2026,05/22/2026,Bought,ENERGY FUELS INC,UUUU,--,20.0,17.279,-345.59,0.0,--,--",
+  ].join("\n"));
+  check("E*TRADE trades still parse", etParsed.rows.length === 1);
+  check("Interest is a deposit", etParsed.cash.some((c) => c.sourceCode === "INTEREST" && c.cashKind === "DEPOSIT"));
+  check("An account fee is a FEE", etParsed.cash.some((c) => c.sourceCode === "FEE" && c.cashKind === "FEE"));
+
+  // Direction from the sign, never from the label -- a transfer or journal
+  // reverses, and a table fixing direction per activity books it backwards.
+  const both = et.parse([
+    EH,
+    "01/02/2026,01/02/2026,01/02/2026,Transfer,MONEY IN,--,--,0,0,1000.00,0.0,--,--",
+    "02/02/2026,02/02/2026,02/02/2026,Transfer,MONEY OUT,--,--,0,0,-250.00,0.0,--,--",
+  ].join("\n"));
+  check("The same activity can go either way", both.cash.length === 2);
+  check("...credit reads DEPOSIT", both.cash.some((c) => c.cashKind === "DEPOSIT" && c.amount === 1000));
+  check("...debit reads WITHDRAWAL", both.cash.some((c) => c.cashKind === "WITHDRAWAL" && c.amount === 250));
+
+  // Same-day identical movements must not collapse into one. Three $0.01
+  // stock-lending payments land on one day, one per security, and their refs
+  // are otherwise identical -- two of three were being swallowed as duplicates.
+  const { disambiguateRefs } = await import("../services/importers/csv.js");
+  const same = [
+    { externalRef: "2026-06-05|CASH|SLIP|0.01" },
+    { externalRef: "2026-06-05|CASH|SLIP|0.01" },
+    { externalRef: "2026-06-05|CASH|SLIP|0.01" },
+  ];
+  const refs = disambiguateRefs(same).map((r) => r.externalRef);
+  check("Identical same-day movements get distinct refs", new Set(refs).size === 3);
+  check("...with the first left untouched", refs[0] === "2026-06-05|CASH|SLIP|0.01");
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

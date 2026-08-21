@@ -32,6 +32,21 @@ const CASH_SYMBOLS = new Set(["MSBNK", "ETSWEEP"]);
 // against MSBNK, not income against a holding.
 const KNOWN_NON_TRADE = new Set(["Interest Income", "Transfer", "Journal", "Fee", "Adjustment"]);
 
+// Activities that move cash rather than shares. E*TRADE names its own types in
+// a real column, so no prose matching is needed here -- unlike Fidelity.
+//
+// `fee` marks the ones that can only ever be a charge. Everything else takes
+// its direction from the sign of Amount, because a transfer or a journal entry
+// goes either way and a table that fixed the direction per activity would
+// eventually book a reversal backwards.
+const CASH_ACTIVITIES = {
+  "Interest Income": { code: "INTEREST" },
+  Transfer: { code: "TRANSFER" },
+  Journal: { code: "JOURNAL" },
+  Fee: { code: "FEE", fee: true },
+  Adjustment: { code: "ADJUSTMENT" },
+};
+
 /** "--" is E*TRADE's null. */
 const clean = (v) => {
   const s = String(v ?? "").trim();
@@ -50,6 +65,7 @@ export function parse(text) {
 
   const out = [];
   const skipped = { cash: 0, nonTrade: 0, unknownActivity: 0, noSymbol: 0 };
+  const cash = [];
 
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i];
@@ -61,6 +77,22 @@ export function parse(text) {
     const type = TYPE_BY_ACTIVITY[activity];
 
     if (!type) {
+      const cashActivity = CASH_ACTIVITIES[activity];
+      const cashAmount = num(r[col["Amount $"]]);
+      if (cashActivity && cashAmount != null && cashAmount !== 0) {
+        cash.push({
+          recordType: "CASH",
+          cashKind:
+            cashActivity.fee && cashAmount < 0 ? "FEE" : cashAmount > 0 ? "DEPOSIT" : "WITHDRAWAL",
+          sourceCode: cashActivity.code,
+          transactionDate: date,
+          amount: Math.abs(cashAmount),
+          externalRef: fingerprint([date, "CASH", cashActivity.code, cashAmount]),
+          description: clean(r[col["Description"]]) ?? activity,
+          raw: Object.fromEntries(Object.entries(col).map(([h, idx]) => [h, r[idx] ?? ""])),
+        });
+        continue;
+      }
       if (KNOWN_NON_TRADE.has(activity)) skipped.nonTrade++;
       else skipped.unknownActivity++;
       continue;
@@ -94,5 +126,5 @@ export function parse(text) {
     });
   }
 
-  return { broker: BROKER, rows: out, skipped };
+  return { broker: BROKER, rows: out, cash, skipped };
 }
