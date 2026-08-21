@@ -65,7 +65,13 @@ const getBatch = db.prepare("SELECT * FROM import_batches WHERE id = ?");
 // sell would arrive before the lot it draws down and be rejected as an
 // oversell.
 const getRawRows = db.prepare("SELECT * FROM import_raw_rows WHERE batch_id = ? ORDER BY id");
-const setRowMatch = db.prepare("UPDATE import_raw_rows SET matched_transaction_id = ? WHERE id = ?");
+// Reclassified to 'matched' as well as linked. A row that has been written is
+// no longer 'new' -- leaving the status alone made the preview report 87 rows
+// still to add immediately after adding them, which reads as the approval
+// having silently failed.
+const setRowMatch = db.prepare(
+  "UPDATE import_raw_rows SET matched_transaction_id = ?, reconciliation_status = 'matched' WHERE id = ?",
+);
 const setBatchStatus = db.prepare("UPDATE import_batches SET status = ? WHERE id = ?");
 
 // Checked BEFORE any write. Attempting the insert and interpreting the

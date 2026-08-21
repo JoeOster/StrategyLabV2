@@ -2756,6 +2756,34 @@ check(
 );
 check("Declining never writes a trade", db.prepare("SELECT resulting_transaction_id FROM alerts WHERE id = ?").get(badQueued.id).resulting_transaction_id === null);
 
+console.log("\n14d. Approving a batch clears its pending rows");
+// After approval the preview reported the same rows as still to add, because
+// approveBatch linked each row to its transaction but left the status at
+// 'new'. On screen that reads as the approval having silently failed, and it
+// invites a second click on a button that has already done its work.
+const clearAcct = acctSvcEarly.createAccount(holder.id, { broker: "fidelity", accountNumber: "5150" });
+db.prepare("INSERT INTO securities (symbol, name, data_source) VALUES ('CLRX','Clear Co','manual')").run();
+const clearCsv = [
+  "Run Date,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Settlement Date",
+  "04/01/2026,YOU BOUGHT CLEAR CO (CLRX) (Cash),CLRX,CLEAR CO,Cash,10,5,,,,\"-50\",",
+].join("\n");
+const importSvc = await import("../services/importService.js");
+const clearBatch = importSvc.stageImport({ accountId: clearAcct.id, files: [{ filename: "clear.csv", text: clearCsv }] });
+check("Staged as a missing trade", clearBatch.counts.new === 1);
+
+await importSvc.approveBatch(clearBatch.batch.id);
+const afterApprove = importSvc.getBatchPreview(clearBatch.batch.id);
+check("After approving, nothing is still listed as new", afterApprove.counts.new === 0);
+check("...the row is marked matched", afterApprove.counts.matched === 1);
+check(
+  "...and it points at the transaction it created",
+  afterApprove.rows[0].matchedTransactionId != null,
+);
+
+db.prepare("DELETE FROM transactions WHERE account_id = ?").run(clearAcct.id);
+db.prepare("DELETE FROM accounts WHERE id = ?").run(clearAcct.id);
+db.prepare("DELETE FROM securities WHERE symbol = 'CLRX'").run();
+
 console.log("\n14e. Fidelity parser: income rows survive");
 const fidelityParser = await import("../services/importers/fidelity.js");
 
@@ -2794,7 +2822,7 @@ check(
   ).rows.filter((r) => r.transactionType === "BUY").length === 0,
 );
 
-console.log("\n14d. Import audit: correcting a typo");
+console.log("\n14f. Import audit: correcting a typo");
 const imports = await import("../services/importService.js");
 
 // The whole point of a monthly audit: a trade recorded by hand whose numbers
