@@ -120,7 +120,7 @@ CREATE TABLE api_usage_log (
   -- -- the feature had never run successfully. Adding a provider wrapper
   -- without adding it here is the trap; the CHECK fails at call time, not at
   -- startup, so it looks like the provider is broken rather than the schema.
-  provider      TEXT NOT NULL CHECK (provider IN ('yahoo','finnhub','openlibrary')),
+  provider      TEXT NOT NULL CHECK (provider IN ('yahoo','finnhub','openlibrary','googlebooks')),
   endpoint      TEXT NOT NULL,
   called_at     TEXT NOT NULL DEFAULT (datetime('now')),
   status_code   INTEGER,

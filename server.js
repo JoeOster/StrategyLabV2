@@ -40,7 +40,7 @@ const scheduler = await import("./services/scheduler.js");
 const alertScheduler = await import("./services/alertScheduler.js");
 const summary = await import("./services/summaryService.js");
 const journal = await import("./services/journalService.js");
-const bookLookup = await import("./services/providers/openLibraryProvider.js");
+const bookLookup = await import("./services/bookLookupService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -333,9 +333,20 @@ app.post("/api/sources/:id/delete", (req, res) => {
 // without it, so a miss or a lookup failure is a 404, not a 500.
 app.get("/api/book-lookup", async (req, res) => {
   try {
-    const result = await bookLookup.lookupBookByIsbn(req.query.isbn || "");
-    if (!result) return res.status(404).json({ error: "No book found for that ISBN." });
-    res.json(result);
+    const result = await bookLookup.lookupBook(req.query.isbn || "");
+    if (!result.ok) {
+      // "not an ISBN" and "an ISBN nobody has" are different problems wanting
+      // different UI -- a typo to correct vs. a form to fill in by hand. The
+      // 979-8 (Amazon KDP) range routinely hits the second even with the
+      // Google Books fallback configured.
+      return res.status(result.reason === "invalid-isbn" ? 400 : 404).json({
+        error:
+          result.reason === "invalid-isbn"
+            ? "That doesn't look like an ISBN. Enter 10 or 13 digits."
+            : "No book found for that ISBN -- enter the title and author manually.",
+      });
+    }
+    res.json(result.book);
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
