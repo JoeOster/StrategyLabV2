@@ -2631,6 +2631,41 @@ check(
   !plans.listPendingExits().some((e) => e.plan_id === closingPlan.id),
 );
 
+const acctSvcEarly = await import("../services/accountsService.js");
+console.log("\n14b. Sells are scoped to their account");
+// Shares held at one brokerage cannot be sold by another. Before this was
+// enforced, selling 100 from account B emptied account A, left B showing 100
+// shares it no longer held, and reported P&L against A's cost basis --
+// $1,500 instead of $500. Both accounts' books contradicted each other.
+const xa = acctSvcEarly.createAccount(holder.id, { broker: "fidelity", accountNumber: "9001" });
+const xb = acctSvcEarly.createAccount(holder.id, { broker: "etrade", accountNumber: "9002" });
+db.prepare("INSERT INTO securities (symbol, name, data_source) VALUES ('XACC','Cross Account Co','manual')").run();
+
+// A buys first, so a global FIFO would reach for A's lot.
+await tx.recordBuy({ holderId: holder.id, accountId: xa.id, symbol: "XACC", transactionDate: "2026-01-01", quantity: 100, price: 10 });
+await tx.recordBuy({ holderId: holder.id, accountId: xb.id, symbol: "XACC", transactionDate: "2026-06-01", quantity: 100, price: 20 });
+
+let ambiguousSellRefused = false;
+try {
+  await tx.recordSell({ holderId: holder.id, symbol: "XACC", transactionDate: "2026-07-01", quantity: 10, price: 25 });
+} catch (err) {
+  ambiguousSellRefused = /more than one account/.test(err.message);
+}
+check("A sell that does not name an account is refused when the holding spans several", ambiguousSellRefused);
+
+const xSell = await tx.recordSell({ holderId: holder.id, accountId: xb.id, symbol: "XACC", transactionDate: "2026-07-01", quantity: 100, price: 25 });
+const heldIn = (id) => db.prepare("SELECT COALESCE(SUM(quantity_remaining),0) q FROM transactions WHERE account_id=? AND transaction_type='BUY' AND voided_at IS NULL").get(id).q;
+check("Selling from B leaves A untouched", heldIn(xa.id) === 100);
+check("...and empties B", heldIn(xb.id) === 0);
+check(
+  "...and reports P&L against B's cost basis, not A's",
+  Math.abs(xSell.realizedPnl - 500) < 1e-9,
+);
+
+db.prepare("DELETE FROM transactions WHERE security_id = (SELECT id FROM securities WHERE symbol = 'XACC')").run();
+db.prepare("DELETE FROM securities WHERE symbol = 'XACC'").run();
+db.prepare("DELETE FROM accounts WHERE id IN (?, ?)").run(xa.id, xb.id);
+
 console.log("\n15. Brokerages and accounts");
 const acctSvc = await import("../services/accountsService.js");
 

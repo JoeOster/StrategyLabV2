@@ -219,11 +219,24 @@ export function recordBuyWith(security, input) {
   });
 }
 
+// Account-scoped. Shares held at one brokerage cannot be sold by another, so a
+// sale must draw only from lots in its own account.
+//
+// Without the scope this was not merely an attribution problem, it was wrong:
+// in a two-account test, selling 100 from account B emptied account A, left B
+// still showing 100 shares it no longer held, and reported realized P&L of
+// $1,500 instead of $500 because it used A's cost basis. The SELL row was
+// labelled account B while drawing down A's lot, so the two accounts' books
+// contradicted each other.
+//
+// `IS` rather than `=` so a NULL accountId means "do not filter" instead of
+// matching nothing.
 const getOpenLots = db.prepare(`
   SELECT * FROM transactions
   WHERE holder_id = @holderId AND security_id = @securityId
     AND transaction_type = 'BUY' AND quantity_remaining > 0
     AND is_paper_trade = @isPaperTrade AND voided_at IS NULL
+    AND (@accountId IS NULL OR account_id IS @accountId)
   ORDER BY transaction_date, id
 `);
 
@@ -269,7 +282,21 @@ export function recordSellWith(security, input) {
       holderId: input.holderId,
       securityId: security.id,
       isPaperTrade,
+      accountId: input.accountId ?? null,
     });
+
+    // No account named, and the holding spans several. Guessing would pick the
+    // oldest lot regardless of where it is held, which is how the bug above
+    // happened. Ask instead -- this app asks rather than assumes.
+    if (input.accountId == null) {
+      const accounts = new Set(lots.map((lot) => lot.account_id));
+      if (accounts.size > 1) {
+        throw new Error(
+          `${security.symbol} is held in more than one account. ` +
+            `Say which account this sale is from -- selling from the wrong one corrupts both.`,
+        );
+      }
+    }
 
     if (input.lotId) {
       lots = lots.filter((lot) => lot.id === Number(input.lotId));
