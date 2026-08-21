@@ -17,6 +17,20 @@ import { parseCsv, num, toIsoDate, fingerprint } from "./csv.js";
 
 export const BROKER = "fidelity";
 
+// Core money-market sweeps. Every cash movement generates reinvestment and
+// dividend rows against these; importing them invents a holding in a cash fund.
+// FDRXX is the Government Cash Reserves sweep, the sibling of SPAXX.
+const CASH_SYMBOLS = new Set(["SPAXX", "FDRXX", "FZFXX", "FCASH"]);
+
+// CUSIP shape: 9 alphanumerics including at least one digit. No ordinary
+// ticker matches. Used to spot bonds and CDs, which this app cannot represent.
+const CUSIP = /^(?=.*\d)[0-9A-Z]{9}$/;
+
+// Fees and rounding mean quantity*price never exactly equals the cash amount,
+// but they should agree closely. A large gap means the row does not follow
+// share conventions at all -- which is how a $1,000 CD read as $100,000.
+const AMOUNT_TOLERANCE_REL = 0.02;
+
 export function parse(text) {
   const rows = parseCsv(text);
   const headerIdx = rows.findIndex((r) => r[0]?.trim() === "Run Date" && r.some((c) => c.trim() === "Action"));
@@ -28,7 +42,7 @@ export function parse(text) {
   if (missing.length) throw new Error(`Fidelity export missing expected column(s): ${missing.join(", ")}`);
 
   const out = [];
-  const skipped = { cash: 0, unknownAction: 0, noSymbol: 0 };
+  const skipped = { cash: 0, bond: 0, unknownAction: 0, noSymbol: 0 };
 
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i];
@@ -43,7 +57,16 @@ export function parse(text) {
     const fees = (num(r[col["Fees ($)"]]) ?? 0) + (num(r[col["Commission ($)"]]) ?? 0);
 
     if (!symbol) { skipped.noSymbol++; continue; }
-    if (symbol === "SPAXX") { skipped.cash++; continue; }
+    if (CASH_SYMBOLS.has(symbol)) { skipped.cash++; continue; }
+
+    // Bonds and CDs are quoted per $100 of face value, with Quantity carrying
+    // the face amount in dollars -- so a $1,000 CD at par reads as qty 1000 @
+    // px 100. Stock maths turns that into $100,000 and books a $99,000 phantom
+    // loss on redemption, which is exactly what happened before this check.
+    // This app has no concept of face value, coupons, accrued interest or
+    // maturity, so such an instrument cannot be represented correctly here --
+    // skipping it is honest, mangling it is not.
+    if (CUSIP.test(symbol)) { skipped.bond++; continue; }
 
     const A = action.toUpperCase();
     let type = null;
@@ -89,8 +112,26 @@ export function parse(text) {
     // must be positive (direction is carried by `type`, not by the sign).
     const qty = type === "DIVIDEND" ? 0 : Math.abs(quantity);
     let unitPrice = price;
-    if (unitPrice == null && type === "BUY" && amount != null && qty > 0) unitPrice = Math.abs(amount) / qty;
+    // Extrapolate for sells too, not only buys. TRANSFERRED TO rows have an
+    // empty Price column, so a BUY-only condition left them at price 0 -- which
+    // books the whole cost basis as a realized loss. Found by running realized
+    // P&L across the real ledger and getting a loss larger than the account.
+    if (unitPrice == null && amount != null && qty > 0) unitPrice = Math.abs(amount) / qty;
     if (type === "DIVIDEND") unitPrice = Math.abs(amount ?? 0);
+
+    // Cross-check the share maths against the cash actually moved. They should
+    // agree within fees and rounding; a wide gap means the row does not follow
+    // share conventions, and the figures cannot be trusted. Flagged rather than
+    // dropped, because the trade is real even when the unit convention is not
+    // understood -- and a silent 100x error is far worse than a visible flag.
+    if (type !== "DIVIDEND" && amount != null && qty > 0 && unitPrice != null) {
+      const implied = qty * unitPrice;
+      const actual = Math.abs(amount);
+      if (actual > 0 && Math.abs(implied - actual) > actual * AMOUNT_TOLERANCE_REL) {
+        needsReview = true;
+        reviewReason = `Quantity x price (${implied.toFixed(2)}) disagrees with the cash amount (${actual.toFixed(2)}) -- check the unit convention for this instrument.`;
+      }
+    }
 
     out.push({
       externalRef: fingerprint([date, type, symbol, qty, unitPrice, amount]),
