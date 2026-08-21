@@ -98,7 +98,7 @@ in `V2_BACKLOG.md` certainly will.
 **Fix:** have `getOrCreateSecurity` set it from the Yahoo profile's quote type,
 and let the importers pass what they already worked out.
 
-### 15. `dividends.pay_date` cannot be filled
+### 15. `dividends.pay_date` cannot be filled -- FIXED (2026-08-21, schema v20)
 
 **File:** `services/priceService.js:210`, `services/providers/yahooProvider.js:106`
 
@@ -111,7 +111,7 @@ it from the current provider.
 column the app structurally cannot populate is the same "schema promises
 something" smell as BUG 10.
 
-### 16. `theme` is dead in both directions
+### 16. `theme` is dead in both directions -- FIXED (2026-08-21, schema v20)
 
 **File:** `services/settingsService.js` (`GENERAL_SETTING_DEFAULTS`)
 
@@ -461,3 +461,30 @@ re-export a file that was never the problem.
 
 Eleven checks in section 29, including that seeding does not let a sale exceed
 what is held, and that one ticker's holdings cannot cover another's sale.
+
+### Resolution of 15 and 16 (schema v20)
+
+Both removed rather than implemented, in migration `020_drop_dead_columns.sql`.
+
+`dividends.pay_date` was never an oversight that could simply be corrected:
+Yahoo's chart events return an ex-date and an amount and no pay date, so the
+column could not be filled from the only provider wired up. A nullable column
+that is structurally unfillable reads to the next person as data that happens
+to be missing, and they go looking for a bug that is not there. Re-adding it is
+one `ALTER TABLE` on the day a provider supplies the field.
+
+`theme` defaulted to `"light"` with no control, no reader, and no dark CSS
+anywhere. Unlike `notification_cooldown_minutes` (v17) it promised the user
+nothing, because it never appeared on screen. Building a theme because a
+defaulted string exists would be the tail wagging the dog; if dark mode is
+wanted it is a CSS decision first and a setting second.
+
+Section 34 now checks that `schema.sql` and the migrations cannot disagree:
+every column a migration drops must be absent from `schema.sql` and every
+column one adds must be present. That drift has bitten this project twice --
+the seed missing the migration ledger, then missing brokerages -- and both
+times it surfaced as something unrelated breaking later. Verified separately
+that a fresh init and the live migrated database have identical column sets
+across all 29 tables; `transactions.plan_id` differs in POSITION only, because
+`ALTER TABLE` appends while `schema.sql` declares it inline, and nothing reads
+columns positionally.

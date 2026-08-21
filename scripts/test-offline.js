@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 641;
+const MIN_EXPECTED_CHECKS = 648;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4090,6 +4090,86 @@ console.log("\n33. The report surfaces intent that evaporated");
   check("...and unacted intent is spelled out in the outcome", rows.includes("accepted, never bought"));
   check("A wrong entry target says TARGET, not rung", rows.includes("target was wrong"));
   check("...since an entry alert has no rung to be wrong", !rows.includes("rung was wrong"));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n34. schema.sql and the migrations agree");
+// Two ways to arrive at a database: apply schema.sql fresh, or apply the
+// migrations in order to an old one. They must land in the same place, and
+// nothing was checking that they did.
+//
+// This project has paid for that drift twice already -- once when the seed
+// missed the migration ledger, once when it missed brokerages -- and both were
+// found by something else breaking later. A column present on a developer's
+// freshly-initialised database and absent from the live migrated one produces
+// "no such column" at runtime, on the machine that has the real data.
+{
+  const { DatabaseSync } = await import("node:sqlite");
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+
+  const schemaSql = fs.readFileSync(path.resolve("schema.sql"), "utf8");
+  const fresh = new DatabaseSync(":memory:");
+  fresh.exec(schemaSql);
+
+  // The migrated shape: schema.sql for everything, then every migration that
+  // is safe to re-run. Rather than replay history (which needs an old
+  // snapshot), assert the two SOURCES cannot disagree about column sets --
+  // which is the failure that actually bites.
+  const migrationDir = path.resolve("migrations");
+  const files = fs.readdirSync(migrationDir).filter((f) => f.endsWith(".sql")).sort();
+  check("There are migrations to check", files.length > 0);
+
+  const tables = fresh
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    .all()
+    .map((r) => r.name);
+  check("schema.sql builds a complete database", tables.length > 20);
+
+  // Every column a migration DROPs must be absent from schema.sql, and every
+  // column it ADDs must be present. This is the cheap half of the check and
+  // catches the case that actually happens: a migration written and schema.sql
+  // forgotten, or vice versa.
+  const dropped = [];
+  const added = [];
+  for (const f of files) {
+    const sql = fs.readFileSync(path.join(migrationDir, f), "utf8");
+    for (const m of sql.matchAll(/ALTER\s+TABLE\s+(\w+)\s+DROP\s+COLUMN\s+(\w+)/gi)) {
+      dropped.push({ table: m[1], column: m[2], file: f });
+    }
+    for (const m of sql.matchAll(/ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/gi)) {
+      added.push({ table: m[1], column: m[2], file: f });
+    }
+  }
+
+  const columnsOf = (t) =>
+    fresh.prepare("SELECT name FROM pragma_table_info(?)").all(t).map((r) => r.name);
+
+  const staleDrops = dropped.filter(
+    (d) => tables.includes(d.table) && columnsOf(d.table).includes(d.column),
+  );
+  check(
+    "No column a migration drops is still declared in schema.sql",
+    staleDrops.length === 0,
+  );
+  if (staleDrops.length) {
+    console.log("      still present: " + staleDrops.map((d) => `${d.table}.${d.column} (${d.file})`).join(", "));
+  }
+
+  const missingAdds = added.filter(
+    (a) => tables.includes(a.table) && !columnsOf(a.table).includes(a.column),
+  );
+  check("Every column a migration adds is declared in schema.sql", missingAdds.length === 0);
+  if (missingAdds.length) {
+    console.log("      missing: " + missingAdds.map((a) => `${a.table}.${a.column} (${a.file})`).join(", "));
+  }
+
+  // The two specific removals in v20.
+  check("pay_date is gone from schema.sql", !columnsOf("dividends").includes("pay_date"));
+  const { GENERAL_SETTING_DEFAULTS } = await import("../services/settingsService.js");
+  check("theme is gone from the settings whitelist", !("theme" in GENERAL_SETTING_DEFAULTS));
+  check("...while the settings that do work remain", "app_title" in GENERAL_SETTING_DEFAULTS);
+  check("...including the benchmark", "benchmark_symbol" in GENERAL_SETTING_DEFAULTS);
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

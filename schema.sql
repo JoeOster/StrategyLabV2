@@ -98,7 +98,10 @@ CREATE TABLE dividends (
   id            INTEGER PRIMARY KEY,
   security_id   INTEGER NOT NULL REFERENCES securities(id) ON DELETE CASCADE,
   ex_date       TEXT NOT NULL,
-  pay_date      TEXT,
+  -- No pay_date: Yahoo's chart events return an ex-date and an amount and
+  -- nothing else, so a column for it could never be filled from the only
+  -- provider wired up. Dropped in v20 rather than left permanently null,
+  -- where it reads as data that happens to be missing. See migration 020.
   amount        REAL NOT NULL,
   source        TEXT CHECK (source IN ('yahoo','finnhub')),
   UNIQUE (security_id, ex_date)
