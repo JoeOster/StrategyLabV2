@@ -43,6 +43,23 @@ const ZERO_COST_CODES = new Set(["REC"]);
 //   FUTSWP futures sweep        RTP/ACH  cash transfers      MISC  adjustments
 const KNOWN_NON_TRADE = new Set(["SLIP", "INT", "GOLD", "FUTSWP", "RTP", "ACH", "MISC"]);
 
+// Cash movements worth recording, and what each is. These used to be counted
+// as nonTrade and discarded, which was free only while every one of them
+// predated an opening balance.
+//
+// GOLD is the only code with a fixed direction -- a subscription fee is never
+// a credit. Everything else takes its direction from the sign of Amount, which
+// is why `kind` is decided per row rather than per code: an ACH can be a
+// deposit or a withdrawal, and a futures sweep goes both ways.
+const CASH_CODES = new Set(["ACH", "RTP", "GOLD", "INT", "SLIP", "FUTSWP", "MISC"]);
+const ALWAYS_FEE = new Set(["GOLD"]);
+
+// Description fields carry an embedded newline (the CUSIP sits on line two),
+// so only the first line is a usable label.
+function firstLine(value) {
+  return String(value ?? "").split(String.fromCharCode(10))[0].trim() || null;
+}
+
 export function parse(text) {
   const rows = parseCsv(text);
   const headerIdx = rows.findIndex((r) => r[0]?.trim() === "Activity Date");
@@ -54,6 +71,7 @@ export function parse(text) {
   if (missing.length) throw new Error(`Robinhood export missing expected column(s): ${missing.join(", ")}`);
 
   const out = [];
+  const cash = [];
   const skipped = { nonTrade: 0, unknownCode: 0, noSymbol: 0 };
 
   for (let i = headerIdx + 1; i < rows.length; i++) {
@@ -66,6 +84,30 @@ export function parse(text) {
     const type = TYPE_BY_CODE[code];
 
     if (!type) {
+      if (CASH_CODES.has(code)) {
+        const amount = num(r[col["Amount"]]);
+        // No amount means nothing moved, so there is nothing to record. Two
+        // such rows exist in the real exports, both with every money column
+        // blank.
+        if (amount == null || amount === 0) { skipped.nonTrade++; continue; }
+
+        const kind = ALWAYS_FEE.has(code) ? "FEE" : amount > 0 ? "DEPOSIT" : "WITHDRAWAL";
+        cash.push({
+          recordType: "CASH",
+          cashKind: kind,
+          // The broker's own label, kept so "what have I paid in subscription
+          // fees" stays a GROUP BY rather than a search through prose.
+          sourceCode: code,
+          transactionDate: date,
+          // Always positive; direction lives in cashKind, matching the
+          // convention cash_transactions itself enforces.
+          amount: Math.abs(amount),
+          externalRef: fingerprint([date, "CASH", code, amount]),
+          description: firstLine(r[col["Description"]]),
+          raw: Object.fromEntries(Object.entries(col).map(([h, idx]) => [h, r[idx] ?? ""])),
+        });
+        continue;
+      }
       if (KNOWN_NON_TRADE.has(code)) skipped.nonTrade++;
       else skipped.unknownCode++;
       continue;
@@ -107,5 +149,5 @@ export function parse(text) {
     });
   }
 
-  return { broker: BROKER, rows: out, skipped };
+  return { broker: BROKER, rows: out, cash, skipped };
 }

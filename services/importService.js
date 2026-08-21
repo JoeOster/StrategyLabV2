@@ -28,6 +28,7 @@ import { classify, summarize } from "./importers/match.js";
 import { getOrCreateSecurity } from "./priceService.js";
 import { TRANSFER_OUT_REASON } from "../lib/constants.js";
 import { recordBuyWith, recordSellWith, recordDividendWith } from "./transactionsService.js";
+import { recordCash } from "./cashService.js";
 import * as txns from "./transactionsService.js";
 
 const PARSERS = { fidelity, robinhood, etrade };
@@ -83,6 +84,31 @@ const refAlreadyUsed = db.prepare(`
   WHERE account_id = ? AND external_ref = ? AND voided_at IS NULL
 `);
 
+const cashRefAlreadyUsed = db.prepare(`
+  SELECT 1 FROM cash_transactions
+  WHERE account_id = ? AND external_ref = ? AND voided_at IS NULL
+`);
+
+// The account's dated baseline, if it has one.
+//
+// An OPENING_BALANCE says "this much cash was here on this date", so every
+// movement before it is already accounted for inside that figure. Importing
+// such a row would count it twice. The rows are reported rather than silently
+// filtered, because "47 deposits were ignored" is something the operator
+// should see and agree with, not discover later from a balance that drifted.
+const openingBalanceDateStmt = db.prepare(`
+  SELECT transaction_date FROM cash_transactions
+  WHERE account_id = ? AND kind = 'OPENING_BALANCE' AND voided_at IS NULL
+  ORDER BY transaction_date LIMIT 1
+`);
+
+// Cash rows carry no transaction to point at, so this marks them applied
+// without touching matched_transaction_id -- which is a foreign key into
+// `transactions` and would have to be a lie.
+const setCashRowApplied = db.prepare(
+  "UPDATE import_raw_rows SET reconciliation_status = 'matched' WHERE id = ?",
+);
+
 function parserFor(broker) {
   const parser = PARSERS[broker];
   if (!parser) {
@@ -104,6 +130,17 @@ function parserFor(broker) {
  *
  * @param {{accountId: number, files: Array<{filename: string, text: string}>}} input
  */
+/** The shape the preview shows for one cash movement. */
+function summariseCash(c) {
+  return {
+    transactionDate: c.transactionDate,
+    kind: c.cashKind,
+    sourceCode: c.sourceCode,
+    amount: c.amount,
+    description: c.description ?? null,
+  };
+}
+
 // What the account already holds, by symbol, before a file is applied.
 //
 // Seeds reconcile() so a sale whose covering buy arrived in an EARLIER import
@@ -149,6 +186,23 @@ export function stageImport({ accountId, files }) {
   const { accepted, dropped, summary } = reconcile(rows, {
     openingPositions: openPositionsBySymbol(accountId),
   });
+
+  // Cash movements bypass reconcile entirely: there are no shares to match, so
+  // none of its FIFO reasoning applies. They are classified only against the
+  // baseline and against what has already been imported.
+  const baselineDate = openingBalanceDateStmt.get(accountId)?.transaction_date ?? null;
+  const cashRows = [];
+  const cashBeforeBaseline = [];
+  const cashAlreadyImported = [];
+  for (const c of parsed.flatMap((p) => p.cash ?? [])) {
+    if (baselineDate && c.transactionDate < baselineDate) {
+      cashBeforeBaseline.push(c);
+    } else if (cashRefAlreadyUsed.get(accountId, c.externalRef)) {
+      cashAlreadyImported.push(c);
+    } else {
+      cashRows.push(c);
+    }
+  }
   const existing = getExistingForAccount.all(accountId);
   const classified = classify(accepted, existing);
 
@@ -159,6 +213,10 @@ export function stageImport({ accountId, files }) {
       files.map((f) => f.filename).join(", "),
       accepted.length,
     );
+
+    for (const c of cashRows) {
+      insertRawRow.get(batch.id, JSON.stringify({ normalized: c, raw: c.raw ?? null, differences: [] }), null, "new");
+    }
 
     const staged = classified.map((c) => {
       const { id } = insertRawRow.get(
@@ -185,6 +243,17 @@ export function stageImport({ accountId, files }) {
         reason: d.dropReason,
       })),
       skipped,
+      // Cash is reported separately from trades throughout. They are different
+      // kinds of thing with different failure modes, and a single "47 rows"
+      // count that mixes a stock purchase with a subscription fee tells the
+      // operator nothing useful about either.
+      cash: {
+        toImport: cashRows.map(summariseCash),
+        alreadyImported: cashAlreadyImported.length,
+        beforeBaseline: cashBeforeBaseline.map(summariseCash),
+        baselineDate,
+        net: cashRows.reduce((sum, c) => sum + (c.cashKind === "DEPOSIT" ? c.amount : -c.amount), 0),
+      },
       warnings: buildWarnings(accepted),
       impliedPositions: Object.fromEntries(impliedPositions(accepted)),
     };
@@ -268,8 +337,20 @@ export async function approveBatch(batchId, { rowIds = null } = {}) {
   // Duplicate check up front, against the ledger as it stands. Anything caught
   // here is reported as a skip rather than attempted and rescued.
   const toWrite = [];
+  const cashToWrite = [];
   const skippedDuplicates = [];
   for (const r of eligible) {
+    // Cash rows were classified at staging time and carry no symbol, so they
+    // skip the trade duplicate check -- which queries `transactions` and would
+    // never match one.
+    if (r.normalized.recordType === "CASH") {
+      if (cashRefAlreadyUsed.get(batch.account_id, r.normalized.externalRef)) {
+        skippedDuplicates.push({ rowId: r.id, externalRef: r.normalized.externalRef });
+      } else {
+        cashToWrite.push(r);
+      }
+      continue;
+    }
     if (refAlreadyUsed.get(batch.account_id, r.normalized.externalRef)) {
       skippedDuplicates.push({ rowId: r.id, externalRef: r.normalized.externalRef });
     } else {
@@ -288,6 +369,22 @@ export async function approveBatch(batchId, { rowIds = null } = {}) {
 
   return withTransaction(() => {
     const written = [];
+    const cashWritten = [];
+
+    for (const r of cashToWrite) {
+      const n = r.normalized;
+      const row = recordCash({
+        accountId: batch.account_id,
+        kind: n.cashKind,
+        amount: n.amount,
+        transactionDate: n.transactionDate,
+        externalRef: n.externalRef,
+        sourceCode: n.sourceCode,
+        notes: n.description ?? null,
+      });
+      setCashRowApplied.run(r.id);
+      cashWritten.push({ rowId: r.id, cashId: row.id, kind: n.cashKind, amount: n.amount });
+    }
 
     for (const r of toWrite) {
       const n = r.normalized;
@@ -325,7 +422,7 @@ export async function approveBatch(batchId, { rowIds = null } = {}) {
     }
 
     setBatchStatus.run("reconciled", batch.id);
-    return { batch: getBatch.get(batch.id), written, skippedDuplicates };
+    return { batch: getBatch.get(batch.id), written, cashWritten, skippedDuplicates };
   });
 }
 

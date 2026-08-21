@@ -1,0 +1,25 @@
+-- v20 -> v21: make cash movements importable.
+--
+-- Broker exports carry far more than trades. Robinhood's files alone hold
+-- deposits, Gold subscription fees, cash interest, stock-lending income and
+-- futures sweeps -- 55 rows across the three exports, including two $500 ACH
+-- deposits. All of it was parsed past and counted as "nonTrade".
+--
+-- That cost nothing while every such row predated an opening balance, which is
+-- how the accounts were reconciled: a dated OPENING_BALANCE makes everything
+-- before it irrelevant. It stops being free the moment an import covers ground
+-- AFTER a baseline, because then a missing deposit means cash silently drifts
+-- from the broker's figure -- and cash drifting quietly is precisely the
+-- failure this app keeps having to correct after the fact.
+--
+-- `source_code` holds the broker's own label for the movement: GOLD, INT,
+-- SLIP, ACH, RTP, FUTSWP. `kind` stays the accounting direction and nothing
+-- else, so the two do not compete. This is a column rather than something to
+-- read back out of `notes` for the usual reason: "how much have I paid in
+-- subscription fees" has to be a GROUP BY, not a text search.
+ALTER TABLE cash_transactions ADD COLUMN source_code TEXT;
+
+-- No index is added here. cash_transactions already carries
+-- idx_cash_external_ref, partial on voided_at IS NULL, created with the table
+-- in v19 -- checked rather than assumed, after writing a duplicate declaration
+-- into schema.sql on the strength of not having looked.

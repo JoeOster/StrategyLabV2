@@ -567,6 +567,11 @@ CREATE TABLE cash_transactions (
   -- sources of truth about direction and they eventually disagree.
   amount            REAL NOT NULL CHECK (amount > 0),
   external_ref      TEXT,
+  -- The broker's own label for the movement: GOLD, INT, SLIP, ACH, RTP,
+  -- FUTSWP. A column rather than prose in `notes`, because "how much have I
+  -- paid in subscription fees" must be a GROUP BY and not a text search.
+  -- `kind` stays the accounting direction alone, so the two never compete.
+  source_code       TEXT,
   notes             TEXT,
   created_at        TEXT NOT NULL DEFAULT (datetime('now')),
   voided_at         TEXT,

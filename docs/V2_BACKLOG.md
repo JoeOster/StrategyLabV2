@@ -1139,33 +1139,38 @@ Open questions for the walkthrough, not to be answered by guessing:
   above for the researcher/backtester/auditor/chart-agent breakdown and
   suggested build order.
 
-## Import non-trade cash movements
+## Import non-trade cash movements -- DONE 2026-08-21 (schema v21)
 
-Broker exports carry more than trades. Robinhood's file alone has 48 rows the
-importer parses past: `RTP` and `ACH` transfers, `GOLD` subscription fees,
-`INT` interest, `SLIP` stock-lending income, `FUTSWP` futures sweeps. Fidelity
-and E*TRADE have their own equivalents.
+Broker exports carry far more than trades. Robinhood's three files hold 59 cash
+rows between them: a $2,000 instant deposit, two $500 ACH deposits, $55 of Gold
+subscription fees, interest, stock-lending income, futures sweeps. All of it
+was parsed past and counted as `nonTrade`.
 
-These map cleanly onto `cash_transactions`, which already exists and already
-has the right kinds -- `DEPOSIT`, `WITHDRAWAL`, `FEE`. The mapping is the easy
-part; the reason this is not done yet is that it interacts with the opening
-balance in a way that has to be got right.
+**What it does now.** The Robinhood parser returns a separate `cash` array
+alongside `rows`. Those movements bypass `reconcile()` entirely -- there are no
+shares to match, so none of its FIFO reasoning applies -- and are classified
+only against the account's baseline and against what has already been imported.
+`approveBatch` routes them to `recordCash`.
 
-`OPENING_BALANCE` is a DATED baseline: only movements on or after its date
-count. Every non-trade row in the current exports predates the 2026-08-21
-baselines, so importing them today would change no balance at all. The moment
-an import covers a period after a baseline, though, an unstaged deposit means
-cash silently drifts from the broker's figure -- and cash drifting quietly is
-precisely the failure this app keeps having to correct after the fact.
+**The ordering rule, which is the part that needed care.** An `OPENING_BALANCE`
+says "this much cash was here on this date", so every movement before it is
+already inside that figure and importing it would count it twice. Such rows are
+reported as `beforeBaseline` rather than silently filtered: "7 movements were
+ignored" is something to see and agree with, not to discover later from a
+balance that drifted. Verified on the real 2025 file -- all seven of its cash
+rows fall before the 2026-08-21 baseline and are correctly absorbed.
 
-So the work is:
+**Direction is decided per row, not per code.** `ACH` is a deposit or a
+withdrawal depending on the sign of Amount, and a lookup table mapping the code
+to a kind would have booked a withdrawal as a credit. Only `GOLD` has a fixed
+direction, because a subscription fee is never a credit. Amount is always
+positive and direction lives in `kind`, matching what `cash_transactions`
+already enforces.
 
-1. Extend each parser to emit non-trade rows with a `cashKind`.
-2. Stage them alongside trades so the preview shows them and they can be
-   approved or rejected as a unit.
-3. Skip any row dated before the account's opening balance, and say so in the
-   preview rather than dropping it quietly -- the baseline already accounts
-   for it, and importing it would double-count.
+`source_code` holds the broker's own label so "what have I paid in subscription
+fees" stays a `GROUP BY` rather than a search through prose.
 
-Worth doing before the next monthly import that covers new ground, not urgent
-for the historical backfill that is already reconciled.
+**Only Robinhood so far.** Fidelity and E*TRADE have their own equivalents and
+their parsers still count those rows as skipped. The shape is general; the
+mapping is per broker.
+

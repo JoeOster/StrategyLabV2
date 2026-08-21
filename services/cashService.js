@@ -15,8 +15,8 @@ import db from "../lib/db.js";
 import { TRANSFER_OUT_REASON, TRANSFER_IN_REASON } from "../lib/constants.js";
 
 const insertCash = db.prepare(`
-  INSERT INTO cash_transactions (account_id, transaction_date, kind, amount, external_ref, notes)
-  VALUES (@accountId, @transactionDate, @kind, @amount, @externalRef, @notes)
+  INSERT INTO cash_transactions (account_id, transaction_date, kind, amount, external_ref, notes, source_code)
+  VALUES (@accountId, @transactionDate, @kind, @amount, @externalRef, @notes, @sourceCode)
   RETURNING *
 `);
 
@@ -150,6 +150,7 @@ export function recordCash(input) {
     amount,
     externalRef: input.externalRef ?? null,
     notes: input.notes ?? null,
+    sourceCode: input.sourceCode ?? null,
   });
 }
 

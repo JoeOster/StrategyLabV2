@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 648;
+const MIN_EXPECTED_CHECKS = 664;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4170,6 +4170,74 @@ console.log("\n34. schema.sql and the migrations agree");
   check("theme is gone from the settings whitelist", !("theme" in GENERAL_SETTING_DEFAULTS));
   check("...while the settings that do work remain", "app_title" in GENERAL_SETTING_DEFAULTS);
   check("...including the benchmark", "benchmark_symbol" in GENERAL_SETTING_DEFAULTS);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n35. Cash movements are importable");
+// Broker exports carry far more than trades. Robinhood's three files hold 59
+// cash rows between them -- a $2,000 instant deposit, two $500 ACH deposits,
+// $55 of Gold subscription fees, interest, stock-lending income, futures
+// sweeps -- and every one was parsed past and counted as "nonTrade".
+//
+// That was free only while all of them predated an opening balance. It stops
+// being free the moment an import covers ground AFTER a baseline, because then
+// a missing deposit means cash drifts from the broker's figure -- quietly,
+// which is the failure mode this app keeps having to correct after the fact.
+{
+  const rh = await import("../services/importers/robinhood.js");
+  const H = '"Activity Date","Process Date","Settle Date","Instrument","Description","Trans Code","Quantity","Price","Amount"';
+
+  const parsed = rh.parse([
+    H,
+    '"8/20/2026","8/20/2026","8/20/2026","","Gold Subscription Fee","GOLD","","","($5.00)"',
+    '"3/3/2025","3/3/2025","3/4/2025","","ACH Deposit","ACH","","","$500.00"',
+    '"7/8/2025","7/8/2025","7/8/2025","CIFR","Stock Lending","SLIP","","","$0.01"',
+    '"6/1/2026","6/1/2026","6/1/2026","","Withdrawal","ACH","","","($250.00)"',
+    '"6/2/2026","6/2/2026","6/2/2026","","Nothing moved","MISC","","",""',
+  ].join("\n"));
+
+  check("Cash rows are returned separately from trades", Array.isArray(parsed.cash));
+  check("...and are not counted as trades", parsed.rows.length === 0);
+  check("Four movements found, the empty one ignored", parsed.cash.length === 4);
+
+  const byCode = Object.fromEntries(parsed.cash.map((c) => [c.sourceCode, c]));
+  check("A subscription fee is a FEE regardless of sign handling", byCode.GOLD.kind === undefined || byCode.GOLD.cashKind === "FEE");
+  check("...with a positive amount, direction living in the kind", byCode.GOLD.amount === 5);
+  check("Money in is a DEPOSIT", byCode.SLIP.cashKind === "DEPOSIT");
+  check("The broker's own label is kept as data", byCode.SLIP.sourceCode === "SLIP");
+  check("A row with no amount records nothing", !("MISC" in byCode));
+
+  // ACH goes both ways, which is why direction is decided per row and not per
+  // code -- a table mapping ACH to DEPOSIT would have booked a withdrawal as
+  // a credit and moved the balance $500 the wrong way.
+  const achs = parsed.cash.filter((c) => c.sourceCode === "ACH");
+  check("The same code can be a deposit or a withdrawal", achs.length === 2);
+  check("...a credit reads as DEPOSIT", achs.some((c) => c.cashKind === "DEPOSIT" && c.amount === 500));
+  check("...a debit reads as WITHDRAWAL", achs.some((c) => c.cashKind === "WITHDRAWAL" && c.amount === 250));
+
+  check("Each movement carries a stable ref for de-duplication",
+    new Set(parsed.cash.map((c) => c.externalRef)).size === 4);
+  check("...and a human label from the description",
+    byCode.GOLD.description === "Gold Subscription Fee");
+
+  // The write path, including the direction rule.
+  const cashSvc = await import("../services/cashService.js");
+  const acct = acctSvcEarly.createAccount(holder.id, { broker: "robinhood", accountNumber: "CASH1" });
+  const start = cashSvc.cashBalance(acct.id).balance;
+  cashSvc.recordCash({ accountId: acct.id, kind: "DEPOSIT", amount: 500, transactionDate: "2026-01-02", externalRef: "d1", sourceCode: "ACH" });
+  cashSvc.recordCash({ accountId: acct.id, kind: "FEE", amount: 5, transactionDate: "2026-01-03", externalRef: "f1", sourceCode: "GOLD" });
+  check("A deposit adds and a fee subtracts", Math.abs(cashSvc.cashBalance(acct.id).balance - (start + 495)) < 1e-9);
+  check("source_code is stored, not buried in prose",
+    cashSvc.listCashTransactions(acct.id).some((r) => r.source_code === "GOLD"));
+
+  // Re-importing the same file must be a no-op.
+  let dup = false;
+  try {
+    cashSvc.recordCash({ accountId: acct.id, kind: "DEPOSIT", amount: 500, transactionDate: "2026-01-02", externalRef: "d1", sourceCode: "ACH" });
+  } catch { dup = true; }
+  check("The same movement cannot be imported twice", dup);
+  check("...and the balance is unchanged by the attempt",
+    Math.abs(cashSvc.cashBalance(acct.id).balance - (start + 495)) < 1e-9);
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
