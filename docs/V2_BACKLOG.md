@@ -905,7 +905,48 @@ dialog (`Paper Trade > + Log Paper Trade`):
 **Question to settle before building #2**, because two readings lead to very
 different work:
 
-**Joe clarified (2026-08-21):** "limit buy is execute at x dollars, not at
+**ANSWERED 2026-08-21.** Joe: *"limit buy - these are always pending, probably
+needs a confirmation of price, same goes for limit sell."*
+
+So a limit order is PENDING until the price is reached, and when it is, the
+actual fill is confirmed by hand rather than assumed to equal the limit. That
+gap -- limit $92, filled at $92.05 -- is entry slippage, the other half of the
+measurement the exit ladder provides.
+
+### This machinery already exists. It is in the wrong tab.
+
+A pending buy at a target price, which alerts when reached and then collects a
+real fill, is exactly a Journal idea of type BUY_LIMIT. `executeJournalIdea`
+already asks for the actual fill rather than reusing the target -- deliberately,
+per its own comment, because a real fill rarely matches. It is built and
+tested.
+
+What is missing is that **Log Paper Trade and Log Order only offer "I already
+bought this"**, so the pending case has nowhere to go from those tabs and would
+otherwise be reinvented beside the one that works.
+
+The model is then symmetric, which is a good sign it is right:
+
+| | trigger | user confirms | measures |
+|---|---|---|---|
+| entry | limit price reached | actual fill price | entry slippage |
+| exit | rung reached | actual sale | exit slippage |
+
+The exit half shipped 2026-08-21 (plans + plan_exits). The entry half exists
+but is reachable only through Journal.
+
+**So the work is exposure, not construction:** the trade dialogs gain a
+pending mode that creates the watched_item rather than a transaction, and the
+confirm-fill step becomes reachable from Orders and Paper Trade instead of
+living only behind Journal's Execute button.
+
+A standalone limit SELL needs nothing new -- it is a one-rung ladder.
+
+This also settles the question raised during the walkthrough about whether
+Journal ideas and paper trades were converging. For the pending case they are
+the same object, and should not be built twice.
+
+**Superseded (kept for the reasoning):** "limit buy is execute at x dollars, not at
 current price necessarily." So the price typed is a TRIGGER, not a fill that
 has already happened. That rules out Reading A below. What is still open is
 whether the position exists immediately at that price, or not until the market
