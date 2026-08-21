@@ -212,13 +212,13 @@ export function renderSummary(s) {
       }</span>`;
 
   return `
-    <div class="summary-item"><span class="summary-label">Positions</span><span class="summary-value">${s.positionCount}</span></div>
+    <div class="summary-item"><span class="summary-label">Positions</span><span class="summary-value">${s.positionCount}${s.lotCount > s.positionCount ? `<span class="summary-label"> in ${s.lotCount} lots</span>` : ""}</span></div>
     <div class="summary-item"><span class="summary-label">Cost Basis</span><span class="summary-value">${money(s.totalCost)}</span></div>
     <div class="summary-item"><span class="summary-label">Market Value</span>${valueCell}</div>
-    <div class="summary-item"><span class="summary-label">Unrealized</span>${unrealCell}</div>
+    <div class="summary-item"><span class="summary-label" title="On current holdings only — this is the figure comparable to a broker’s total gain/loss.">Unrealized</span>${unrealCell}</div>
     <div class="summary-item"><span class="summary-label">Realized</span><span class="summary-value ${realClass}">${signedMoney(s.realizedPnl)}</span></div>
     <div class="summary-item"><span class="summary-label">Dividends</span><span class="summary-value">${money(s.dividendIncome)}</span></div>
-    <div class="summary-item"><span class="summary-label">Total Return</span><span class="summary-value ${totalClass}">${signedMoney(s.totalReturn)}${
+    <div class="summary-item"><span class="summary-label" title="Realized + dividends + unrealized. A broker’s “total gain/loss” is usually unrealized only, so these will not match.">Total Return</span><span class="summary-value ${totalClass}">${signedMoney(s.totalReturn)}${
       unknown ? '<span class="summary-label"> (realized only)</span>' : ""
     }</span></div>`;
 }

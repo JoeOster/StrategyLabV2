@@ -422,6 +422,10 @@ const openPositionsQuery = db.prepare(`
     AND t.quantity_remaining > 0
     AND t.is_paper_trade = @isPaperTrade
     AND t.voided_at IS NULL
+    -- Account scope. NULL means every account, which is the default view; a
+    -- number narrows to one. IS rather than = so the NULL case does not
+    -- silently match nothing.
+    AND (@accountId IS NULL OR t.account_id IS @accountId)
   ORDER BY s.symbol, t.transaction_date
 `);
 
@@ -430,8 +434,10 @@ const openPositionsQuery = db.prepare(`
  * the entry price and holding period of each purchase stay visible -- that's
  * the distinction the old app's "position lot" cards were built around.
  */
-export function listOpenPositions(holderId, { isPaperTrade = false } = {}) {
-  return openPositionsQuery.all({ holderId, isPaperTrade: isPaperTrade ? 1 : 0 }).map((row) => {
+export function listOpenPositions(holderId, { isPaperTrade = false, accountId = null } = {}) {
+  return openPositionsQuery
+    .all({ holderId, isPaperTrade: isPaperTrade ? 1 : 0, accountId })
+    .map((row) => {
     // Cost basis of the *remaining* shares, not the original purchase.
     const costPerShare = row.original_cost_basis / row.original_quantity;
     const costBasis = costPerShare * row.quantity_remaining;
@@ -476,6 +482,9 @@ const transactionsQuery = db.prepare(`
     AND (@type IS NULL OR t.transaction_type = @type)
     AND (@includeVoided = 1 OR t.voided_at IS NULL)
     AND (@needsReviewOnly = 0 OR (t.needs_review = 1 AND t.review_resolved_at IS NULL))
+    -- Account scope, same convention as the positions query: NULL is every
+    -- account, a number narrows to one.
+    AND (@accountId IS NULL OR t.account_id IS @accountId)
   ORDER BY t.transaction_date DESC, t.id DESC
 `);
 
@@ -494,6 +503,7 @@ export function listTransactions(holderId, filters = {}) {
       type: filters.type || null,
       includeVoided: filters.includeVoided ? 1 : 0,
       needsReviewOnly: filters.needsReviewOnly ? 1 : 0,
+      accountId: filters.accountId ?? null,
     })
     .map((row) => ({ ...row, realized_pnl: computeRealizedPnl(row), total: computeTotal(row) }));
 }
@@ -539,8 +549,8 @@ function computeTotal(row) {
  * `unpricedCount > 0` means the market figures are partial, and the UI is
  * expected to say so rather than present them as the whole picture.
  */
-export function getPortfolioSummary(holderId, { isPaperTrade = false } = {}) {
-  const positions = listOpenPositions(holderId, { isPaperTrade });
+export function getPortfolioSummary(holderId, { isPaperTrade = false, accountId = null } = {}) {
+  const positions = listOpenPositions(holderId, { isPaperTrade, accountId });
   const totalCost = positions.reduce((sum, p) => sum + p.cost_basis, 0);
 
   const priced = positions.filter((p) => p.market_value != null);
@@ -556,17 +566,26 @@ export function getPortfolioSummary(holderId, { isPaperTrade = false } = {}) {
   const totalValue = priced.length > 0 ? pricedValue : null;
   const unrealized = priced.length > 0 ? pricedValue - pricedCost : null;
 
-  const realized = listTransactions(holderId, { isPaperTrade, type: "SELL" }).reduce(
+  // Scoped the same way as the positions above, or the strip would show one
+  // account's holdings beside every account's realized P&L.
+  const realized = listTransactions(holderId, { isPaperTrade, accountId, type: "SELL" }).reduce(
     (sum, t) => sum + (t.realized_pnl ?? 0),
     0,
   );
-  const dividends = listTransactions(holderId, { isPaperTrade, type: "DIVIDEND" }).reduce(
+  const dividends = listTransactions(holderId, { isPaperTrade, accountId, type: "DIVIDEND" }).reduce(
     (sum, t) => sum + t.price,
     0,
   );
 
   return {
-    positionCount: positions.length,
+    // Lots, not holdings. Three purchases of MRVL are three rows here because
+    // each keeps its own entry price, holding period and thesis -- that is the
+    // whole point of the per-lot model. But it is NOT what a broker means by
+    // "positions", and labelling it so read as 8 holdings against Fidelity's 6.
+    lotCount: positions.length,
+    // Distinct securities. This is what a broker calls a position, and what
+    // the summary strip should show.
+    positionCount: new Set(positions.map((p) => p.security_id)).size,
     totalCost,
     totalValue,
     // How much of the picture the market figures actually cover.

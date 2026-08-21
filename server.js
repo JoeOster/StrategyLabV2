@@ -810,9 +810,12 @@ app.get("/api/summary", (req, res) => {
 app.get("/api/positions", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   const isPaperTrade = req.query.paper === "1";
+  // Orders only. Paper trades are not account-dependent -- they carry no
+  // account_id at all -- so the Paper Trade view never sends this.
+  const accountId = req.query.accountId ? Number(req.query.accountId) : null;
   res.json({
-    positions: txns.listOpenPositions(holder.id, { isPaperTrade }),
-    summary: txns.getPortfolioSummary(holder.id, { isPaperTrade }),
+    positions: txns.listOpenPositions(holder.id, { isPaperTrade, accountId }),
+    summary: txns.getPortfolioSummary(holder.id, { isPaperTrade, accountId }),
   });
 });
 
@@ -827,6 +830,7 @@ app.get("/api/transactions", (req, res) => {
       type: req.query.type,
       includeVoided: req.query.includeVoided === "1",
       needsReviewOnly: req.query.needsReview === "1",
+      accountId: req.query.accountId ? Number(req.query.accountId) : null,
     }),
   );
 });

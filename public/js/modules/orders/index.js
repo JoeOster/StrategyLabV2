@@ -61,6 +61,7 @@ export async function initializeOrdersModule() {
   els.positionsThead = document.getElementById("positions-thead-row");
   els.positionsTbody = document.getElementById("positions-tbody");
   els.positionsFilter = document.getElementById("positions-filter");
+  els.positionsAccount = document.getElementById("positions-account");
   els.positionsCount = document.getElementById("positions-count");
   els.refreshPricesBtn = document.getElementById("orders-refresh-prices-btn");
   els.positionsColumnsBtn = document.getElementById("positions-columns-btn");
@@ -102,6 +103,11 @@ export async function initializeOrdersModule() {
   els.historyThead.addEventListener("click", (e) => handleSort(e, "historySort", renderHistory));
   els.positionsTbody.addEventListener("click", handlePositionsAction);
   els.historyTbody.addEventListener("click", handleHistoryAction);
+
+  els.positionsAccount.addEventListener("change", () => {
+    state.accountId = els.positionsAccount.value ? Number(els.positionsAccount.value) : null;
+    reloadOrdersView();
+  });
 
   els.positionsFilter.addEventListener("input", () => {
     state.positionsFilter = els.positionsFilter.value;
@@ -152,7 +158,26 @@ export async function initializeOrdersModule() {
   els.orderDeleteBtn.addEventListener("click", handleDeleteFromDialog);
   els.refreshPricesBtn.addEventListener("click", handleRefreshPrices);
 
+  await populateAccountFilter();
   await reloadOrdersView();
+}
+
+/**
+ * Fills the account filter.
+ *
+ * Lists every registered account rather than only those with trades: an
+ * account showing nothing is a useful answer -- it says the import has not been
+ * run for it -- whereas its absence looks like the filter is broken.
+ */
+async function populateAccountFilter() {
+  const accounts = await api.fetchAccountsForFilter();
+  const current = els.positionsAccount.value;
+  els.positionsAccount.innerHTML =
+    '<option value="">All accounts</option>' +
+    accounts
+      .map((a) => `<option value="${a.id}">${a.label.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</option>`)
+      .join("");
+  els.positionsAccount.value = current;
 }
 
 export async function reloadOrdersView() {
@@ -181,7 +206,7 @@ async function handleTabClick(event) {
 
 async function loadPositions() {
   try {
-    const { positions, summary } = await api.fetchPositions();
+    const { positions, summary } = await api.fetchPositions({ accountId: state.accountId ?? null });
     state.positions = positions;
     state.summary = summary;
     els.summary.innerHTML = renderSummary(summary);

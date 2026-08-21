@@ -8,7 +8,12 @@ async function handleResponse(res) {
   return res.json();
 }
 
-export const fetchPositions = () => fetch("/api/positions").then(handleResponse);
+// accountId is Orders-only. Paper trades are not account-dependent -- they
+// carry no account_id -- so the Paper Trade view never passes one.
+export const fetchPositions = ({ accountId = null } = {}) =>
+  fetch(`/api/positions${accountId ? `?accountId=${accountId}` : ""}`).then(handleResponse);
+
+export const fetchAccountsForFilter = () => fetch("/api/accounts").then(handleResponse);
 
 export function fetchTransactions(filters = {}) {
   const params = new URLSearchParams();
