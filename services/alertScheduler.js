@@ -12,6 +12,7 @@
 // this is the one constant to edit.
 import { checkAlerts } from "./watchlistService.js";
 import { getGeneralSettings } from "./settingsService.js";
+import { isMarketHoliday } from "../lib/marketCalendar.js";
 
 export const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
@@ -54,16 +55,20 @@ export async function checkAlertsGuarded() {
  * target" section) may run in any local timezone, but "market hours" always
  * means Eastern time regardless of where the process happens to live.
  *
- * Known limitation, not fixed here: no market-holiday calendar. Thanksgiving,
- * Christmas, etc. will still be treated as open Mon-Fri sessions -- a wasted
- * poll or two a year, not a correctness bug worth the added complexity of a
- * holiday list yet.
+ * Holidays come from lib/marketCalendar.js, which computes them from the NYSE
+ * rules rather than listing dates. A list would work until the year it ran out
+ * and then start polling on Thanksgiving again with nothing to say so.
  *
  * @param {Date} [now]
  */
 export function isMarketOpen(now = new Date()) {
-  const { weekday, hour, minute } = easternParts(now);
+  const { weekday, hour, minute, date } = easternParts(now);
   if (weekday === "Sat" || weekday === "Sun") return false;
+  // Checked against the EASTERN calendar date, not the server's. A process in
+  // another timezone would otherwise start and end the holiday hours early or
+  // late -- which is the same class of mistake this function already avoids
+  // for market hours themselves.
+  if (isMarketHoliday(date)) return false;
   const minutesSinceMidnight = hour * 60 + minute;
   const openAt = 9 * 60 + 30; // 9:30am ET
   const closeAt = 16 * 60; // 4:00pm ET
@@ -74,12 +79,21 @@ function easternParts(date) {
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     hourCycle: "h23",
   });
   const parts = Object.fromEntries(fmt.formatToParts(date).map((p) => [p.type, p.value]));
-  return { weekday: parts.weekday, hour: Number(parts.hour), minute: Number(parts.minute) };
+  return {
+    weekday: parts.weekday,
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    // The calendar day in New York, which is what a holiday is a fact about.
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+  };
 }
 
 /** One polling tick: checks the enabled flag and market hours, then defers to checkAlerts(). */

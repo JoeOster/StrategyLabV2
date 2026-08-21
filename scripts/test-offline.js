@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 732;
+const MIN_EXPECTED_CHECKS = 760;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4556,6 +4556,79 @@ console.log("\n40. Rows dropped only because they are already recorded");
   check("Re-staging the same file reports nothing alarming", second.dropped.length === 0);
   check("...and counts it as already recorded instead", second.droppedAlreadyImported === 1);
   imports.discardBatch(second.batch.id);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n41. Market holidays are computed, not listed");
+// A hardcoded list of dates works until the year it runs out, and then the app
+// silently starts polling on Thanksgiving again with no error to say so. Every
+// NYSE holiday follows a rule, so the rules are what is written down -- and
+// the rules are what these tests check.
+{
+  const cal = await import("../lib/marketCalendar.js");
+  const sch = await import("../services/alertScheduler.js");
+
+  const h2025 = cal.marketHolidays(2025);
+  const h2026 = cal.marketHolidays(2026);
+  check("A year has ten holidays", h2025.length === 10 && h2026.length === 10);
+
+  // Fixed dates.
+  check("Christmas 2025", h2025.includes("2025-12-25"));
+  check("Independence Day 2025", h2025.includes("2025-07-04"));
+
+  // Weekday-of-month rules.
+  check("MLK is the third Monday of January", h2026.includes("2026-01-19"));
+  check("Presidents Day is the third Monday of February", h2026.includes("2026-02-16"));
+  check("Memorial Day is the LAST Monday of May", h2026.includes("2026-05-25"));
+  check("Labor Day is the first Monday of September", h2026.includes("2026-09-07"));
+  check("Thanksgiving is the fourth Thursday of November", h2026.includes("2026-11-26"));
+
+  // Good Friday is the one with no fixed date and no weekday rule, so it is
+  // the one a hardcoded list gets wrong first -- it moves by over a month.
+  check("Easter 2025 is 20 April", cal.easterSunday(2025).toISOString().slice(0, 10) === "2025-04-20");
+  check("Easter 2026 is 5 April", cal.easterSunday(2026).toISOString().slice(0, 10) === "2026-04-05");
+  check("Good Friday 2025", h2025.includes("2025-04-18"));
+  check("Good Friday 2026", h2026.includes("2026-04-03"));
+  check("Good Friday 2027 moves to March", cal.marketHolidays(2027).includes("2027-03-26"));
+
+  // Observance.
+  check("A Saturday holiday closes the Friday before", h2026.includes("2026-07-03"));
+  check("...and 4 July itself is not listed twice", !h2026.includes("2026-07-04"));
+  check("A Sunday holiday closes the Monday after", cal.marketHolidays(2027).includes("2027-07-05"));
+
+  // The exception: a Saturday New Year's Day does NOT shut 31 December, which
+  // would close a session of the previous trading year for the next year's
+  // holiday.
+  const h2028 = cal.marketHolidays(2028);
+  check("1 January 2028 falls on a Saturday", new Date("2028-01-01T12:00:00Z").getUTCDay() === 6);
+  check("...so 31 December 2027 stays open", !cal.marketHolidays(2027).includes("2027-12-31"));
+  check("...and 1 January is not listed either", !h2028.includes("2028-01-01"));
+
+  // Juneteenth only from 2022, its first observed year. Back-projecting it
+  // would mark a day the market was open.
+  check("Juneteenth is observed from 2022", cal.marketHolidays(2022).includes("2022-06-20"));
+  check("...and not before", !cal.marketHolidays(2021).some((d) => d.startsWith("2021-06")));
+
+  check("A holiday is recognised by its Eastern date", cal.isMarketHoliday("2026-11-26"));
+  check("...and an ordinary day is not", !cal.isMarketHoliday("2026-11-25"));
+  check("Nonsense input does not claim a holiday", !cal.isMarketHoliday("not-a-date"));
+
+  // Early closes must not collide with full holidays: 3 July 2026 is the
+  // observed Independence Day, and a caller trusting both lists would reopen
+  // the market for an afternoon it is shut.
+  const early2026 = cal.earlyCloseDays(2026);
+  check("An early close is never also a full holiday",
+    !early2026.some((d) => cal.isMarketHoliday(d)));
+  check("The Friday after Thanksgiving is an early close", early2026.includes("2026-11-27"));
+
+  // And the thing that actually consumes it.
+  check("The market is open on an ordinary Friday morning",
+    sch.isMarketOpen(new Date("2026-08-21T14:00:00Z")));
+  check("...closed on Thanksgiving", !sch.isMarketOpen(new Date("2026-11-26T15:00:00Z")));
+  check("...closed on Good Friday", !sch.isMarketOpen(new Date("2026-04-03T15:00:00Z")));
+  check("...closed on an observed holiday", !sch.isMarketOpen(new Date("2026-07-03T15:00:00Z")));
+  check("...still closed at the weekend", !sch.isMarketOpen(new Date("2026-08-22T15:00:00Z")));
+  check("...and still closed after 4pm ET", !sch.isMarketOpen(new Date("2026-08-21T21:30:00Z")));
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

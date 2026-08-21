@@ -511,3 +511,35 @@ that a fresh init and the live migrated database have identical column sets
 across all 29 tables; `transactions.plan_id` differs in POSITION only, because
 `ALTER TABLE` appends while `schema.sql` declares it inline, and nothing reads
 columns positionally.
+
+### Market-holiday calendar -- ADDED (2026-08-21)
+
+`isMarketOpen` treated Thanksgiving and Christmas as ordinary Mon-Fri sessions.
+Costing a wasted poll or two a year, it had been documented as a known
+limitation rather than fixed.
+
+`lib/marketCalendar.js` computes the ten NYSE holidays from their rules rather
+than listing dates. A hardcoded list works until the year it runs out, and then
+the app silently starts polling on Thanksgiving again with nothing to say so.
+
+Good Friday is the reason this is more than a lookup table: it has no fixed
+date and no weekday-of-month rule, so it needs Easter, and it moves by over a
+month between years -- 18 April in 2025, 3 April in 2026, 26 March in 2027.
+
+Two details that a naive implementation gets wrong, both tested:
+
+- A Saturday holiday closes the Friday before, EXCEPT New Year's Day, where
+  closing 31 December would shut a session of the previous trading year for a
+  holiday belonging to the next one.
+- Juneteenth counts only from 2022, its first observed year. Back-projecting it
+  marks a day the market was open, which matters if this is ever used to read
+  historical price gaps rather than only to decide whether to poll now.
+
+Early closes (1pm on 3 July, the Friday after Thanksgiving, Christmas Eve) are
+computed but deliberately NOT consulted by the scheduler: polling those
+afternoons costs a dozen fetches a year, against the risk of treating a normal
+session as closed. They also had to be filtered against the holidays, since
+3 July 2026 and 24 December 2027 are both full holidays -- listed in both
+places, a caller would reopen the market for an afternoon it is shut.
+
+Thirty-two checks in section 41.
