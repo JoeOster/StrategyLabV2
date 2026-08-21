@@ -108,6 +108,12 @@ const listAccountsStmt = db.prepare(`
     (SELECT MIN(t.transaction_date) FROM transactions t
       WHERE t.account_id = a.id AND t.voided_at IS NULL)                     AS first_transaction_date,
     (SELECT MAX(ib.imported_at) FROM import_batches ib WHERE ib.account_id = a.id) AS last_imported_at,
+    -- Staged but never approved. An account showing no positions has three
+    -- different possible meanings -- never imported, import left half-done, or
+    -- genuinely flat -- and telling someone to log a trade when 133 rows are
+    -- sitting in a pending batch is the wrong answer to the wrong question.
+    (SELECT COALESCE(SUM(ib.row_count), 0) FROM import_batches ib
+      WHERE ib.account_id = a.id AND ib.status = 'pending')                     AS pending_import_rows,
     (SELECT COUNT(*) FROM transactions t
       WHERE t.account_id = a.id AND t.voided_at IS NULL
         AND t.needs_review = 1 AND t.review_resolved_at IS NULL)             AS needs_review_count

@@ -165,6 +165,33 @@ export async function initializeOrdersModule() {
 }
 
 /**
+ * Why this account has nothing in it.
+ *
+ * Three different situations look identical in an empty table: the account was
+ * never imported, an import was staged and never approved, or it is genuinely
+ * flat. The default message told the user to log a trade, which is the wrong
+ * answer to two of the three -- and actively unhelpful when 133 rows are
+ * sitting in a pending batch.
+ */
+function emptyPositionsMessage() {
+  if (state.accountId == null) {
+    return 'No open positions. Use "+ Log Order" to record a purchase, or import a statement.';
+  }
+  const account = (state.accounts ?? []).find((a) => a.id === state.accountId);
+  if (!account) return "No open positions in this account.";
+  if (account.pending_import_rows > 0) {
+    return (
+      `Nothing imported for ${account.label} yet — but ${account.pending_import_rows} row(s) are staged ` +
+      `and waiting to be approved on the Import tab.`
+    );
+  }
+  if (!account.last_imported_at) {
+    return `Nothing has been imported for ${account.label}. Use the Import tab, or log a trade by hand.`;
+  }
+  return `No open positions in ${account.label} — everything imported has been sold.`;
+}
+
+/**
  * Fills the account filter.
  *
  * Lists every registered account rather than only those with trades: an
@@ -173,6 +200,8 @@ export async function initializeOrdersModule() {
  */
 async function populateAccountFilter() {
   const accounts = await api.fetchAccountsForFilter();
+  // Kept so the empty state can explain ITSELF rather than guessing.
+  state.accounts = accounts;
   const current = els.positionsAccount.value;
   els.positionsAccount.innerHTML =
     '<option value="">All accounts</option>' +
@@ -229,7 +258,9 @@ function renderPositions() {
     state.positionsSort.key,
     state.positionsSort.dir,
   );
-  els.positionsTbody.innerHTML = renderPositionsRows(visible, state.positionColumns);
+  els.positionsTbody.innerHTML = renderPositionsRows(visible, state.positionColumns, {
+    emptyMessage: emptyPositionsMessage(),
+  });
   // Totals the VISIBLE rows, so the footer agrees with the filter above it
   // rather than contradicting the rows it sits under.
   els.positionsTfoot.innerHTML = renderPositionsFooter(visible, state.positionColumns);
