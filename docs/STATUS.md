@@ -377,7 +377,7 @@ StrategyLabV2/
 
 Two candidate hosts. **The NUC is the stronger option** — see below.
 
-### Next step (as of 2026-07-27)
+### Migration: DONE 2026-08-21
 
 Discussed migrating with Joe. **Decision: yes, migrate to the NUC** — he'll
 continue development there via VS Code + the Claude Code extension (SSH into
@@ -394,16 +394,36 @@ to Joe's PC. Confirmed prerequisites:
   (`JoeOster/StrategyLabV2`) now has everything through the HA
   auth-header work, so a `git clone` on the NUC won't be missing anything.
 
-**Not done yet, deliberately held off**: the actual systemd unit file and a
-step-by-step migration checklist (env setup, `git clone`, `npm install`,
-`DB_PATH`/`.env`, port/firewall, verifying Yahoo/Finnhub egress from that
-network, deciding whether to bring the existing dev DB over or start fresh).
-Joe wanted to hold off on drafting those specifically until he's ready to
-actually do the move — ask him rather than assuming it's time. When he is,
-build from the "Option A: the Ubuntu NUC" section directly below, which
-already has the concrete gotchas (user-level systemd units, no passwordless
-sudo, disk space history, timezone, the `/api/summary` consumption pattern
-for `Prime_Dashboard`) worked out.
+**~~Not done yet, deliberately held off~~ — executed 2026-08-21.** The app now
+runs on the NUC as a user-level systemd unit. `docs/MIGRATION.md` has the full
+checklist and the verified preconditions; `deploy/` holds the unit files and the
+nightly NAS backup script. Highlights that differ from what was assumed above:
+
+- **The nvm caveat is obsolete.** `/usr/bin/node` on that box is a real system
+  binary at v24.18.0, on the default PATH — systemd needs no wrapper or PATH
+  shim. The `docs-maintenance.sh` nvm path is not how node resolves there.
+- **Zero native dependencies** (`express` + `yahoo-finance2`, both pure JS) is
+  what made this trivial — no node-gyp, no rebuild step.
+- **Egress verified for real**, not assumed: a live `yahoo-finance2` quote from
+  the NUC returned MSFT with 501 history bars through the app's own code path.
+- **Started fresh rather than carrying the dev DB** — it held no user data
+  (0 transactions, 0 watched items), only cached prices.
+- **Nightly backup added**: `node:sqlite`'s `backup()` (hot, WAL-safe) →
+  gzip → `/mnt/brain/backups/strategylab/` on the NAS, which inherits the
+  Synology Hyper Backup → Google Drive job for offsite. It refuses to run if
+  the CIFS mount is absent, since writing to an unmounted path would fill the
+  NUC's own disk while reporting success.
+- **`scripts/stop-server.ps1` and `npm run stop`/`restart` are gone** — Windows
+  only. Use `systemctl --user restart strategylab`.
+- **The PC copy has been deleted.** The NUC is now the only working tree;
+  development happens over SSH.
+
+**The HA webhook is live and proven (2026-08-21).** It points at an HA *webhook
+trigger*, not `notify.<target>` — the payload `{event, triggeredAt, alerts}` has
+no `message` field, so a notify service would reject it with a 400. A webhook
+trigger takes arbitrary JSON and needs no token, so the auth-header field is
+deliberately empty. Verified end to end: a real fired alert POSTed and HA
+returned HTTP 200.
 
 ### Option A: the Ubuntu NUC (recommended)
 
