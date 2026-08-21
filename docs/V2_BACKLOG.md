@@ -763,6 +763,64 @@ So "planned exit $10.75 at 14:02, actual exit $10.40 at 16:20, source =
 Telegram group X" is a join away. What is missing is the query and the screen,
 not the schema. Confirm that against the walkthrough rather than trusting it.
 
+### Four constraints on this feature (raised 2026-08-21, Joe agreed to all four)
+
+Asked directly whether anything was fundamentally wrong with the vision. These
+came out of that, and they change what the reporting should lead with. They
+are not optional polish -- 1 and 2 in particular decide whether the numbers
+mean anything at all.
+
+**1. There will never be enough trades to judge a source.** Separating a 55%
+hit rate from a 45% one takes hundreds of trades. A personal journal produces
+tens per source per year. Market noise swamps source quality entirely.
+
+The real risk is not learning nothing -- it is producing a number that looks
+authoritative. "6 of 10 from the Telegram group" reads as a verdict and is
+statistically indistinguishable from a coin.
+
+But the same data measures something that IS in reach: **the execution gap**.
+Entry and exit slippage are low-variance, largely under Joe's control, and
+attributable after a handful of trades. "Consistently 40bps late on entries,
+missed 3 of 4 exit signals" is actionable from 15 trades; "this source is
+good" is not.
+
+**So the reporting leads with execution efficiency, not source ranking.** Source
+reliability is the thing wanted; it is also the thing the data can least
+support. Any source-level verdict needs a sample-size guard -- suppress it, or
+show the uncertainty, below a threshold. Never render a bare win rate over ten
+trades as though it settles anything.
+
+**2. As recorded, this measures Joe's filter rather than the source.** Only
+acted-on calls get logged. If a group makes 50 calls and Joe takes the 8 that
+look good to him, the resulting hit rate belongs to his selection, not to them.
+
+The model already supports the fix: a `WATCHING` idea never executed is exactly
+"they called it, I passed." Logging skipped calls makes the source's real hit
+rate observable -- and makes the more interesting question answerable, which is
+whether the skipping helped or hurt. That is again a fact about Joe, which is
+the pattern in all of this.
+
+**3. There is no benchmark anywhere in the schema.** "This source returned 8%"
+is meaningless without "the market did 11% over the same holding period". Across
+different periods, a source measured in a bull run beats one measured in chop
+regardless of quality.
+
+Every comparison needs a baseline return over the same dates -- SPY by default,
+configurable. `historical_prices` already holds what is needed, so this can be
+computed on demand rather than stored; store it only if the query proves slow.
+Raw return without a baseline cannot separate source skill from market regime.
+
+**4. The paper leg measures plan adherence, not optimality.** In shape 3 the
+paper leg follows *Joe's own* plan mechanically -- targets and stop that he set
+at entry. So it answers "what if I had followed my plan", which is genuinely
+useful, and NOT "what was the best available outcome".
+
+A source whose targets are too conservative scores beautifully on adherence
+while leaving money on the table, and nothing would surface that. **Name the
+metric "plan adherence" in the UI, never "optimal".** The label will shape the
+conclusions drawn from it.
+
+
 Open questions for the walkthrough, not to be answered by guessing:
 
 - What counts as "the plan" when a source revises its target mid-trade?
