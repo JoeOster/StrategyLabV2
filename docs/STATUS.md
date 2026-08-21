@@ -111,18 +111,18 @@ basis and the void filter all apply. Routes are `POST /api/imports` (stage),
 `GET /api/imports/latest`. Only rows classified `new` are ever written.
 
 **The single next piece of work** is exit parameters on a trade -- a "Set
-Exits" button opening a ladder of exit rungs (), decided with Joe
+Exits" button opening a ladder of exit rungs (`trade_exits`), decided with Joe
 on 2026-08-21 after walking the Journal flow end to end. It is the keystone:
 nothing in plan-vs-actual can be measured until a trade knows where it was
 meant to exit. Full spec, including what was considered and rejected, is in
- under "Exit parameters on a trade".
+`docs/V2_BACKLOG.md` under "Exit parameters on a trade".
 
 The import UI (upload, preview and approve screens over the four
- routes, plus the per-account "latest imported" display) is an
+`/api/imports/*` routes, plus the per-account "latest imported" display) is an
 independent track whose backend is done and tested. Note import is an AUDIT run
 about once a month to correct typos, so the screen that matters most is the
 discrepancy list -- and applying a correction back to an existing transaction is
-NOT yet wired, though  already does exactly that job.
+NOT yet wired, though `updateTransaction` already does exactly that job.
 
 **To run the real import**, take a backup first -- `bash deploy/backup-db.sh`
 is the real one and refuses to run if the NAS mount is down, or the snapshot
