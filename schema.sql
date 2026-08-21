@@ -325,8 +325,32 @@ CREATE TABLE transactions (
   -- row drawing the lot down via quantity_remaining. Every read path filters
   -- `voided_at IS NULL`.
   voided_at           TEXT,
-  void_reason         TEXT
+  void_reason         TEXT,
+  -- Data-quality flag, for rows whose numbers are not fully supported by the
+  -- source they came from. Set by the CSV importer when a value had to be
+  -- extrapolated rather than read -- chiefly shares transferred in from
+  -- another account, where the export gives a transfer *value* but not what
+  -- was actually paid, so cost basis (and therefore unrealized P&L) is an
+  -- approximation.
+  --
+  -- Deliberately a column rather than a note: the whole point is being able to
+  -- ask "what did we extrapolate?" later and fix it once the real records turn
+  -- up. `import_raw_rows.reconciliation_status` cannot answer that, because it
+  -- describes the staging row, not the transaction that came out of it.
+  --
+  -- review_resolved_at is stamped when the real figures replace the estimate,
+  -- keeping the fact that it *was* estimated rather than erasing it -- same
+  -- reasoning as voided_at above.
+  needs_review        INTEGER NOT NULL DEFAULT 0 CHECK (needs_review IN (0,1)),
+  review_reason       TEXT,
+  review_resolved_at  TEXT
 );
+
+-- Partial: the interesting query is always "what still needs reconciling",
+-- which is a small slice of a table that will grow without bound.
+CREATE INDEX idx_transactions_needs_review
+  ON transactions (holder_id)
+  WHERE needs_review = 1 AND review_resolved_at IS NULL;
 
 -- Partial unique, replacing the old table-level UNIQUE (account_id, external_ref):
 -- a voided row must NOT keep its external_ref slot, or re-importing a broker CSV

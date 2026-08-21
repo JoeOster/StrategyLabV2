@@ -18,13 +18,22 @@ const insertTransaction = db.prepare(`
   INSERT INTO transactions (
     holder_id, account_id, security_id, watched_item_id, source_id, strategy_id, is_paper_trade,
     transaction_type, transaction_date, quantity, price, fees, cost_basis,
-    quantity_remaining, linked_buy_id, external_ref, notes
+    quantity_remaining, linked_buy_id, external_ref, notes,
+    needs_review, review_reason
   ) VALUES (
     @holderId, @accountId, @securityId, @watchedItemId, @sourceId, @strategyId, @isPaperTrade,
     @transactionType, @transactionDate, @quantity, @price, @fees, @costBasis,
-    @quantityRemaining, @linkedBuyId, @externalRef, @notes
+    @quantityRemaining, @linkedBuyId, @externalRef, @notes,
+    @needsReview, @reviewReason
   ) RETURNING *
 `);
+
+// node:sqlite requires every named parameter to be supplied, so a new optional
+// column would otherwise mean touching every insert call site and hoping none
+// was missed. Defaulting here means only the paths that actually set a review
+// flag have to mention it.
+const insertTxn = (params) =>
+  insertTransaction.get({ needsReview: 0, reviewReason: null, ...params });
 
 // --- Stock splits --------------------------------------------------------
 // A split is a market event, not something a user logs -- it arrives via
@@ -71,7 +80,7 @@ function rescaleLotForSplit(lot, splitDate, ratioText) {
   const newQuantity = lot.quantity * multiplier;
   const newQuantityRemaining = lot.quantity_remaining * multiplier;
   rescaleLot.run(newQuantity, newQuantityRemaining, lot.id);
-  insertTransaction.get({
+  insertTxn({
     holderId: lot.holder_id,
     accountId: lot.account_id,
     securityId: lot.security_id,
@@ -143,7 +152,7 @@ export async function recordBuy(input) {
   const security = await getOrCreateSecurity(input.symbol, { exchangeCode: input.exchangeCode });
 
   return withTransaction(() => {
-    const buy = insertTransaction.get({
+    const buy = insertTxn({
       holderId: input.holderId,
       accountId: input.accountId ?? null,
       securityId: security.id,
@@ -162,6 +171,8 @@ export async function recordBuy(input) {
       quantityRemaining: quantity,
       linkedBuyId: null,
       externalRef: input.externalRef ?? null,
+      needsReview: input.needsReview ? 1 : 0,
+      reviewReason: input.reviewReason ?? null,
       notes: input.notes ?? null,
     });
 
@@ -246,7 +257,7 @@ export async function recordSell(input) {
       const proceeds = take * price - feeShare;
       const costOfSold = take * lotCostPerShare;
 
-      const sell = insertTransaction.get({
+      const sell = insertTxn({
         holderId: input.holderId,
         accountId: input.accountId ?? lot.account_id ?? null,
         securityId: security.id,
@@ -263,6 +274,8 @@ export async function recordSell(input) {
         quantityRemaining: null,
         linkedBuyId: lot.id,
         externalRef: input.externalRef ?? null,
+        needsReview: input.needsReview ? 1 : 0,
+        reviewReason: input.reviewReason ?? null,
         notes: input.notes ?? null,
       });
 
@@ -282,7 +295,7 @@ export async function recordDividend(input) {
   if (!(amount > 0)) throw new Error("Dividend amount must be greater than zero");
   const security = await getOrCreateSecurity(input.symbol, { exchangeCode: input.exchangeCode });
 
-  return insertTransaction.get({
+  return insertTxn({
     holderId: input.holderId,
     accountId: input.accountId ?? null,
     securityId: security.id,
@@ -299,6 +312,8 @@ export async function recordDividend(input) {
     quantityRemaining: null,
     linkedBuyId: null,
     externalRef: input.externalRef ?? null,
+    needsReview: input.needsReview ? 1 : 0,
+    reviewReason: input.reviewReason ?? null,
     notes: input.notes ?? null,
   });
 }
@@ -376,6 +391,7 @@ const transactionsQuery = db.prepare(`
     AND (@endDate IS NULL OR t.transaction_date <= @endDate)
     AND (@type IS NULL OR t.transaction_type = @type)
     AND (@includeVoided = 1 OR t.voided_at IS NULL)
+    AND (@needsReviewOnly = 0 OR (t.needs_review = 1 AND t.review_resolved_at IS NULL))
   ORDER BY t.transaction_date DESC, t.id DESC
 `);
 
@@ -393,6 +409,7 @@ export function listTransactions(holderId, filters = {}) {
       endDate: filters.endDate || null,
       type: filters.type || null,
       includeVoided: filters.includeVoided ? 1 : 0,
+      needsReviewOnly: filters.needsReviewOnly ? 1 : 0,
     })
     .map((row) => ({ ...row, realized_pnl: computeRealizedPnl(row), total: computeTotal(row) }));
 }
@@ -609,6 +626,26 @@ export function updateTransaction(holderId, id, patch = {}) {
  *  - a BUY can't be voided once any of it has been sold (void the sells first),
  *    otherwise the drawn-down shares would refer to a lot that no longer counts
  */
+const resolveReviewStmt = db.prepare(
+  `UPDATE transactions SET review_resolved_at = datetime('now'),
+     review_reason = COALESCE(?, review_reason)
+     WHERE id = ? AND holder_id = ? AND needs_review = 1 AND review_resolved_at IS NULL`,
+);
+
+/**
+ * Marks an extrapolated row as reconciled against real records. Deliberately
+ * does NOT clear needs_review: the row was estimated once, and erasing that
+ * loses the audit trail. review_resolved_at is what removes it from the
+ * outstanding list -- the same pattern as voided_at.
+ *
+ * Correcting the actual figures is a separate updateTransaction() call; this
+ * only records that the reconciliation happened.
+ */
+export function resolveReview(holderId, id, note = null) {
+  const trimmed = note == null ? null : String(note).trim() || null;
+  return { resolved: resolveReviewStmt.run(trimmed, id, holderId).changes };
+}
+
 export function voidTransaction(holderId, id, reason = null) {
   return withTransaction(() => {
     const txn = getTransaction.get(id, holderId);
