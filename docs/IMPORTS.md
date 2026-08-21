@@ -113,6 +113,60 @@ Correcting the actual figures stays a separate `updateTransaction()`, so "we
 fixed the numbers" and "we verified this against real records" remain distinct
 events.
 
+## How this is actually meant to be used (Joe, 2026-08-21)
+
+**CSV import is an audit, not a loader.** Manual entry is the primary path --
+possibly a Jarvis voice command much later -- and the CSV gets pulled
+occasionally to catch anything entered wrong and correct it.
+
+That is a different feature from bulk loading, and it changes the design:
+
+**The `external_ref` dedupe does not cover this case.** That fingerprint is
+computed from the CSV row, so a manually entered transaction has
+`external_ref = NULL` and will not match one. Left as-is, importing a file
+containing a trade already entered by hand creates a **duplicate**. The
+fingerprint only protects against re-importing the same *file*.
+
+Reconciliation therefore has to match on the **economic facts** of a trade --
+date, symbol, type, quantity, price -- against existing transactions regardless
+of where they came from. `import_raw_rows.reconciliation_status` already has
+exactly the right four values for this; they were being read too narrowly:
+
+| Status | Meaning |
+|---|---|
+| `matched` | already entered, and the numbers agree -- do nothing |
+| `new` | missing from the ledger -- offer to create |
+| `duplicate` | already imported from an earlier file |
+| `needs_review` | **entered, but the numbers differ -- a mistake to correct** |
+
+`needs_review` is the point of the whole feature. It is the row that says "you
+typed 79.94 and the broker says 79.49".
+
+### Two rules that follow
+
+**Never auto-apply a correction.** A row matching on date/symbol/type but
+differing on price is *probably* a typo, but it could equally be the broker
+reporting an execution price that differs from what was remembered. Show both
+values and let a human choose. Silently rewriting history to match a CSV is how
+a journal stops being trustworthy.
+
+**Matching needs tolerance, not equality.** Trade date and settlement date
+differ by a day or two and brokers round prices differently, so exact matching
+would flag correct entries as discrepancies and the report would be ignored --
+which is worse than not having it. Suggested starting point, to be tuned
+against real data rather than guessed:
+
+- same symbol and type, `transaction_date` within a few days, quantity equal,
+  price within a small tolerance -> `matched`
+- same symbol, type and date, but quantity or price outside tolerance ->
+  `needs_review`, showing both values side by side
+- nothing comparable -> `new`
+
+Note this also means the drop policy interacts with manual entry in a good way:
+a sell whose buy predates the export window is dropped by the importer, but if
+that buy was entered manually it will be found, and the sell becomes `new`
+rather than being discarded.
+
 ## Remaining work
 
 1. **Accounts.** There is no `/api/accounts` route and nothing anywhere inserts
