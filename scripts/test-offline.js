@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 558;
+const MIN_EXPECTED_CHECKS = 590;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -3691,6 +3691,155 @@ console.log("\n26. Paper Trade forwards its caller's options");
   check("Paper Trade can render a totals footer", /totals-row/.test(footer));
   check("...summing cost across both lots", footer.includes("$14,471.00"));
   check("...and market value", footer.includes("$14,411.20"));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n27. Benchmark: what the market did over the same days");
+// "This source returned 8%" cannot be judged without "the market did 11% over
+// the same holding period". Without matched-day comparison, a mediocre source
+// measured through a bull run outranks a good one measured through chop --
+// and ranking sources is the whole point of the app.
+{
+  const bench = await import("../services/benchmarkService.js");
+
+  // A flat benchmark, so the arithmetic under test is the trade's.
+  const flat = () => 0;
+
+  const trip = (over = {}) => ({
+    sell_id: 1, sell_date: "2026-03-10", sell_price: 12, quantity: 100,
+    sell_fees: 0, sold_cost_basis: 1000, is_paper_trade: 0,
+    buy_id: 2, buy_date: "2026-02-10", symbol: "XYZ",
+    source_id: 3, source_name: "Telegram group",
+    strategy_id: null, strategy_title: null, plan_id: null,
+    ...over,
+  });
+
+  const win = bench.scoreRoundTrip(trip(), flat);
+  check("Realized P&L is proceeds minus the cost of the shares sold",
+    Math.abs(win.realizedPnl - 200) < 1e-9);
+  check("Return is measured against that cost", Math.abs(win.tradeReturn - 0.2) < 1e-9);
+  check("Holding period is counted in days", win.heldDays === 28);
+
+  // Fees belong in the return, or every trade is flattered by the commission.
+  const fees = bench.scoreRoundTrip(trip({ sell_fees: 50 }), flat);
+  check("Sell fees come out of the proceeds", Math.abs(fees.realizedPnl - 150) < 1e-9);
+
+  // The cost comes from the SELL row, which already holds the cost of exactly
+  // these shares. Re-deriving it from the parent lot breaks after a split,
+  // where quantity is rescaled and cost_basis deliberately is not.
+  const partial = bench.scoreRoundTrip(trip({ quantity: 25, sold_cost_basis: 250, sell_price: 12 }), flat);
+  check("A partial sale uses the cost of just those shares",
+    Math.abs(partial.realizedPnl - 50) < 1e-9);
+  check("...so its return matches the full sale's", Math.abs(partial.tradeReturn - 0.2) < 1e-9);
+
+  // Excess return.
+  const vsMarket = bench.scoreRoundTrip(trip(), () => 0.05);
+  check("Excess return is the trade minus the market over the same days",
+    Math.abs(vsMarket.excessReturn - 0.15) < 1e-9);
+  const lagging = bench.scoreRoundTrip(trip({ sell_price: 10.5 }), () => 0.2);
+  check("A gain that lagged the market is NEGATIVE excess", lagging.excessReturn < 0);
+  check("...even though the trade itself made money", lagging.tradeReturn > 0);
+
+  // The null discipline. An unknown benchmark must not become a zero one.
+  const unknown = bench.scoreRoundTrip(trip(), () => null);
+  check("With no benchmark, excess return is null", unknown.excessReturn === null);
+  check("...not the raw return wearing a better label", unknown.tradeReturn === 0.2);
+
+  const noCost = bench.scoreRoundTrip(trip({ sold_cost_basis: null }), flat);
+  check("A sale with no recorded cost yields no return", noCost.tradeReturn === null);
+  check("...and no realized P&L", noCost.realizedPnl === null);
+  check("...and therefore no excess", noCost.excessReturn === null);
+
+  // benchmarkReturn's own edges, against whatever history is loaded.
+  const coverage = bench.benchmarkCoverage();
+  check("Benchmark coverage reports its symbol", typeof coverage.symbol === "string");
+  check(
+    "A window before any history has no benchmark",
+    bench.benchmarkReturn("1990-01-02", "1990-02-02") === null,
+  );
+  check(
+    "A window that resolves to one session has no measurable move",
+    bench.benchmarkReturn("2026-08-21", "2026-08-21") === null,
+  );
+
+  // Aggregation reconciliation -- three figures shown together must subtract.
+  const holderRow = db
+    .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Benchmark Test', 0) RETURNING *")
+    .get();
+  const emptyReport = bench.benchmarkReport(holderRow.id);
+  check("A holder with no round trips reports none", emptyReport.overall.trips === 0);
+  check("...with null averages rather than zeros", emptyReport.overall.averageReturn === null);
+  check("...and a null beat-rate, which is not 0%", emptyReport.overall.beatMarketRate === null);
+  check("The report names the benchmark it used", emptyReport.benchmark.symbol.length > 0);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n28. The benchmark table ranks on excess, not on raw return");
+// Ranking sources on raw return is the exact mistake this panel exists to
+// prevent: a mediocre source measured through a bull run outranks a good one
+// measured through chop. If the view ever sorts on return again, the panel
+// becomes an elaborate way to reach the wrong conclusion.
+{
+  const B = await import("../public/js/modules/efficiency/benchmark.js");
+
+  const g = (over) => ({
+    key: 1, label: "x", trips: 50, scoredTrips: 50, benchmarkedTrips: 50,
+    unbenchmarked: 0, realizedPnl: 1000, averageReturn: 0.05,
+    averageMarketReturn: 0.02, averageExcessReturn: 0.03,
+    beatMarketCount: 30, beatMarketRate: 0.6, averageHeldDays: 12, ...over,
+  });
+
+  const rows = B.renderBenchmarkGroups(
+    [
+      g({ key: 1, label: "HighReturnLowExcess", averageReturn: 0.2, averageMarketReturn: 0.19, averageExcessReturn: 0.01 }),
+      g({ key: 2, label: "LowReturnHighExcess", averageReturn: 0.04, averageMarketReturn: -0.05, averageExcessReturn: 0.09 }),
+    ],
+    { emptyMessage: "none" },
+  );
+  check(
+    "The higher-EXCESS source ranks first, despite a lower raw return",
+    rows.indexOf("LowReturnHighExcess") < rows.indexOf("HighReturnLowExcess"),
+  );
+
+  // Thin samples marked, not hidden.
+  const thin = B.renderBenchmarkGroups([g({ label: "Telegram", trips: 6, benchmarkedTrips: 6 })], { emptyMessage: "none" });
+  check("A source with under 20 benchmarked trips is tagged thin", /thin-tag/.test(thin));
+  check("...but is still shown with its figures", thin.includes("Telegram") && thin.includes("+3.00%"));
+  check("A source with enough trips is not tagged", !/thin-tag/.test(B.renderBenchmarkGroups([g({})], { emptyMessage: "none" })));
+
+  // The summary's three figures must subtract, or readers stop trusting it.
+  const report = {
+    benchmark: { symbol: "SPY", bars: 410, usable: true },
+    overall: {
+      trips: 503, scoredTrips: 503, benchmarkedTrips: 459, unbenchmarked: 44,
+      realizedPnl: 4448.06, averageReturn: 0.0072, averageMarketReturn: 0.0054,
+      averageExcessReturn: 0.0018, beatMarketCount: 240, beatMarketRate: 0.5229,
+      averageHeldDays: 16.2,
+    },
+  };
+  const summary = B.renderBenchmarkSummary(report);
+  check("Your return and the market's are shown side by side",
+    summary.includes("+0.72%") && summary.includes("+0.54%"));
+  check("...and the excess between them subtracts exactly", summary.includes("+0.18%"));
+  check("The benchmark names itself", summary.includes("SPY"));
+  check("Unbenchmarked trips are disclosed, not hidden", /Unbenchmarked/.test(summary));
+  check("Every figure carries its trip count", (summary.match(/459 trips/g) || []).length >= 3);
+
+  // No history: the panel must offer the fix, not just report the absence.
+  const noHistory = B.renderBenchmarkSummary({
+    benchmark: { symbol: "SPY", bars: 0, usable: false },
+    overall: { trips: 0 },
+  });
+  check("With no benchmark history it says so", /No benchmark history/.test(noHistory));
+  check("...and offers to fetch it", /benchmark-backfill-btn/.test(noHistory));
+  check("...and shows no percentages at all", !noHistory.includes("%"));
+
+  // History, but nothing closed yet.
+  const noTrips = B.renderBenchmarkSummary({
+    benchmark: { symbol: "SPY", bars: 410, usable: true },
+    overall: { trips: 0 },
+  });
+  check("With history but no round trips it says that instead", /No closed round trips/.test(noTrips));
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

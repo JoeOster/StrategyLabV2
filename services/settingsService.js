@@ -14,6 +14,11 @@ export const GENERAL_SETTING_DEFAULTS = {
   default_take_profit_percent: "10",
   default_stop_loss_percent: "5",
   theme: "light",
+  // The yardstick every source is measured against. Configurable because the
+  // right one depends on what is being measured -- SPY for broad equity, QQQ
+  // if the ideas are all large-cap tech -- and a hard-coded default would
+  // quietly misrepresent a portfolio it does not resemble.
+  benchmark_symbol: "SPY",
   // Nightly maintenance job (services/scheduler.js). "1" = on.
   nightly_refresh_enabled: "1",
   nightly_refresh_hour: "1", // 24h local time

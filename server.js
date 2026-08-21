@@ -47,6 +47,8 @@ const plans = await import("./services/plansService.js");
 const cash = await import("./services/cashService.js");
 const alertsSvc = await import("./services/alertsService.js");
 const efficiencySvc = await import("./services/efficiencyService.js");
+const benchmarkSvc = await import("./services/benchmarkService.js");
+const priceService = await import("./services/priceService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -208,6 +210,37 @@ app.get("/api/efficiency", (req, res) => {
       isPaperTrade: paper === "1" ? true : paper === "0" ? false : null,
     }),
   );
+});
+
+// Source and strategy performance against the market over matched days.
+// Separate from /api/efficiency because it answers a different question:
+// efficiency asks whether the plan was followed, this asks whether the plan
+// was worth following.
+app.get("/api/benchmark", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const paper = req.query.paper;
+  res.json(
+    benchmarkSvc.benchmarkReport(holder.id, {
+      isPaperTrade: paper === "1" ? true : paper === "0" ? false : null,
+    }),
+  );
+});
+
+// Fetches the benchmark's daily history. Explicit rather than automatic: it is
+// a network call, and a report that silently reaches for the internet when
+// opened is a report that hangs when the internet is down.
+app.post("/api/benchmark/backfill", async (req, res) => {
+  try {
+    const symbol = benchmarkSvc.benchmarkSymbol();
+    const security = await priceService.getOrCreateSecurity(symbol);
+    const bars = await priceService.backfillHistorical(security.id, symbol, {
+      period1: String(req.body?.from || "2024-01-01"),
+    });
+    res.json({ symbol, bars, coverage: benchmarkSvc.benchmarkCoverage() });
+  } catch (err) {
+    console.error("Benchmark backfill failed:", err);
+    res.status(502).json({ error: err.message });
+  }
 });
 
 app.get("/api/alerts", (req, res) => {

@@ -352,7 +352,25 @@
 
       <div class="orders-panel">
         <div class="panel-head">
-          <h3>By attribution</h3>
+          <h3>Against the market</h3>
+        </div>
+        <p class="panel-hint">
+          A source that returned 8% cannot be judged without knowing what the market did over the
+          same days it was held. Measured trip by trip against the benchmark, not against a
+          calendar year &mdash; a trade held nine days is compared against nine days.
+        </p>
+        <div id="benchmark-summary"></div>
+        <div class="table-scroll">
+          <table class="items-table">
+            <thead><tr id="benchmark-group-head"></tr></thead>
+            <tbody id="benchmark-group-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="orders-panel">
+        <div class="panel-head">
+          <h3>Plan following</h3>
           <div class="sub-tabs">
             <button type="button" class="sub-tab active" data-eff-group="source">By source</button>
             <button type="button" class="sub-tab" data-eff-group="strategy">By strategy</button>
