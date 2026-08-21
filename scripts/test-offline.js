@@ -2680,6 +2680,28 @@ check(
   /newListForm\.reset\(\)[\s\S]{0,120}?newListDialog\.showModal\(\)/.test(watchlistSrc),
 );
 
+console.log("\n9c. Frontend: row-action buttons are all deliberately sized");
+// The Exits button shipped larger than Promote/Sell/Edit because the sizing
+// properties were copy-pasted per button and a new one simply had none, so it
+// fell back to the default button size.
+//
+// The invariant is that every row-action button has been sized ON PURPOSE --
+// not that they are identical. delete-txn-btn is legitimately different: a
+// borderless, transparent affordance rather than a bordered button.
+const ordersRenderSrc = fs.readFileSync(path.join(process.cwd(), "public/js/modules/orders/render.js"), "utf8");
+const cssSrc = fs.readFileSync(path.join(process.cwd(), "public/css/style.css"), "utf8");
+const actionBtnClasses = [...new Set([...ordersRenderSrc.matchAll(/class="([a-z-]+-btn)"/g)].map((m) => m[1]))];
+const unsized = actionBtnClasses.filter((cls) => {
+  // A rule that mentions this class and sets padding = someone chose its size.
+  const rule = new RegExp("\." + cls + "[^{]*\{[^}]*padding");
+  return !rule.test(cssSrc);
+});
+check(
+  `Every row-action button has explicit sizing (${actionBtnClasses.length} found)`,
+  unsized.length === 0,
+);
+if (unsized.length) console.log(`      unsized, will render at default size: ${unsized.join(", ")}`);
+
 console.log("\n9. Frontend wiring: every getElementById target exists in index.html");
 // This suite can't click buttons, but it CAN catch the most common way the UI
 // silently breaks: JS reaching for an element id that the HTML doesn't have
