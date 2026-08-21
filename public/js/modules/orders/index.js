@@ -1,5 +1,6 @@
 // The "Conductor" for the Orders view. Owns panel/sort/filter state and
 // wires listeners; markup comes from render.js, server calls from api.js.
+import { openExitsDialog } from "../plans/dialog.js";
 import * as api from "./api.js";
 import {
   POSITION_COLUMNS,
@@ -266,6 +267,11 @@ function handleSort(event, sortStateKey, rerender) {
 }
 
 async function handlePositionsAction(event) {
+  const exitsBtn = event.target.closest(".exits-btn");
+  if (exitsBtn) {
+    return openExitsDialog(Number(exitsBtn.dataset.id), exitsBtn.dataset.symbol, () => reloadOrdersView());
+  }
+
   const editBtn = event.target.closest(".edit-txn-btn");
   if (editBtn) return openEditDialog(Number(editBtn.dataset.id));
 

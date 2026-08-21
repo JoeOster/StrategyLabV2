@@ -106,6 +106,7 @@ export function renderPositionsRows(positions, columns, opts = {}) {
           <td class="actions-cell">
             ${showPromote ? `<button type="button" class="promote-txn-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Turn this into a real purchase">Promote</button>` : ""}
             <button type="button" class="sell-lot-btn" data-symbol="${escapeHtml(p.symbol)}" data-lot-id="${p.lot_id}" data-qty="${p.quantity_remaining}" title="Sell from this lot">Sell</button>
+            <button type="button" class="exits-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Set take-profit and stop rungs for this position">Exits</button>
             <button type="button" class="edit-txn-btn" data-id="${p.lot_id}" title="Correct this purchase">Edit</button>
           </td>
         </tr>`;

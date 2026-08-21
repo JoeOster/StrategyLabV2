@@ -5,9 +5,11 @@ import { initializeDashboardModule, reloadDashboardView } from "./modules/dashbo
 import { initializeJournalModule, reloadJournalView } from "./modules/journal/index.js";
 import { initializePaperTradeModule, reloadPaperTradeView } from "./modules/papertrade/index.js";
 import { initializeAlertsModule } from "./modules/alerts/index.js";
+import { initPlansUi } from "./modules/plans/dialog.js";
 
 document.addEventListener("DOMContentLoaded", async () => {
   try {
+    initPlansUi(); // shared by Orders and Paper Trade -- one dialog, both tabs
     await initializeDashboardModule();
     await initializeWatchlistModule();
     await initializeOrdersModule();

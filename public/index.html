@@ -442,6 +442,31 @@
     </form>
   </dialog>
 
+  <dialog id="exits-dialog">
+    <h2 id="exits-dialog-title">Exit plan</h2>
+    <p id="exits-error" class="status-banner status-error" hidden></p>
+    <div id="exits-dialog-body"></div>
+    <form id="exit-rung-form">
+      <div class="field-row">
+        <label>Kind
+          <select name="kind">
+            <option value="TAKE_PROFIT">Take profit (at or above)</option>
+            <option value="STOP">Stop (at or below)</option>
+          </select>
+        </label>
+        <label>Quantity
+          <input name="quantity" type="number" step="any" min="0" required />
+        </label>
+        <label>Price
+          <input name="price" type="number" step="0.01" min="0" required />
+        </label>
+      </div>
+      <div class="form-actions">
+        <button type="button" id="exits-close-btn">Close</button>
+        <button type="submit" class="primary">Add rung</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="order-dialog">
     <form id="order-form">
       <h2 id="order-dialog-title">Log Order</h2>

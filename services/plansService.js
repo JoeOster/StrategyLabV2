@@ -104,6 +104,24 @@ export function createPlanForTrade(holderId, tradeId, { notes = null } = {}) {
 }
 
 /**
+ * The dialog's entry point: the plan for this trade, created on first use.
+ *
+ * Separate from createPlanForTrade, which stays strict and throws if the trade
+ * already has a plan -- that strictness is worth keeping for callers that mean
+ * "make a NEW plan". Opening a ladder twice is not an error, it is just opening
+ * it again.
+ */
+export function getOrCreatePlanForTrade(holderId, tradeId, opts = {}) {
+  const trade = getTradeStmt.get(tradeId, holderId);
+  if (!trade) throw new Error("Trade not found.");
+  if (trade.plan_id) {
+    const existing = getPlanStmt.get(trade.plan_id, holderId);
+    if (existing) return existing;
+  }
+  return createPlanForTrade(holderId, tradeId, opts);
+}
+
+/**
  * Adds a lot to an existing thesis -- scaling in.
  *
  * Refuses a different security outright: a plan is a thesis about one thing,

@@ -2627,6 +2627,7 @@ const uiModules = [
   "public/js/modules/journal/index.js",
   "public/js/modules/papertrade/index.js",
   "public/js/modules/alerts/index.js",
+  "public/js/modules/plans/dialog.js",
 ];
 let idsChecked = 0;
 const missingIds = [];

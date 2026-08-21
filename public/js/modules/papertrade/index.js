@@ -3,6 +3,7 @@
 // Strategy field on the log/edit dialog and a Promote action that turns a
 // paper BUY into a real one in place -- see promotePaperTrade in
 // transactionsService.js for what that does under the hood.
+import { openExitsDialog } from "../plans/dialog.js";
 import * as api from "./api.js";
 import {
   POSITION_COLUMNS,
@@ -262,6 +263,11 @@ function handleSort(event, sortStateKey, rerender) {
 async function handlePositionsAction(event) {
   const promoteBtn = event.target.closest(".promote-txn-btn");
   if (promoteBtn) return handlePromote(Number(promoteBtn.dataset.id), promoteBtn.dataset.symbol);
+
+  const exitsBtn = event.target.closest(".exits-btn");
+  if (exitsBtn) {
+    return openExitsDialog(Number(exitsBtn.dataset.id), exitsBtn.dataset.symbol, () => reloadPaperTradeView());
+  }
 
   const editBtn = event.target.closest(".edit-txn-btn");
   if (editBtn) return openEditDialog(Number(editBtn.dataset.id));

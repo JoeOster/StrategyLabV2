@@ -43,6 +43,7 @@ const journal = await import("./services/journalService.js");
 const bookLookup = await import("./services/bookLookupService.js");
 const accounts = await import("./services/accountsService.js");
 const imports = await import("./services/importService.js");
+const plans = await import("./services/plansService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -393,6 +394,86 @@ app.put("/api/accounts/:id", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   try {
     res.json(accounts.updateAccount(holder.id, Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// --- Exit plans ------------------------------------------------------------
+// A plan is one entry thesis covering one or more lots, and it owns the exit
+// ladder. A rung firing raises an alert and never sells -- this app is a
+// journal, and the gap between what the rung said and what was actually done
+// is the measurement, so closing it automatically would erase it.
+
+app.get("/api/plans", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const status = req.query.status ? String(req.query.status) : null;
+  res.json(plans.listPlans(holder.id, { status }));
+});
+
+app.get("/api/plans/:id", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(plans.getPlan(holder.id, Number(req.params.id)));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+// Body: { tradeId, notes? }. The plan inherits source/strategy from the trade
+// rather than asking again -- the thesis is why the trade was made, and the
+// trade already records it.
+app.post("/api/plans", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const { tradeId, notes } = req.body || {};
+  if (!tradeId) return res.status(400).json({ error: "tradeId is required" });
+  try {
+    // get-or-create: opening the ladder for a trade that already has one is
+    // not an error, and the dialog should not have to look it up first.
+    res.status(201).json(plans.getOrCreatePlanForTrade(holder.id, Number(tradeId), { notes }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Scaling into the same thesis. Body: { tradeId }.
+app.post("/api/plans/:id/trades", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const { tradeId } = req.body || {};
+  if (!tradeId) return res.status(400).json({ error: "tradeId is required" });
+  try {
+    res.json(plans.attachTradeToPlan(holder.id, Number(req.params.id), Number(tradeId)));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Body: { kind, quantity, priceLow?, priceHigh?, sequence? }
+// A stop is an ordinary rung: kind STOP with priceHigh set.
+app.post("/api/plans/:id/exits", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.status(201).json(plans.addExit(holder.id, Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Cancelled rather than deleted: a rung that has fired is part of the record,
+// and the service refuses to cancel one for that reason.
+app.post("/api/plans/:id/exits/:exitId/cancel", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(plans.cancelExit(holder.id, Number(req.params.id), Number(req.params.exitId)));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post("/api/trades/:id/detach-plan", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(plans.detachTradeFromPlan(holder.id, Number(req.params.id)));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
