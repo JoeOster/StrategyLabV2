@@ -265,6 +265,114 @@ export function scoreEntry(row) {
   };
 }
 
+// Entry alerts: a BUY_LIMIT reached its band. The other half of discipline,
+// and the more commonly failed one.
+//
+// The exit side asks "the signal fired and did I sell well". This asks "the
+// signal fired and did I buy AT ALL". Missing an entry leaves no trace
+// anywhere else in the app -- there is no position, no P&L row, nothing to
+// notice later. An idea that was never acted on and an idea that was never had
+// look identical in every other view, which is exactly why this needs its own
+// query rather than being inferred.
+//
+// Accepting an entry alert records intent and nothing more: the trade runs
+// through Journal's Execute, which collects a real fill. So "accepted" and
+// "bought" are genuinely different states, and the gap between them --
+// said yes, never did it -- is worth seeing on its own.
+const entryAlertsQuery = db.prepare(`
+  SELECT
+    a.id                AS alert_id,
+    a.triggered_at,
+    a.trigger_price,
+    a.resolution,
+    a.decline_kind,
+    w.id                AS watched_item_id,
+    w.buy_price_high    AS planned_price,
+    w.buy_price_low     AS planned_floor,
+    w.is_paper_trade,
+    s.symbol,
+    src.id              AS source_id,
+    src.name            AS source_name,
+    strat.id            AS strategy_id,
+    strat.title         AS strategy_title,
+    -- The earliest buy made against this watch on or after the alert. A buy
+    -- BEFORE it belongs to an earlier round and must not count as acting on
+    -- this one, or a single old purchase would mark every later alert as
+    -- followed.
+    (SELECT t.id FROM transactions t
+      WHERE t.watched_item_id = w.id AND t.transaction_type = 'BUY'
+        AND t.voided_at IS NULL AND t.transaction_date >= date(a.triggered_at)
+      ORDER BY t.transaction_date, t.id LIMIT 1) AS bought_id
+  FROM alerts a
+  JOIN watched_items w           ON w.id = a.watched_item_id
+  JOIN securities s              ON s.id = w.security_id
+  LEFT JOIN advice_sources src   ON src.id = w.source_id
+  LEFT JOIN strategies strat     ON strat.id = w.strategy_id
+  WHERE w.holder_id = @holderId
+    AND a.watched_item_id IS NOT NULL
+    AND a.trigger_reason = 'BUY'
+  ORDER BY a.triggered_at DESC, a.id DESC
+`);
+
+/**
+ * One entry alert, scored for discipline.
+ *
+ * Deliberately carries no price gap. The gap on a buy that DID happen is
+ * already measured by scoreEntry, from the trade itself. Measuring it here too
+ * would double-count every executed entry in the totals.
+ */
+export function scoreEntryAlert(row) {
+  const bought = row.bought_id != null;
+  const skipped = row.resolution === "declined" && row.decline_kind === "judgement";
+
+  return {
+    kind: "ENTRY_ALERT",
+    alertId: row.alert_id,
+    watchedItemId: row.watched_item_id,
+    symbol: row.symbol,
+    sourceId: row.source_id,
+    sourceName: row.source_name,
+    strategyId: row.strategy_id,
+    strategyTitle: row.strategy_title,
+    isPaperTrade: !!row.is_paper_trade,
+    triggeredAt: row.triggered_at,
+    triggerPrice: row.trigger_price,
+    plannedPrice: row.planned_price,
+    plannedFloor: row.planned_floor ?? null,
+    actualPrice: null,
+    actualDate: null,
+    quantity: null,
+    resolution: row.resolution ?? null,
+    declineKind: row.decline_kind ?? null,
+    // Followed means BOUGHT, not "said yes". Accepting an entry alert records
+    // intent; the purchase is a separate act, and intent that never became a
+    // purchase is the failure this whole query exists to surface.
+    followed: bought,
+    skipped,
+    pending: row.resolution == null,
+    // Said yes and never did it. Distinct from declining, which is a decision,
+    // and from an unanswered alert, which is not yet one. This is the state
+    // that leaves no trace anywhere else in the app.
+    acceptedNotBought: row.resolution === "accepted" && !bought,
+    gapPerShare: null,
+    gapTotal: null,
+    gapPercent: null,
+    overshootPerShare: null,
+    overshootTotal: null,
+    slippagePerShare: null,
+    slippageTotal: null,
+    slippagePercent: null,
+    stale: false,
+    // What the plan asked to be bought, in dollars, and was not. Notional --
+    // no position exists, so there is no gain or loss, only the size of the
+    // decision not taken.
+    notionalSkipped:
+      !bought && (skipped || row.resolution === "accepted") && row.planned_price != null
+        ? row.planned_price
+        : null,
+  };
+}
+
 /**
  * Aggregates scored events.
  *
@@ -316,6 +424,9 @@ function aggregate(events) {
     followedCount: decided.length ? followed : null,
     followedRate: decided.length ? followed / decided.length : null,
     skippedCount: decided.filter((e) => e.skipped).length,
+    // Entry alerts accepted and never acted on. Counted separately from
+    // skipped: declining is a decision, this is a decision that evaporated.
+    acceptedNotBoughtCount: events.filter((e) => e.acceptedNotBought).length,
     notionalSkipped: events.reduce((sum, e) => sum + (e.notionalSkipped ?? 0), 0),
     pendingCount: events.filter((e) => e.pending).length,
   };
@@ -350,12 +461,20 @@ export function efficiencyReport(holderId, { isPaperTrade = null } = {}) {
 
   const exits = exitEventsQuery.all({ holderId }).map(scoreExit).filter(wanted);
   const entries = entryEventsQuery.all({ holderId }).map(scoreEntry).filter(wanted);
-  const all = [...exits, ...entries];
+  const entryAlerts = entryAlertsQuery.all({ holderId }).map(scoreEntryAlert).filter(wanted);
+
+  // Entry ALERTS carry no price gap -- the gap on a buy that happened is
+  // already measured from the trade itself by scoreEntry. Including them in
+  // the gap totals would double-count every executed entry; including them in
+  // the DISCIPLINE totals is the entire point. aggregate() handles both
+  // correctly because it counts gaps and decisions from separate subsets.
+  const all = [...exits, ...entries, ...entryAlerts];
 
   return {
     convention: CONVENTION,
     exits: aggregate(exits),
     entries: aggregate(entries),
+    entryAlerts: aggregate(entryAlerts),
     overall: aggregate(all),
     bySource: groupBy(all, (e) => e.sourceId, (e) => e.sourceName ?? "No source"),
     byStrategy: groupBy(all, (e) => e.strategyId, (e) => e.strategyTitle ?? "No strategy"),

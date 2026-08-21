@@ -87,6 +87,17 @@ export function renderEfficiencySummary(report) {
         { hint: "How often the price you got was better than the price the plan named." },
       )}
       ${
+        o.acceptedNotBoughtCount > 0
+          ? stat("Accepted, never bought", String(o.acceptedNotBoughtCount), null, {
+              hint:
+                "Entry alerts you accepted and then did not act on. This is the only place " +
+                "it shows: there is no position, no P&L row, nothing else in the app that " +
+                "records an idea you agreed with and never took.",
+              tone: "change-down",
+            })
+          : ""
+      }
+      ${
         o.skippedCount > 0
           ? stat("Skipped on judgement", String(o.skippedCount), null, {
               hint: `The plan said act and you chose not to. ${money(o.notionalSkipped)} of shares at the planned prices.`,
@@ -168,14 +179,22 @@ export function renderEfficiencyEvents(events) {
     .map((e) => {
       const outcome = e.pending
         ? { label: "awaiting you", cls: "muted-cell" }
-        : e.declineKind === "invalid"
-          ? { label: "rung was wrong", cls: "muted-cell" }
-          : (OUTCOME[e.resolution] ?? { label: "—", cls: "muted-cell" });
+        : e.acceptedNotBought
+          ? { label: "accepted, never bought", cls: "change-down" }
+          : e.declineKind === "invalid"
+            ? { label: e.kind === "ENTRY_ALERT" ? "target was wrong" : "rung was wrong", cls: "muted-cell" }
+            : (OUTCOME[e.resolution] ?? { label: "—", cls: "muted-cell" });
       return `
       <tr${e.stale ? ' class="stale-row"' : ""}>
         <td>${escapeHtml(e.actualDate || (e.triggeredAt || "").slice(0, 10))}</td>
         <td><strong>${escapeHtml(e.symbol)}</strong></td>
-        <td>${e.kind === "ENTRY" ? "entry" : escapeHtml(String(e.rungKind || "").toLowerCase().replace("_", " "))}</td>
+        <td>${
+          e.kind === "ENTRY"
+            ? "entry fill"
+            : e.kind === "ENTRY_ALERT"
+              ? "entry signal"
+              : escapeHtml(String(e.rungKind || "").toLowerCase().replace("_", " "))
+        }</td>
         <td>${escapeHtml(e.sourceName || e.strategyTitle || "—")}</td>
         <td>${formatPrice(e.plannedPrice)}</td>
         <td>${formatPrice(e.actualPrice)}</td>

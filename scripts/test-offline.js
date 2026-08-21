@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 618;
+const MIN_EXPECTED_CHECKS = 641;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -3990,6 +3990,106 @@ console.log("\n31. Outbound calls cannot hang forever");
   } catch (err) { fetchErr = err; }
   check("fetchWithTimeout gives up too", fetchErr instanceof TimeoutError);
   check("...and says which host", /unroutable host/.test(fetchErr.message));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n32. Entry discipline: the signal fired and I never bought");
+// The exit side asks whether a sale was executed well. This asks whether the
+// purchase happened AT ALL, and it is the more commonly failed half.
+//
+// A missed entry leaves no trace anywhere else in the app: no position, no P&L
+// row, nothing to notice later. An idea never acted on and an idea never had
+// look identical in every other view. That is why it needs its own query
+// rather than being inferrable from what exists.
+{
+  const eff = await import("../services/efficiencyService.js");
+
+  const alert = (over = {}) => ({
+    alert_id: 1, triggered_at: "2026-08-01 14:00:00", trigger_price: 9.9,
+    resolution: null, decline_kind: null,
+    watched_item_id: 5, planned_price: 10, planned_floor: null, is_paper_trade: 0,
+    symbol: "XYZ", source_id: 3, source_name: "Telegram group",
+    strategy_id: null, strategy_title: null, bought_id: null,
+    ...over,
+  });
+
+  const bought = eff.scoreEntryAlert(alert({ resolution: "accepted", bought_id: 42 }));
+  check("Accepted and bought counts as followed", bought.followed === true);
+  check("...and is not flagged as unacted", bought.acceptedNotBought === false);
+
+  // The state that leaves no trace anywhere else.
+  const intent = eff.scoreEntryAlert(alert({ resolution: "accepted", bought_id: null }));
+  check("Accepted but never bought is NOT followed", intent.followed === false);
+  check("...and is surfaced on its own", intent.acceptedNotBought === true);
+  check("...distinct from having declined", intent.skipped === false);
+  check("...with the price the plan asked for", Math.abs(intent.notionalSkipped - 10) < 1e-9);
+
+  const declined = eff.scoreEntryAlert(alert({ resolution: "declined", decline_kind: "judgement" }));
+  check("Declined on judgement is skipped", declined.skipped === true);
+  check("...and not followed", declined.followed === false);
+  check("...and not confused with unacted intent", declined.acceptedNotBought === false);
+
+  const invalid = eff.scoreEntryAlert(alert({ resolution: "declined", decline_kind: "invalid" }));
+  check("Declined as invalid is neither followed nor skipped",
+    !invalid.followed && !invalid.skipped);
+
+  const waiting = eff.scoreEntryAlert(alert());
+  check("An unanswered entry alert is pending", waiting.pending === true);
+  check("...and not counted as a decision either way", !waiting.followed && !waiting.skipped);
+
+  // A purchase made BEFORE the alert belongs to an earlier round. The query
+  // filters on date, so bought_id is null here -- pinned because the obvious
+  // join would mark every later alert followed off one old purchase.
+  check("Entry alerts carry no price gap", bought.gapTotal === null);
+  check("...because the executed buy is already measured from the trade itself",
+    bought.gapPerShare === null && bought.slippagePerShare === null);
+
+  // The report keeps them separate so gap totals are not double-counted.
+  const holderRow = db
+    .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Entry Discipline Test', 0) RETURNING *")
+    .get();
+  const r = eff.efficiencyReport(holderRow.id);
+  check("The report exposes entry alerts as their own section", r.entryAlerts != null);
+  check("...with no events for a fresh holder", r.entryAlerts.events === 0);
+  check("...and null rates rather than zeros", r.entryAlerts.followedRate === null);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n33. The report surfaces intent that evaporated");
+{
+  const R = await import("../public/js/modules/efficiency/render.js");
+  const base = {
+    events: 3, scoredEvents: 1, gapTotal: 10, gapAverage: 10, slippageEvents: 1,
+    slippageTotal: 0, slippageAverage: 0, overshootTotal: 0, staleCount: 0,
+    gapPercentAverage: 0.01, beatPlanCount: 1, beatPlanRate: 1, decidedEvents: 3,
+    followedCount: 1, followedRate: 0.333, skippedCount: 1,
+    acceptedNotBoughtCount: 1, notionalSkipped: 20, pendingCount: 0,
+  };
+  const html = R.renderEfficiencySummary({ overall: base, exits: base });
+  check("Accepted-but-never-bought gets its own headline", /Accepted, never bought/.test(html));
+  check("...explaining it shows nowhere else", /nothing else in the app/.test(html));
+  check("A clean record does not show the tile",
+    !/Accepted, never bought/.test(
+      R.renderEfficiencySummary({
+        overall: { ...base, acceptedNotBoughtCount: 0 },
+        exits: { ...base, acceptedNotBoughtCount: 0 },
+      }),
+    ));
+
+  const rows = R.renderEfficiencyEvents([
+    { kind: "ENTRY_ALERT", symbol: "XYZ", sourceName: "Telegram group", plannedPrice: 10,
+      actualPrice: null, quantity: null, gapTotal: null, resolution: "accepted",
+      declineKind: null, pending: false, stale: false, acceptedNotBought: true,
+      actualDate: null, triggeredAt: "2026-08-01 14:00:00" },
+    { kind: "ENTRY_ALERT", symbol: "ABC", sourceName: "Book X", plannedPrice: 5,
+      actualPrice: null, quantity: null, gapTotal: null, resolution: "declined",
+      declineKind: "invalid", pending: false, stale: false, acceptedNotBought: false,
+      actualDate: null, triggeredAt: "2026-08-02 14:00:00" },
+  ]);
+  check("An entry signal is labelled as such, not as a fill", rows.includes("entry signal"));
+  check("...and unacted intent is spelled out in the outcome", rows.includes("accepted, never bought"));
+  check("A wrong entry target says TARGET, not rung", rows.includes("target was wrong"));
+  check("...since an entry alert has no rung to be wrong", !rows.includes("rung was wrong"));
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

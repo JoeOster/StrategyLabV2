@@ -1643,7 +1643,19 @@ renders as an em dash, never a confident $0.00. Forty-seven checks across
 sections 24 and 25 pin all of it, including that the empty report shows no
 percentages at all.
 
-**Known gap.** Entry-side discipline -- "the BUY_LIMIT triggered and I never
-bought" -- is not measured. It needs a query over watches that alerted and
-never produced a trade, which is a different shape from everything here.
-Reported as not-built rather than folded in as a silent zero.
+**Entry-side discipline is now measured too** (2026-08-21). A BUY_LIMIT
+reaching its band raises an alert; the query asks whether a purchase followed,
+joining on `transactions.watched_item_id` and filtering to buys dated on or
+after the alert -- a buy before it belongs to an earlier round, and the obvious
+unfiltered join would mark every later alert followed off one old purchase.
+
+Accepting an entry alert records intent and nothing more: the trade runs
+through Journal's Execute, which collects a real fill. So **accepted** and
+**bought** are genuinely different states, and the gap between them gets its
+own tile. That state is the reason this query has to exist rather than being
+inferred: an idea accepted and never acted on leaves no position, no P&L row,
+and nothing anywhere else in the app to distinguish it from an idea never had.
+
+Entry alerts deliberately carry no price gap. The gap on a purchase that did
+happen is already measured from the trade itself, and counting it here as well
+would double every executed entry in the totals.
