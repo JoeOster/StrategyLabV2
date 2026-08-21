@@ -568,10 +568,16 @@ export function getPortfolioSummary(holderId, { isPaperTrade = false, accountId 
   const pricedCost = priced.reduce((sum, p) => sum + p.cost_basis, 0);
   const pricedValue = priced.reduce((sum, p) => sum + p.market_value, 0);
 
-  // null, not zero: "no position has a price" and "the portfolio is worth
-  // nothing" must not render the same.
-  const totalValue = priced.length > 0 ? pricedValue : null;
-  const unrealized = priced.length > 0 ? pricedValue - pricedCost : null;
+  // Three distinct cases, and they must not collapse into each other:
+  //   no positions at all      -> worth exactly zero, which IS known
+  //   positions, none priced   -> unknown, and null says so
+  //   positions, some priced   -> a partial figure, flagged by unpricedCount
+  //
+  // The middle case is why this is not simply a sum. The first case matters for
+  // a funded account holding only cash: its total is the cash, and returning
+  // null there would hide a figure that is perfectly well known.
+  const totalValue = positions.length === 0 ? 0 : priced.length > 0 ? pricedValue : null;
+  const unrealized = positions.length === 0 ? 0 : priced.length > 0 ? pricedValue - pricedCost : null;
 
   // Scoped the same way as the positions above, or the strip would show one
   // account's holdings beside every account's realized P&L.
