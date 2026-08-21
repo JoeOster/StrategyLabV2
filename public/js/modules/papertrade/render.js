@@ -20,10 +20,23 @@ import { renderStrategyOptions } from "../journal/render.js";
 
 export { renderStrategyOptions };
 
-/** Paper Trade's positions table always shows the Promote action. */
-export function renderPositionsRows(positions, columns) {
+/**
+ * Paper Trade's positions table always shows the Promote action.
+ *
+ * Everything else is passed straight through. This previously took only
+ * (positions, columns) and built its own options object, which silently
+ * dropped `expanded` -- so multi-lot tickers rendered a group row with a
+ * disclosure caret that no state backed and no handler answered. The lots
+ * behind it were unreachable from this tab. A wrapper that discards its
+ * caller's options is a trap the next option will fall into as well, so it
+ * forwards them and overrides only what is genuinely fixed here.
+ */
+export function renderPositionsRows(positions, columns, opts = {}) {
   return renderOrdersPositionsRows(positions, columns, {
-    showPromote: true,
     emptyMessage: 'No open paper positions. Use "+ Log Paper Trade" to start one.',
+    ...opts,
+    showPromote: true,
   });
 }
+
+export { renderPositionsFooter } from "../orders/render.js";

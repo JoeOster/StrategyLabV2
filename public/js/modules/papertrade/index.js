@@ -10,6 +10,7 @@ import {
   HISTORY_COLUMNS,
   renderHeaderRow,
   renderPositionsRows,
+  renderPositionsFooter,
   renderHistoryRows,
   renderSummary,
   renderSourceOptions,
@@ -33,6 +34,11 @@ const state = {
   positionsSort: { key: "symbol", dir: "asc" },
   historySort: { key: "transaction_date", dir: "desc" },
   positionsFilter: "",
+  // Which consolidated rows are open. Held in module state rather than read
+  // back from the DOM, for the same reason Orders does it: this table
+  // re-renders on every filter, sort and price refresh, and losing your place
+  // each time would make expanding useless.
+  expandedGroups: new Set(),
   sources: [],
   strategies: [],
   editingId: null,
@@ -58,6 +64,7 @@ export async function initializePaperTradeModule() {
   els.positionsTbody = document.getElementById("paper-positions-tbody");
   els.positionsFilter = document.getElementById("paper-positions-filter");
   els.positionsCount = document.getElementById("paper-positions-count");
+  els.positionsTfoot = document.getElementById("paper-positions-tfoot");
   els.refreshPricesBtn = document.getElementById("paper-refresh-prices-btn");
   els.positionsColumnsBtn = document.getElementById("paper-positions-columns-btn");
 
@@ -199,11 +206,23 @@ function renderPositions() {
     state.positionsSort.key,
     state.positionsSort.dir,
   );
-  els.positionsTbody.innerHTML = renderPositionsRows(visible, state.positionColumns);
+  els.positionsTbody.innerHTML = renderPositionsRows(visible, state.positionColumns, {
+    expanded: state.expandedGroups,
+  });
+  // Totals the VISIBLE rows, so the footer agrees with the filter above it
+  // instead of contradicting the rows it sits under.
+  els.positionsTfoot.innerHTML = renderPositionsFooter(visible, state.positionColumns);
   els.positionsCount.textContent =
     visible.length === state.positions.length
       ? `${state.positions.length} lot(s)`
       : `${visible.length} of ${state.positions.length} lot(s)`;
+}
+
+/** Opens or closes one consolidated ticker row. */
+function toggleGroup(securityId) {
+  if (state.expandedGroups.has(securityId)) state.expandedGroups.delete(securityId);
+  else state.expandedGroups.add(securityId);
+  renderPositions();
 }
 
 function refreshPositionColumns() {
@@ -268,6 +287,9 @@ async function handlePositionsAction(event) {
   if (exitsBtn) {
     return openExitsDialog(Number(exitsBtn.dataset.id), exitsBtn.dataset.symbol, () => reloadPaperTradeView());
   }
+
+  const toggle = event.target.closest(".group-toggle");
+  if (toggle) return toggleGroup(Number(toggle.dataset.securityId));
 
   const editBtn = event.target.closest(".edit-txn-btn");
   if (editBtn) return openEditDialog(Number(editBtn.dataset.id));

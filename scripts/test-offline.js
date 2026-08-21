@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 548;
+const MIN_EXPECTED_CHECKS = 558;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -3625,6 +3625,72 @@ console.log("\n25. The efficiency report says how much to trust itself");
     "No events renders an empty row, not a broken table",
     /empty-row/.test(R.renderEfficiencyEvents([])),
   );
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n26. Paper Trade forwards its caller's options");
+// The bug this pins: papertrade/render.js wrapped the Orders renderer and
+// built its OWN options object, so `expanded` never reached it. Multi-lot
+// tickers rendered a group row with a disclosure caret that no state backed
+// and no handler answered -- the lots behind it were unreachable from that
+// tab. INTC had two paper lots, so it was live.
+//
+// A wrapper that discards its caller's options is a trap the NEXT option falls
+// into as well, which is why this is tested as forwarding rather than as one
+// specific fix.
+{
+  const paper = await import("../public/js/modules/papertrade/render.js");
+
+  const lots = [
+    { lot_id: 11, security_id: 77, symbol: "INTC", security_name: "Intel Corporation",
+      transaction_date: "2026-08-01", quantity_remaining: 60, cost_per_share: 90,
+      cost_basis: 5400, market_value: 5404.2, last_price: 90.07,
+      unrealized_pnl: 4.2, unrealized_pnl_percent: 0.08, days_held: 20 },
+    { lot_id: 12, security_id: 77, symbol: "INTC", security_name: "Intel Corporation",
+      transaction_date: "2026-08-21", quantity_remaining: 100, cost_per_share: 90.71,
+      cost_basis: 9071, market_value: 9007, last_price: 90.07,
+      unrealized_pnl: -64, unrealized_pnl_percent: -0.71, days_held: 0 },
+  ];
+  const cols = [
+    { key: "symbol", label: "Ticker" },
+    { key: "quantity_remaining", label: "Qty" },
+    { key: "cost_per_share", label: "Entry" },
+    { key: "cost_basis", label: "Cost" },
+    { key: "market_value", label: "Value" },
+    { key: "unrealized_pnl", label: "P&L" },
+  ];
+
+  const collapsed = paper.renderPositionsRows(lots, cols, { expanded: new Set() });
+  check("Two lots of one ticker collapse into a group row", /group-row/.test(collapsed));
+  check("...with no lot rows showing", !/lot-row/.test(collapsed));
+  check("...and a caret to open it", /group-toggle/.test(collapsed));
+
+  const expanded = paper.renderPositionsRows(lots, cols, { expanded: new Set([77]) });
+  check("Passing `expanded` actually reaches the renderer", /lot-row/.test(expanded));
+  check("...revealing both lots", (expanded.match(/lot-row/g) || []).length === 2);
+
+  // The one option this wrapper is entitled to override. Expanded, because
+  // actions live on lot rows -- a collapsed group row has an empty action
+  // cell by design, since promoting or selling is a per-lot decision and a
+  // group-level button would imply the lots share one.
+  check(
+    "Promote is still forced on regardless of caller options",
+    /promote-txn-btn/.test(
+      paper.renderPositionsRows(lots, cols, { showPromote: false, expanded: new Set([77]) }),
+    ),
+  );
+
+  // Its own default survives when the caller says nothing.
+  check("The paper-specific empty message is still the default",
+    /Log Paper Trade/.test(paper.renderPositionsRows([], cols)));
+  check("...and a caller can still override it",
+    /nothing here/.test(paper.renderPositionsRows([], cols, { emptyMessage: "nothing here" })));
+
+  // The footer the tab was missing entirely.
+  const footer = paper.renderPositionsFooter(lots, cols);
+  check("Paper Trade can render a totals footer", /totals-row/.test(footer));
+  check("...summing cost across both lots", footer.includes("$14,471.00"));
+  check("...and market value", footer.includes("$14,411.20"));
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
