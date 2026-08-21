@@ -523,11 +523,39 @@ function computeTotal(row) {
   return row.quantity * row.price + (row.fees || 0);
 }
 
-/** Portfolio-level roll-up for the header strip. */
+/**
+ * Portfolio-level roll-up for the header strip.
+ *
+ * A position with no quote makes market value UNKNOWN, not equal to cost. This
+ * used to fall back to `p.cost_basis`, so an unpriced portfolio displayed a
+ * market value identical to its cost and unrealized P&L of exactly $0.00 --
+ * a specific, confident, wrong claim rather than an absence.
+ *
+ * It confused the app's own author on the first real import: the ledger said
+ * $21,850.70 market value against $21,850.70 cost while Fidelity said
+ * $18,879.78. Every underlying row was right; only the roll-up lied.
+ *
+ * So the totals now cover the priced positions and say how many they are.
+ * `unpricedCount > 0` means the market figures are partial, and the UI is
+ * expected to say so rather than present them as the whole picture.
+ */
 export function getPortfolioSummary(holderId, { isPaperTrade = false } = {}) {
   const positions = listOpenPositions(holderId, { isPaperTrade });
   const totalCost = positions.reduce((sum, p) => sum + p.cost_basis, 0);
-  const totalValue = positions.reduce((sum, p) => sum + (p.market_value ?? p.cost_basis), 0);
+
+  const priced = positions.filter((p) => p.market_value != null);
+  const unpricedCount = positions.length - priced.length;
+
+  // Cost is summed over the SAME positions as value, or the comparison is
+  // between different sets and the difference is meaningless.
+  const pricedCost = priced.reduce((sum, p) => sum + p.cost_basis, 0);
+  const pricedValue = priced.reduce((sum, p) => sum + p.market_value, 0);
+
+  // null, not zero: "no position has a price" and "the portfolio is worth
+  // nothing" must not render the same.
+  const totalValue = priced.length > 0 ? pricedValue : null;
+  const unrealized = priced.length > 0 ? pricedValue - pricedCost : null;
+
   const realized = listTransactions(holderId, { isPaperTrade, type: "SELL" }).reduce(
     (sum, t) => sum + (t.realized_pnl ?? 0),
     0,
@@ -536,16 +564,22 @@ export function getPortfolioSummary(holderId, { isPaperTrade = false } = {}) {
     (sum, t) => sum + t.price,
     0,
   );
+
   return {
     positionCount: positions.length,
     totalCost,
     totalValue,
-    unrealizedPnl: totalValue - totalCost,
-    unrealizedPnlPercent: totalCost > 0 ? ((totalValue - totalCost) / totalCost) * 100 : null,
+    // How much of the picture the market figures actually cover.
+    pricedCount: priced.length,
+    unpricedCount,
+    unrealizedPnl: unrealized,
+    unrealizedPnlPercent:
+      unrealized != null && pricedCost > 0 ? (unrealized / pricedCost) * 100 : null,
     realizedPnl: realized,
     dividendIncome: dividends,
-    // Everything you've actually banked, versus what's still on paper.
-    totalReturn: realized + dividends + (totalValue - totalCost),
+    // Everything banked, versus what is still on paper. Unrealized is omitted
+    // rather than assumed zero when nothing is priced.
+    totalReturn: realized + dividends + (unrealized ?? 0),
   };
 }
 
