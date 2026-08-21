@@ -556,6 +556,49 @@ obvious fit for the format, but this is real financial data. Artifacts are
 private by default, though they are still hosted -- so treat a published report
 as a deliberate decision each time, not a default output.
 
+## Plan vs. actual: efficiency against the source (requested 2026-08-21)
+
+**Do not start building this without walking the flow with Joe first.** He has
+asked to go through the Journal system top to bottom so the vision is clear
+before anything is designed. That walkthrough is the first step, not the
+schema.
+
+The idea, in his own examples:
+
+- A Telegram group says buy XYZ at $10; he fills at $9.95. The sell signal goes
+  out at $10.75, he misses it, and exits somewhere else. He wants to see his
+  **efficiency vs. the plan**.
+- Book X describes a pattern. He wants to record the methodology, tie the order
+  or paper trade to it until it is sold, and then see **optimal vs. real**.
+
+So the metrics that matter are entry slippage, exit slippage, and
+outcome-grouped-by-source — not P&L on its own. This is the point of the whole
+app (see STATUS.md): judging how reliable a source or methodology turned out to
+be.
+
+**The data model already supports most of it**, which is worth knowing before
+anyone proposes new tables:
+
+- `transactions.watched_item_id`, `.source_id` and `.strategy_id` all exist, so
+  a fill can be tied back to the plan and to whoever suggested it.
+- `watched_items` carries the plan: `buy_price_high` (intended entry),
+  `take_profit_low`/`_2_low` (intended exits), `escape_price` (the stop).
+- `alerts` records the moment the plan said to act — `triggered_at`,
+  `trigger_price`, and as of v13 `trigger_reason`, which distinguishes a stop
+  from a target. That is the "optimal exit" datapoint the comparison needs.
+
+So "planned exit $10.75 at 14:02, actual exit $10.40 at 16:20, source =
+Telegram group X" is a join away. What is missing is the query and the screen,
+not the schema. Confirm that against the walkthrough rather than trusting it.
+
+Open questions for the walkthrough, not to be answered by guessing:
+
+- What counts as "the plan" when a source revises its target mid-trade?
+- Is efficiency measured per trade, per source, per methodology, or all three?
+- A missed exit has no transaction at the signal price. Is the benchmark the
+  alert price, the day's close, or the best price reached before the exit?
+- Paper trades vs real: compared together, separately, or paper as the control?
+
 ## Other deferred items
 
 - **CSV import** (`import_batches` → `import_raw_rows` → reconciled

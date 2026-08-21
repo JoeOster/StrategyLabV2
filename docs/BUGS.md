@@ -1,9 +1,110 @@
 # Bugs
 
-## Open (found via code review, 2026-08-09)
+## Open (found by the "written but never read" sweep, 2026-08-21)
 
-**All nine were fixed on 2026-08-21.** Every one is recorded below under
-"Fixed". Nothing from this review is outstanding.
+Found by `scripts/audit-columns.js`, written after BUG 10 turned out to be a
+field that was stored and then never selected. That failure is always silent --
+the write succeeds, the read simply never happens -- so it cannot be found by
+using the app. The sweep is a lead generator, not an oracle: everything below
+was verified by hand, and roughly as many candidates were dismissed.
+
+### 13. Three Settings controls do nothing
+
+**File:** `public/index.html` (General settings form),
+`services/settingsService.js` (`GENERAL_SETTING_DEFAULTS`)
+
+`default_take_profit_percent`, `default_stop_loss_percent` and
+`notification_cooldown_minutes` each have a labelled input in Settings > General,
+are validated, saved and read back correctly -- and **nothing anywhere consumes
+them.** Set "Default stop loss %" to 8 and it has no effect on anything.
+
+The first two are the more annoying now that BUG 10 gave the Add Ticker and New
+Idea dialogs a real stop-loss field: the obvious behaviour is for those defaults
+to pre-fill it relative to the target price, which is presumably what they were
+added for.
+
+The cooldown is separate and slightly worse, because it reads as a safety
+control: someone setting "notify me at most every 30 minutes" gets no throttling
+at all. Note this is NOT the same gap as BUG 7 (which was two schedulers
+overlapping, now fixed) -- a per-alert notification cooldown was never built.
+
+**Fix:** either wire all three up, or take them out of the UI. A control that
+silently does nothing is worse than one that is not there.
+
+### 14. `securities.asset_type` is never set
+
+**File:** `services/priceService.js` (`insertSecurity`), `schema.sql:46`
+
+The column enumerates seven types (`stock`, `etf`, `crypto`, `mutual_fund`,
+`bond`, `option`, `cash`) and defaults to `stock`. Nothing ever writes it and
+nothing reads it, so **everything in the database is a stock** -- including the
+six Fidelity mutual funds that dominate the IRA import.
+
+What makes this more than cosmetic: the Fidelity parser already *knows*.
+`CASH_SYMBOLS` identifies money-market sweeps and a CUSIP regex identifies bonds
+and CDs, both so they can be skipped. That classification is computed and thrown
+away.
+
+Impact today is latent -- nothing filters on it. It becomes real the moment
+anything wants to treat a fund differently from a stock, which the backtester
+in `V2_BACKLOG.md` certainly will.
+
+**Fix:** have `getOrCreateSecurity` set it from the Yahoo profile's quote type,
+and let the importers pass what they already worked out.
+
+### 15. `dividends.pay_date` cannot be filled
+
+**File:** `services/priceService.js:210`, `services/providers/yahooProvider.js:106`
+
+The column exists; the insert writes `(security_id, ex_date, amount, source)`
+only. It is not an oversight that can simply be corrected: Yahoo's chart events
+return an ex-date and an amount and no pay date, so there is nothing to put in
+it from the current provider.
+
+**Fix:** drop the column, or fill it from a provider that supplies it. Leaving a
+column the app structurally cannot populate is the same "schema promises
+something" smell as BUG 10.
+
+### 16. `theme` is dead in both directions
+
+**File:** `services/settingsService.js` (`GENERAL_SETTING_DEFAULTS`)
+
+Defaults to `"light"`. There is no control for it in Settings, nothing reads it,
+and `public/css/style.css` contains no dark styling at all. Harmless -- unlike
+#13 it promises the user nothing, because it is not on screen -- but it is a
+leftover.
+
+**Fix:** remove it, or build the theme it implies.
+
+---
+
+## Deliberately not listed above
+
+Checked and dismissed, recorded so the next sweep does not re-raise them:
+
+- `securities.first_seen_at`, `securities.data_source`,
+  `securities.profile_updated_at` -- written automatically, never read.
+  Provenance and audit fields; harmless. `profile_updated_at` does imply a
+  "refresh stale profiles" feature that was never built.
+- `historical_prices.adj_close` -- written and deliberately unused. See
+  `services/transactionsService.js`'s note on adj_close/dividend
+  double-counting: it is stored for a future backtester and consciously not
+  applied. Intent, not neglect.
+- Twelve settings form fields (`group_email`, `book_pdfs`, ...) that appear in
+  no JavaScript. **False positives**: `sourceFormToPayload` reads them via a
+  computed key, so the literal name never occurs in source.
+
+**What this sweep cannot see.** It covers the column and setting axis only.
+What made BUG 10 severe was not the missing column -- it was that `status`
+doubled as "stop evaluating", so an item that alerted once could never fire its
+stop. No column-level audit would have found that. State machines, unreachable
+branches and dead conditions need a different pass.
+
+---
+
+## Fixed (found via code review, 2026-08-09)
+
+**All nine were fixed on 2026-08-21.** Every one is recorded below.
 
 Found by reading `server.js`, every `services/*.js` file, and the frontend
 under `public/js/` cold, cross-checked against `schema.sql`'s own
