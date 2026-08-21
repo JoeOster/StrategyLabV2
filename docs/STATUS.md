@@ -95,13 +95,34 @@ Code Remote against the same host alias. There is no PC copy any more.
 Restart with `systemctl --user restart strategylab` — the old
 `npm run stop`/`restart` scripts were Windows-only and have been removed.
 
-**The database is still empty of user data, now by choice rather than by
-blocker.** Schema v13, six accounts registered, zero transactions. Real broker
-exports sit in `files/` (gitignored): both Fidelity accounts, E*TRADE, and
-Robinhood. They parse, reconcile, stage and approve correctly — verified
-repeatedly against `VACUUM INTO` snapshots — but the live database has
-deliberately not been written to. Joe wanted to run the real import himself,
-with the Fidelity screenshot in front of him.
+**The database now holds real, reconciled data — on the `plan-exits` branch
+only.** Schema v19, six accounts, all four broker exports imported. Note the
+inversion this creates: `plan-exits` was spun up as the disposable comparison
+copy on port 3114, and it is now the one carrying every real transaction, while
+`main` on 3113 still has zero. Whichever way the merge decision goes, 3114's
+database is the one that must survive.
+
+| account | Strategy Lab | statement | note |
+| --- | --- | --- | --- |
+| Fidelity 146518557 (IRA) | $23,646.37 | $23,677.51 | live price drift |
+| Fidelity 266356256 (IRA, wife) | $15,327.69 | $15,352.65 | live price drift |
+| E*TRADE 7178 | $319.99 | $320.89 | live price drift |
+| Robinhood | -$1,140.65 | not compared | **cash derived, and impossible** |
+| Schwab (thinkorswim) | $100.00 | $100.00 | funded, no positions, no parser |
+| TradeStation | $100.00 | $100.00 | funded, no positions, no parser |
+
+Robinhood is the one account that does not reconcile, and it is worth being
+precise about why. Its cash is derived at -$2,766.79 because the export
+contains sales whose matching buys were never imported, so the ledger sees
+proceeds with no purchase behind them. A 60-day export cannot fix this: the
+missing buys predate any window Robinhood will hand back. It needs Joe's actual
+cash balance recorded as an `OPENING_BALANCE`, exactly as the other accounts
+got. Until then the all-accounts total is understated by that gap, which is why
+the cross-account strip shows no cash figure at all rather than a wrong one.
+
+Schwab and TradeStation hold $100 each and nothing else. Both have
+`has_parser = 0`, so until a parser exists every trade in them has to be
+logged by hand.
 
 **The import write path is built** (branch `import-write-path`):
 `import_batches` → `import_raw_rows` → approved writes into `transactions`
@@ -110,10 +131,10 @@ basis and the void filter all apply. Routes are `POST /api/imports` (stage),
 `GET /api/imports/:id` (preview), `POST /api/imports/:id/approve`, and
 `GET /api/imports/latest`. Only rows classified `new` are ever written.
 
-**Exit plans are BUILT** (branch ' + BT + 'plan-exits' + BT + ', schema v14, running on port 3114
+**Exit plans are BUILT** (branch `plan-exits`, schema v14, running on port 3114
 alongside main on 3113 for comparison). A trade can carry a ladder of exit
 rungs owned by the thesis that opened it; a rung reaching its band raises an
-alert and never sells. See ' + BT + 'docs/IMPROVEMENTS.md' + BT + ' for a full ranked list of what
+alert and never sells. See `docs/IMPROVEMENTS.md` for a full ranked list of what
 is still wrong or missing, and where AI assistance genuinely fits.
 
 The previous next-piece-of-work entry, kept for its reasoning: exit parameters on a trade -- a "Set
@@ -856,7 +877,22 @@ follows that written spec rather than any prior code.
 
 Built: card grid of open position lots (ticker, exchange, qty, entry, value,
 days held, colour-coded P&L), a table view over the same data, filters by
-text and exchange, a sort dropdown, and a portfolio summary strip. Clicking
+text, exchange and **account**, a sort dropdown, and a portfolio summary strip.
+
+The account filter is server-side while the exchange and text filters are
+client-side, and that difference is deliberate rather than incidental. Cash,
+realized P&L and dividend income are computed on the server; narrowing the
+fetched rows in the browser would shrink the table while leaving those three
+figures portfolio-wide. A strip that disagrees with the rows beneath it is
+worse than no strip.
+
+The strip itself now lives in `public/js/modules/shared/summary.js` and is
+rendered by both Dashboard and Orders. Orders had a careful version -- aware
+that an unpriced position makes market value unknown rather than zero, aware
+that cash may only be shown when a single account is in scope -- and the
+Dashboard had a lesser copy using `toFixed(2)` with no thousands separators
+and no notion of either rule. The same portfolio genuinely read differently
+depending on which tab you were on, and only one of them was right. Clicking
 any card or row opens a detail dialog with quote stats, 52-week range and
 position-in-range bar, an inline SVG price chart, the user's lots for that
 ticker, watchlist entries, full trade history and recent dividends.

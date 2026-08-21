@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 450;
+const MIN_EXPECTED_CHECKS = 465;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -3128,5 +3128,66 @@ try {
   check("Missing watchlist_id rejected (NOT NULL)", true);
 }
 
+
+// ---------------------------------------------------------------------------
+console.log("\n20. Summary strip (shared by Dashboard and Orders)");
+// This renderer had no coverage at all while it lived in orders/render.js, and
+// it now draws the strip on two tabs. Its rules are not cosmetic: it decides
+// when a number is unknown rather than zero, and when a total may be shown at
+// all. Both fail silently and read as a confident figure, which is exactly the
+// failure mode this project keeps hitting.
+const { renderSummary } = await import("../public/js/modules/shared/summary.js");
+
+{
+  const priced = {
+    positionCount: 3, lotCount: 5, pricedCount: 3, unpricedCount: 0,
+    totalCost: 21850.7, totalValue: 18848.64, unrealizedPnl: -3002.06,
+    unrealizedPnlPercent: -13.74, realizedPnl: 4440.46, dividendIncome: 2014.02,
+    totalReturn: 3452.42, cash: 4797.73, cashIsDerived: false, accountTotal: 23646.37,
+  };
+  const html = renderSummary(priced);
+
+  check("Thousands separators, so $21,850.70 cannot be misread", html.includes("$21,850.70"));
+  check("A loss renders signed and negative", html.includes("-$3,002.06"));
+  check("Cash appears when the view is scoped to one account", html.includes("$4,797.73"));
+  check("Account total appears when every position is priced", html.includes("$23,646.37"));
+  check("A recorded cash balance carries no derived asterisk", !html.includes("Cash *"));
+  check("Lot count is surfaced when it exceeds position count", html.includes("in 5 lots"));
+
+  // The distinction the strip exists to protect.
+  const unpriced = { ...priced, totalValue: null, unrealizedPnl: null, unrealizedPnlPercent: null, accountTotal: null };
+  const uhtml = renderSummary(unpriced);
+  check("No prices yet renders an em dash, not $0.00", !uhtml.includes("$0.00"));
+  check("...and not a figure silently equal to cost basis", uhtml.split("$21,850.70").length === 2);
+  check("Total return is labelled realized-only when value is unknown", uhtml.includes("realized only"));
+
+  // Cross-account: summing balances gives a figure no statement shows.
+  const allAccounts = { ...priced, cash: null, accountTotal: null };
+  check("Cash is hidden when no single account is in scope", !renderSummary(allAccounts).includes("Cash"));
+  check("...and so is the account total", !renderSummary(allAccounts).includes("Account Total"));
+
+  // Derived cash is a claim about completeness, and has to say so.
+  check("Derived cash is flagged", renderSummary({ ...priced, cashIsDerived: true }).includes("Cash *"));
+
+  // An account holding only cash and no shares -- Schwab, TradeStation.
+  const cashOnly = {
+    positionCount: 0, lotCount: 0, pricedCount: 0, unpricedCount: 0,
+    totalCost: 0, totalValue: 0, unrealizedPnl: 0, unrealizedPnlPercent: null,
+    realizedPnl: 0, dividendIncome: 0, totalReturn: 0,
+    cash: 100, cashIsDerived: false, accountTotal: 100,
+  };
+  const cashHtml = renderSummary(cashOnly);
+  check("A funded account with no shares still shows its cash", cashHtml.includes("$100.00"));
+  check("...and its account total, which is exactly that cash", cashHtml.split("$100.00").length === 3);
+  check("...rather than dismissing it as empty", !cashHtml.includes("No open positions"));
+  check(
+    "A genuinely empty, unscoped view still says so",
+    renderSummary({ ...cashOnly, cash: null, accountTotal: null }).includes("No open positions"),
+  );
+
+  // A partially-priced portfolio must admit it.
+  check("A partial market value says how many are priced",
+    renderSummary({ ...priced, pricedCount: 2, unpricedCount: 1 }).includes("2/3 priced"));
+}
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

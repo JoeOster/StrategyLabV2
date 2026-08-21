@@ -44,6 +44,17 @@
   <section id="view-dashboard">
     <main>
       <div id="dashboard-banner" class="status-banner" hidden></div>
+
+      <!-- Above the strip, because it governs the strip. Same placement and
+           same control as the Orders tab: one mental model for "which account
+           am I looking at", not two that happen to look similar. -->
+      <div class="account-scope">
+        <label for="dash-account-filter">Account</label>
+        <select id="dash-account-filter" title="Show one brokerage account, or all of them">
+          <option value="">All accounts</option>
+        </select>
+      </div>
+
       <div class="summary-strip" id="dashboard-summary"></div>
 
       <div class="table-toolbar">
