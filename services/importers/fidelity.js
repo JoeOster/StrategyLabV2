@@ -14,6 +14,7 @@
 //    movement generates a REINVESTMENT/DIVIDEND pair against it. Importing
 //    those would invent a holding that does not exist.
 import { parseCsv, num, toIsoDate, fingerprint } from "./csv.js";
+import { TRANSFER_OUT_REASON } from "../../lib/constants.js";
 
 export const BROKER = "fidelity";
 
@@ -94,7 +95,7 @@ export function parse(text) {
     else if (A.startsWith("TRANSFERRED TO")) {
       type = "SELL";
       needsReview = true;
-      reviewReason = "Transferred out to another account -- position reduced, but this is not a sale and has no realized gain/loss.";
+      reviewReason = TRANSFER_OUT_REASON;
     }
     else if (A.startsWith("TRANSFERRED FROM")) {
       // Shares arriving from another account. Quantity is real; Price is empty
@@ -142,6 +143,11 @@ export function parse(text) {
       price: unitPrice ?? 0,
       fees: Math.abs(fees),
       notes: needsReview ? reviewReason : null,
+      // Also carried on its own field. `notes` gets appended to downstream --
+      // reconcile.js adds a line when it reduces a partly-covered sell -- so
+      // notes cannot be compared against a known reason. This one is never
+      // edited, which is what lets realized P&L recognise a transfer out.
+      reviewReason: needsReview ? reviewReason : null,
       needsReview,
       raw: Object.fromEntries(Object.entries(col).map(([h, idx]) => [h, r[idx] ?? ""])),
     });

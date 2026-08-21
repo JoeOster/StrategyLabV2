@@ -26,6 +26,7 @@ import { disambiguateRefs } from "./importers/csv.js";
 import { reconcile, impliedPositions } from "./importers/reconcile.js";
 import { classify, summarize } from "./importers/match.js";
 import { getOrCreateSecurity } from "./priceService.js";
+import { TRANSFER_OUT_REASON } from "../lib/constants.js";
 import { recordBuyWith, recordSellWith, recordDividendWith } from "./transactionsService.js";
 
 const PARSERS = { fidelity, robinhood, etrade };
@@ -140,9 +141,43 @@ export function stageImport({ accountId, files }) {
         reason: d.dropReason,
       })),
       skipped,
+      warnings: buildWarnings(accepted),
       impliedPositions: Object.fromEntries(impliedPositions(accepted)),
     };
   });
+}
+
+/**
+ * Things the operator should look at before approving, as opposed to things
+ * that were handled automatically.
+ *
+ * Transfers are the live one. A share transfer between accounts is stored as a
+ * SELL because it has to draw lots down exactly like one, but it has no
+ * proceeds -- so realized P&L skips it. That much is handled. What is NOT
+ * handled is the other side: the shares arriving in the destination account
+ * have no known cost basis, only a transfer value, and nothing reconciles the
+ * two halves. Transfer support is thin and lightly exercised (six real rows,
+ * one account close-out), so an import containing them is worth a second look
+ * rather than a rubber stamp.
+ */
+function buildWarnings(accepted) {
+  const warnings = [];
+
+  const transfers = accepted.filter((r) => r.reviewReason === TRANSFER_OUT_REASON);
+  if (transfers.length) {
+    warnings.push({
+      kind: "transfers",
+      count: transfers.length,
+      symbols: [...new Set(transfers.map((r) => r.symbol))].sort(),
+      message:
+        `${transfers.length} row(s) are share transfers out to another account, not sales. ` +
+        "Positions are reduced correctly and realized P&L excludes them, but transfer " +
+        "handling is thinly tested and the receiving side's cost basis is unknown. " +
+        "Worth a code/number review before trusting P&L on these symbols.",
+    });
+  }
+
+  return warnings;
 }
 
 /** Reads a staged batch back for the preview screen. */
@@ -226,7 +261,7 @@ export async function approveBatch(batchId, { rowIds = null } = {}) {
         // being able to ask "what did we extrapolate?" later and fix it once
         // the real records turn up.
         needsReview: n.needsReview ? 1 : 0,
-        reviewReason: n.needsReview ? n.notes : null,
+        reviewReason: n.reviewReason ?? (n.needsReview ? n.notes : null),
       };
       const security = securities.get(n.symbol);
 

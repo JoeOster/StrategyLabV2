@@ -13,6 +13,7 @@
 //     stale if a buy price were ever corrected.
 import db, { withTransaction } from "../lib/db.js";
 import { getOrCreateSecurity } from "./priceService.js";
+import { TRANSFER_OUT_REASON } from "../lib/constants.js";
 
 const insertTransaction = db.prepare(`
   INSERT INTO transactions (
@@ -472,6 +473,17 @@ export function listTransactions(holderId, filters = {}) {
 
 function computeRealizedPnl(row) {
   if (row.transaction_type !== "SELL" || row.linked_buy_id == null) return null;
+
+  // A transfer out is a SELL for lot accounting and nothing else: the shares
+  // move to another account, so there are no proceeds and no gain or loss.
+  // Six such rows -- a Fidelity account close-out on 2025-03-28 -- fabricated
+  // -$20,950 of "loss" and flipped the IRA from +$6,205 to -$14,745. Nothing
+  // threw; the total was simply wrong, and wrong in the direction that looks
+  // like a bad year rather than a bug.
+  //
+  // Matched on review_reason, which resolveReview deliberately preserves, via
+  // a constant shared with the parser that writes it.
+  if (row.review_reason === TRANSFER_OUT_REASON) return null;
   const proceeds = row.quantity * row.price - (row.fees || 0);
   // cost_basis on a SELL row is the cost of exactly the shares sold, set at
   // sell time -- so this doesn't need to re-derive it from the parent lot.

@@ -35,6 +35,11 @@ console.log(`dropped: ${staged.dropped.length}`);
 for (const d of staged.dropped) console.log(`   ${d.symbol} ${d.transactionDate} x${d.quantity} -- ${d.reason}`);
 console.log("implied positions:", staged.impliedPositions);
 
+for (const w of staged.warnings ?? []) {
+  console.log(`${"\n"}!! WARNING (${w.kind}): ${w.message}`);
+  if (w.symbols) console.log(`   affected: ${w.symbols.join(", ")}`);
+}
+
 console.log("\n--- approving ---");
 const result = await approveBatch(staged.batch.id);
 console.log(`written: ${result.written.length}, skipped as duplicate: ${result.skippedDuplicates.length}`);

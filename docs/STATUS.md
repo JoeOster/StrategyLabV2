@@ -119,15 +119,45 @@ node scripts/verify-import.js 1 files/IRA_a.csv files/IRA_b.csv
 Expect 507 rows written and exactly six positions: ASTS 30, KLAR 100, KTOS 30,
 MRVL 30, MU 3, RKLB 50.
 
-**One number to check before trusting it:** after importing the IRA,
-`/api/summary` reports realized P&L of about **-$14,745**. That has not been
-verified against anything. The likeliest contributor is extrapolated cost
-basis on transferred-in shares — the documented `needs_review` case, where the
-export gives a transfer *value* rather than what was paid, which inflates a
-loss on sale. It may be entirely correct. It has simply never been checked,
-and it is exactly the shape of the three bugs that cost this project real time:
-a plausible number that nothing throws on.
+**Realized P&L excludes account transfers — fixed, but read this.** The IRA
+first imported showing realized P&L of **-$14,745**. That was wrong, and the
+sign was wrong: the real figure is **+$6,205**.
 
+On 2025-03-28 six mutual fund positions were transferred out to another
+account (`VS 655-116065-1`), effectively closing that side of the Fidelity
+account. A transfer is not a sale and has no proceeds, but the parser types
+those rows `SELL` — correctly, since the position genuinely must be drawn
+down — and realized P&L counted them as disposals, fabricating **-$20,950**
+of loss. The other 322 sells are genuine and net +$6,204.99.
+
+`services/importers/fidelity.js` had warned about exactly this in a comment
+written long before it could happen: *"it is NOT a sale: there are no
+proceeds, so letting it compute realized P&L would invent a gain or loss that
+never happened."* Nothing read the flag until there was a write path to make
+it reachable.
+
+**The fix** is `TRANSFER_OUT_REASON` in `lib/constants.js`, written by the
+parser and read by `computeRealizedPnl`, which returns null for those rows.
+No schema change: the row stays a `SELL`, so all 20 places that key on `SELL`
+for lot accounting keep working untouched. Joe's call, and the right one —
+a `TRANSFER_OUT` transaction type would have meant teaching every one of those
+20 that it is sell-like *except* for one line of P&L.
+
+One trap worth knowing, because it bit on the first attempt: the reason is
+carried on its own `reviewReason` field, **not** in `notes`. `reconcile.js`
+appends to `notes` when it reduces a partly-covered sell, so two of the six
+transfer rows stopped matching and quietly kept contributing -$12,216. The
+number looked plausible either way. Compare against the constant, never
+against `notes`.
+
+**Transfers are still only thinly handled, and the importer now says so.**
+`stageImport` returns a `warnings` array; an import containing transfers gets
+a transfers warning naming the affected symbols. What is handled: the
+position reduction, and keeping them out of realized P&L. What is NOT: the
+receiving side, where the arriving shares have a transfer value but no known
+cost basis, and nothing reconciles the two halves. Treat any import that
+raises this warning as wanting a look at the numbers rather than a rubber
+stamp.
 **Read `docs/IMPORTS.md` before touching anything import-related.** It carries
 per-broker format traps that each cost real effort to find and every one of
 which fails silently rather than erroring.
