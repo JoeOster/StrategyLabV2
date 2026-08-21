@@ -841,3 +841,31 @@ dialog input, dialog select, dialog textarea {
 .group-open td {
   border-bottom: none;
 }
+
+/* Account markers. Letter plus last four, not a brokerage logo: both Fidelity
+   accounts are Rollover IRAs, so a Fidelity mark on each would identify
+   neither -- the NUMBER is what tells them apart. */
+.acct-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.18rem;
+  margin-left: 0.45rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  background: #eef1f5;
+  color: #475569;
+  border: 1px solid #dde3ea;
+}
+.acct-num { font-weight: 400; opacity: 0.85; }
+
+/* Colour by brokerage so rows can be grouped by eye without reading. */
+.acct-fidelity     { background: #e6f4ea; color: #166534; border-color: #bfe3ca; }
+.acct-etrade       { background: #e8effd; color: #1e40af; border-color: #c7d8f8; }
+.acct-robinhood    { background: #e9fbf1; color: #047857; border-color: #c3f0d8; }
+.acct-schwab       { background: #eaf2fb; color: #1d4ed8; border-color: #cbdcf5; }
+.acct-tradestation { background: #fdf2e9; color: #9a3412; border-color: #f6ddc4; }
+.acct-multi        { background: #f3e8ff; color: #6b21a8; border-color: #e4d0fa; }

@@ -59,7 +59,7 @@ export function renderHeaderRow(columns, sortKey, sortDir, { trailingBlank = tru
 // string so cell-specific classes/titles stay next to the markup that needs
 // them (mirrors the same pattern in watchlist/render.js).
 const POSITION_CELL_RENDERERS = {
-  symbol: (p) => `<td><strong>${escapeHtml(p.symbol)}</strong></td>`,
+  symbol: (p) => `<td><strong>${escapeHtml(p.symbol)}</strong>${accountBadge(p)}</td>`,
   security_name: (p) => `<td>${escapeHtml(p.security_name || "")}</td>`,
   exchange_code: (p) => `<td>${escapeHtml(p.exchange_code || "—")}</td>`,
   quantity_remaining: (p) => `<td>${formatQty(p.quantity_remaining)}</td>`,
@@ -196,6 +196,7 @@ function summariseLots(lots) {
   return {
     security_id: first.security_id,
     symbol: first.symbol,
+    accountBadge: groupAccountBadge(lots),
     security_name: first.security_name,
     exchange_code: first.exchange_code,
     last_price: first.last_price,
@@ -212,6 +213,45 @@ function summariseLots(lots) {
   };
 }
 
+/**
+ * A compact account marker for column one.
+ *
+ * Letter plus the last four digits, not a brokerage logo: real marks would mean
+ * bundling trademarked images into a personal app for no functional gain, and
+ * they would not solve the actual problem anyway. Both Fidelity accounts here
+ * are Rollover IRAs -- a Fidelity logo on each would identify neither. The
+ * NUMBER is what distinguishes them, so the number is what the badge leads on.
+ *
+ * Colour is derived from the brokerage so the eye can group rows without
+ * reading, and the full label is in the title for when reading is needed.
+ */
+function accountBadge(p) {
+  if (!p.broker_slug) return "";
+  const last4 = p.account_number ? String(p.account_number).slice(-4) : "";
+  const initial = (p.broker_name || p.broker_slug).charAt(0).toUpperCase();
+  const full = `${escapeHtml(p.broker_name || p.broker_slug)}${p.account_number ? ` ${escapeHtml(p.account_number)}` : ""}`;
+  return `<span class="acct-badge acct-${escapeHtml(p.broker_slug)}" title="${full}">${initial}${
+    last4 ? `<span class="acct-num">${escapeHtml(last4)}</span>` : ""
+  }</span>`;
+}
+
+/**
+ * The badge for a consolidated row.
+ *
+ * When a holding spans accounts -- RKLB sits in both Fidelity IRAs -- one badge
+ * would be a lie and several would crowd the cell, so it says how many and
+ * names them on hover. Expanding shows which lot is where.
+ */
+function groupAccountBadge(lots) {
+  const distinct = [...new Map(lots.filter((l) => l.broker_slug).map((l) => [l.account_number ?? l.broker_slug, l])).values()];
+  if (distinct.length === 0) return "";
+  if (distinct.length === 1) return accountBadge(distinct[0]);
+  const names = distinct
+    .map((l) => `${l.broker_name}${l.account_number ? ` ${l.account_number}` : ""}`)
+    .join(", ");
+  return `<span class="acct-badge acct-multi" title="Held across: ${escapeHtml(names)}">${distinct.length} accts</span>`;
+}
+
 const GROUP_CELL_RENDERERS = {
   symbol: (g, isOpen) => `
     <td>
@@ -219,7 +259,7 @@ const GROUP_CELL_RENDERERS = {
               aria-expanded="${isOpen}"
               title="${isOpen ? "Hide" : "Show"} the ${g.lotCount} purchases behind this holding">
         <span class="group-caret">${isOpen ? "\u25BE" : "\u25B8"}</span><strong>${escapeHtml(g.symbol)}</strong>
-      </button>
+      </button>${g.accountBadge}
     </td>`,
   security_name: (g) => `<td>${escapeHtml(g.security_name || "")}</td>`,
   exchange_code: (g) => `<td>${escapeHtml(g.exchange_code || "—")}</td>`,

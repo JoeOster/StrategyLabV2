@@ -411,9 +411,15 @@ const openPositionsQuery = db.prepare(`
     s.id AS security_id, s.symbol, s.name AS security_name,
     e.code AS exchange_code,
     q.last_price, q.prev_close, q.fetched_at AS quote_fetched_at,
-    src.name AS source_name, strat.title AS strategy_title
+    src.name AS source_name, strat.title AS strategy_title,
+    -- Which account this lot is in. Carried on every row so an all-accounts
+    -- view can say whose position it is -- otherwise two identical-looking
+    -- RKLB rows give no clue that they are in different brokerages.
+    acc.account_number, br.slug AS broker_slug, br.name AS broker_name
   FROM transactions t
   JOIN securities s ON s.id = t.security_id
+  LEFT JOIN accounts acc ON acc.id = t.account_id
+  LEFT JOIN brokers br ON br.id = acc.broker_id
   LEFT JOIN exchanges e ON e.id = s.exchange_id
   LEFT JOIN quotes_cache q ON q.security_id = t.security_id
   LEFT JOIN advice_sources src ON src.id = t.source_id
