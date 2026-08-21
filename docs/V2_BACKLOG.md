@@ -5,43 +5,47 @@ up cold, including the open questions that would need answering first.
 
 ---
 
-## Ticker research skill
+## Ticker research skill -- BUILT 2026-08-21
 
-**What Joe asked for:** "a Claude skill in here for ticker research ... for
-current news and data affecting stock." Confirmed shape: **a skill file
-invoked in a chat session**, not an in-app LLM integration. No API key, no
-per-call cost, no server code — you'd say something like "research NVDA" in
-a Cowork/Claude Code session and get a written brief back.
+`.claude/skills/ticker-research/SKILL.md`. Invoked in a Claude Code session on
+this project: "research NVDA".
 
-**Where it hooks in:** the Dashboard's ticker detail dialog currently has a
-disabled-in-spirit **"Research (coming soon)"** button that explains this and
-points here. That's the placeholder to replace.
+It reads `GET /api/ticker/:symbol` over SSH first -- position, cost basis,
+lots, targets, trade history, stored price series -- and only then searches the
+web, because the position determines what is worth searching for. An earnings
+date means something different to someone holding 400 shares at a loss than to
+someone watching from the sidelines.
 
-**Sketch of the skill** (`.claude/skills/ticker-research/SKILL.md`):
+The brief keeps **what the app knows** and **what the web says** in separate
+sections. Mixed together, a cost basis and a stranger's price target read as
+equally solid, and the user cannot tell which half is fact about their own
+account and which is somebody's guess.
 
-1. Read the app's own data for the ticker — either by querying
-   `data/strategy_lab.dev.db` directly, or by calling the running server's
-   `GET /api/ticker/:symbol`, which already returns profile, quote, 52-week
-   range, stored price history, the user's lots, trade history and watchlist
-   entries. Prefer the API when the server is up; fall back to the DB file.
-2. Web-search for recent news, earnings dates, analyst commentary, and
-   anything material since the last check.
-3. Cross-reference the two: does the news explain a move the stored price
-   history shows? Is there an earnings date near a watchlist target?
-4. Write a brief that explicitly separates **what the app knows** (position,
-   cost basis, targets) from **what the web says** (news, dates, opinion),
-   so sourcing stays legible.
+**The three open questions, answered:**
 
-**Open questions before building:**
+- *Save the brief back into the app?* No. It would need a schema decision that
+  has not been made, and printing in chat costs nothing to change later. The
+  skill is explicitly forbidden from writing to the database.
+- *How much history?* Since the oldest open lot when the ticker is held --
+  `position.lots` supplies that date -- and 30 days when it is not. The skill
+  states which window it used.
+- *Actionable or descriptive?* Descriptive, with factual proximity allowed.
+  "Earnings are on the 14th and your stop sits 2% below" is two things the app
+  and the calendar already know. "Consider trimming" is advice, and this is a
+  journal whose owner has been explicit that it never touches money. The skill
+  is told not to recommend a trade, and not to invent a price target.
 
-- Should the brief be saved back into the app (a `notes` field, or a new
-  `research_notes` table keyed by security + date) or just printed in chat?
-  Saving it makes it reviewable later but needs a schema bump.
-- How much history to include — last 7 days of news, or since the position
-  was opened?
-- Should it flag anything actionable (e.g. "earnings in 3 days and you have
-  a stop 2% away"), or stay purely descriptive? Actionable framing edges
-  toward advice, which is worth being deliberate about.
+**The button.** The Dashboard's ticker dialog said "Research (coming soon)" and
+opened an alert explaining it did not work. It now says "Research" and reveals
+the exact phrase to use with the ticker filled in. A button in the web UI
+genuinely cannot run a chat skill -- that is the design, not a gap -- so the
+honest thing is to hand over the phrase rather than pretend or stay "coming
+soon" indefinitely. Pressing it again dismisses the panel.
+
+**Known limit worth stating.** Most tickers have no stored price history: the
+app backfills on demand and only SPY has been filled. The skill checks for an
+empty `series` and says so rather than treating missing history as a flat
+chart, and knows the one call that fixes it.
 
 ---
 

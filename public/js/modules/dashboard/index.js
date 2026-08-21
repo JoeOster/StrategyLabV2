@@ -94,13 +94,7 @@ export async function initializeDashboardModule() {
   els.refreshBtn.addEventListener("click", handleRefresh);
   els.tickerRefreshBtn.addEventListener("click", handleTickerRefresh);
   els.detailCloseBtn.addEventListener("click", () => els.detailDialog.close());
-  els.researchBtn.addEventListener("click", () => {
-    window.alert(
-      "Ticker research isn't wired up yet.\n\nThe plan is a Claude skill you invoke in a chat session " +
-        "(\"research NVDA\") which reads this app's data and searches the web. " +
-        "See docs/V2_BACKLOG.md.",
-    );
-  });
+  els.researchBtn.addEventListener("click", showResearchHint);
 
   await populateAccountFilter();
   await reloadDashboardView();
@@ -209,6 +203,38 @@ function errorBanner(message) {
   p.className = "status-banner status-error";
   p.textContent = message;
   return p;
+}
+
+/**
+ * Shows how to research the ticker currently open.
+ *
+ * The button cannot DO the research: it is a Claude skill invoked in a chat
+ * session, which is the deliberate design -- no API key, no per-call cost, no
+ * LLM code in a two-dependency app. So the honest thing for a button in the
+ * web UI is to hand over the exact phrase, with the ticker already filled in,
+ * rather than either pretending or saying "coming soon" forever.
+ */
+function showResearchHint() {
+  const symbol = state.detailSymbol;
+  if (!symbol) return;
+  const existing = els.detailBody.querySelector(".research-hint");
+  if (existing) return existing.remove(); // pressing it again closes it
+
+  const panel = document.createElement("div");
+  panel.className = "research-hint";
+  // textContent throughout: symbol reaches here from a URL parameter, and this
+  // is the same path BUG 9 was about.
+  const p = document.createElement("p");
+  p.textContent = `Research runs as a Claude skill, not in the browser. In a Claude Code session on this project, say:`;
+  const code = document.createElement("code");
+  code.textContent = `research ${symbol}`;
+  const note = document.createElement("p");
+  note.className = "panel-hint";
+  note.textContent =
+    "It reads this app's own record of the ticker — your position, cost basis and targets — " +
+    "then searches the web, and keeps the two clearly apart in what it writes back.";
+  panel.append(p, code, note);
+  els.detailBody.prepend(panel);
 }
 
 async function openDetailFor(symbol) {

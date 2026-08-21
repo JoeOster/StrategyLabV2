@@ -920,3 +920,21 @@ dialog input, dialog select, dialog textarea {
 .pending-imports button {
   margin-left: 0.4rem;
 }
+
+/* The research hint. A panel rather than an alert() so the ticker can be read
+   and copied, and so pressing the button again dismisses it. */
+.research-hint {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+  background: color-mix(in srgb, var(--accent, #2563eb) 6%, transparent);
+}
+.research-hint code {
+  display: inline-block;
+  margin: 0.35rem 0;
+  padding: 0.2rem 0.45rem;
+  border-radius: 3px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  font-weight: 600;
+}
