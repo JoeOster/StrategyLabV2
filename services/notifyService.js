@@ -23,9 +23,16 @@ export async function deliverAlertWebhook(firedAlerts) {
     event: "alerts_triggered",
     triggeredAt: new Date().toISOString(),
     alerts: firedAlerts.map((a) => ({
-      watchedItemId: a.watchedItemId,
+      // One of these two identifies the alert's origin: an entry watch, or an
+      // exit rung. Both are sent so a consumer (Home Assistant, Becca) can tell
+      // "your buy target was hit" from "your stop was hit" without parsing the
+      // message, which is the same reasoning as alerts.trigger_reason.
+      watchedItemId: a.watchedItemId ?? null,
+      planExitId: a.planExitId ?? null,
+      reason: a.reason ?? null,
       symbol: a.symbol,
       price: a.price,
+      message: a.message ?? null,
     })),
   };
 

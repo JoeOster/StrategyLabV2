@@ -693,6 +693,46 @@ only its owner moved.
   whether Joe routinely receives and would log such signals. Do not build until
   answered -- an unfilled table is worse than no table.
 
+## FIFO sells ignore plan boundaries (found 2026-08-21 while building exits)
+
+Surfaced by a test that failed for the right reason. `recordSell` allocates
+FIFO across **every open lot the holder has in that security**, oldest first.
+It knows nothing about plans.
+
+So if two theses hold the same ticker -- one from a Telegram call, one from a
+book pattern -- selling shares attributed to thesis A can silently draw down
+thesis B's lot instead, because B's lot happens to be older. The position
+maths stays correct; the *attribution* does not. And attribution is the point
+of the app.
+
+It also breaks the ladder's own accounting: a plan can report shares it no
+longer effectively owns, so `planRemainingQuantity` overstates and the oversell
+guard under-protects.
+
+**Not a bug in the FIFO engine.** FIFO is the correct default for cost basis
+and is what a broker does. The gap is that nothing tells it which thesis a
+sale belongs to.
+
+**The tool already exists.** `recordSell` accepts `lotId` for specific-lot
+selling. A plan-aware sell would constrain allocation to the plan's own lots --
+FIFO *within* the thesis rather than across the account.
+
+Options, roughly in order of increasing honesty and cost:
+
+1. **Do nothing, document it.** Fine while one thesis per ticker is the norm,
+   which it is today. Silently wrong the first time it is not.
+2. **Plan-scoped sells.** Selling against a plan allocates only within that
+   plan's lots. Correct for attribution; diverges from broker FIFO for cost
+   basis, which matters if these numbers are ever compared to a 1099.
+3. **Warn at sell time** when the holder has open lots in that security under
+   more than one plan, and ask which thesis the sale belongs to. Keeps FIFO
+   honest and puts the judgement where it belongs.
+
+(3) fits the app's character best -- it is a journal that asks rather than
+assumes -- but it is a UI decision, so it is Joe's call. Until then the test
+suite pins the current behaviour by using a dedicated ticker in section 13d,
+with a comment saying why.
+
 ## Vocabulary and the trade/plan/source model (Joe, 2026-08-21)
 
 **Vocabulary.** A **trade** means both kinds. A paper trade and a real trade

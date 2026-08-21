@@ -2400,6 +2400,190 @@ check(
   parseBookLookupResponse("333", { "ISBN:333": { authors: [{ name: "Ghost" }] } }) === null,
 );
 
+console.log("\n13. Exit plans: a thesis owning a ladder of rungs");
+const plans = await import("../services/plansService.js");
+
+// A plan is opened by a BUY -- that is what creates the position to exit.
+const planBuy = await tx.recordBuy({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  transactionDate: "2026-08-01",
+  quantity: 100,
+  price: 90,
+  sourceId: bookSource.id,
+  strategyId: strategy.id,
+});
+const plan = plans.createPlanForTrade(traderHolder.id, planBuy.id, { notes: "ladder test" });
+check("A plan can be created from a trade", plan.id != null);
+check("The plan inherits the trade's source", plan.source_id === bookSource.id);
+check("The plan inherits the trade's strategy", plan.strategy_id === strategy.id);
+check(
+  "The opening trade is attached to it",
+  db.prepare("SELECT plan_id FROM transactions WHERE id = ?").get(planBuy.id).plan_id === plan.id,
+);
+check("The plan holds the lot's shares", plans.planRemainingQuantity(plan.id) === 100);
+
+let secondPlanRejected = false;
+try {
+  plans.createPlanForTrade(traderHolder.id, planBuy.id);
+} catch (err) {
+  secondPlanRejected = /already belongs to a plan/.test(err.message);
+}
+check("A trade cannot belong to two plans", secondPlanRejected);
+
+// Rungs. A stop is an ordinary rung with an upper bound -- no special case.
+const rung1 = plans.addExit(traderHolder.id, plan.id, { kind: "TAKE_PROFIT", quantity: 50, priceLow: 110 });
+const rung2 = plans.addExit(traderHolder.id, plan.id, { kind: "TAKE_PROFIT", quantity: 30, priceLow: 120 });
+const stopRung = plans.addExit(traderHolder.id, plan.id, { kind: "STOP", quantity: 20, priceHigh: 80 });
+check("A ladder can hold several take-profit rungs", rung1.id != null && rung2.id != null);
+check("A stop is just a rung", stopRung.kind === "STOP" && stopRung.price_high === 80);
+check("Rungs are sequenced", rung1.sequence === 0 && rung2.sequence === 1);
+check("The ladder commits the shares it promises", plans.planCommittedQuantity(plan.id) === 100);
+
+// Oversell guard: a ladder promising more than the plan holds would fire an
+// alert that cannot be honoured, which reads as the app being broken.
+let oversellRejected = false;
+try {
+  plans.addExit(traderHolder.id, plan.id, { kind: "TAKE_PROFIT", quantity: 1, priceLow: 130 });
+} catch (err) {
+  oversellRejected = /oversell/.test(err.message);
+}
+check("A rung that would oversell the plan is refused", oversellRejected);
+
+let unboundedRejected = false;
+try {
+  plans.addExit(traderHolder.id, plan.id, { kind: "TAKE_PROFIT", quantity: 1 });
+} catch (err) {
+  unboundedRejected = /price bound/.test(err.message);
+}
+check("A rung with no price bound is refused", unboundedRejected);
+
+// Scaling into the SAME thesis: one ladder over two lots, which is the case
+// per-lot exits could not express.
+const scaleIn = await tx.recordBuy({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  transactionDate: "2026-08-08",
+  quantity: 40,
+  price: 95,
+});
+plans.attachTradeToPlan(traderHolder.id, plan.id, scaleIn.id);
+check("Scaling in attaches a second lot to the same thesis", plans.planRemainingQuantity(plan.id) === 140);
+check(
+  "...which frees up room the ladder can now use",
+  plans.addExit(traderHolder.id, plan.id, { kind: "TAKE_PROFIT", quantity: 40, priceLow: 130 }).id != null,
+);
+
+// A plan is a thesis about ONE thing.
+const otherSecurity = await tx.recordBuy({
+  holderId: traderHolder.id,
+  symbol: "AAPL",
+  transactionDate: "2026-08-08",
+  quantity: 10,
+  price: 200,
+});
+let wrongSecurityRejected = false;
+try {
+  plans.attachTradeToPlan(traderHolder.id, plan.id, otherSecurity.id);
+} catch (err) {
+  wrongSecurityRejected = /different security/.test(err.message);
+}
+check("A trade for another security cannot join the plan", wrongSecurityRejected);
+
+console.log("\n13b. Rung evaluation");
+check("A take-profit rung fires at or above its bound", plans.exitTriggered(rung1, 110) === true);
+check("...and above it", plans.exitTriggered(rung1, 118) === true);
+check("...but not below", plans.exitTriggered(rung1, 109.99) === false);
+check("A stop rung fires at or below its bound", plans.exitTriggered(stopRung, 80) === true);
+check("...and below it", plans.exitTriggered(stopRung, 60) === true);
+check("...but not above", plans.exitTriggered(stopRung, 80.01) === false);
+check(
+  "A cancelled rung never fires",
+  plans.exitTriggered({ ...rung1, status: "cancelled" }, 999) === false,
+);
+
+console.log("\n13c. A fired rung reaches the bell and can be acknowledged");
+// This is the path that would silently break: alerts used to INNER JOIN
+// watched_items, so a rung alert -- which has no watched_item -- would have
+// been invisible to the bell and unacknowledgeable.
+const pending = plans.listPendingExits().filter((e) => e.plan_id === plan.id);
+check("Pending rungs are listed for evaluation with their symbol", pending.length > 0 && pending[0].symbol === "NVDA");
+
+const bellBefore = wlSvc.listUnacknowledgedAlerts(traderHolder.id).length;
+const firedRung = pending.find((e) => e.id === rung1.id);
+const exitAlert = wlSvc.applyExitAlert(firedRung, 112);
+check("Crossing a rung raises an alert", exitAlert !== null);
+check("...tagged with the rung's kind", exitAlert.reason === "TAKE_PROFIT");
+check("...naming the rung rather than saying 'target hit'", /take-profit rung/.test(exitAlert.message));
+
+const storedExitAlert = db
+  .prepare("SELECT * FROM alerts WHERE plan_exit_id = ? ORDER BY id DESC LIMIT 1")
+  .get(rung1.id);
+check("The alert records which rung fired", storedExitAlert.plan_exit_id === rung1.id);
+check("...and has no watched_item parent", storedExitAlert.watched_item_id === null);
+check("The rung is marked hit", db.prepare("SELECT status FROM plan_exits WHERE id = ?").get(rung1.id).status === "hit");
+check("A hit rung does not fire again", wlSvc.applyExitAlert(db.prepare("SELECT * FROM plan_exits WHERE id = ?").get(rung1.id), 115) === null);
+
+const bell = wlSvc.listUnacknowledgedAlerts(traderHolder.id);
+check("The rung alert reaches the bell", bell.length === bellBefore + 1);
+const bellRow = bell.find((a) => a.plan_exit_id === rung1.id);
+check("...carrying the symbol resolved through the plan", bellRow?.symbol === "NVDA");
+check(
+  "The rung alert can be acknowledged",
+  wlSvc.acknowledgeAlert(traderHolder.id, bellRow.id).acknowledged === 1,
+);
+check(
+  "...and leaves the bell",
+  !wlSvc.listUnacknowledgedAlerts(traderHolder.id).some((a) => a.id === bellRow.id),
+);
+
+let cancelHitRejected = false;
+try {
+  plans.cancelExit(traderHolder.id, plan.id, rung1.id);
+} catch (err) {
+  cancelHitRejected = /already fired/.test(err.message);
+}
+check("A fired rung cannot be cancelled away", cancelHitRejected);
+
+console.log("\n13d. A sold-out thesis closes");
+// A dedicated symbol with no other lots. NOT incidental: recordSell allocates
+// FIFO across every open lot for the holder, which crosses plan boundaries --
+// see "FIFO sells ignore plan boundaries" in docs/V2_BACKLOG.md. Sharing a
+// ticker here made the sell draw down an unrelated older lot instead of this
+// plan's, which is exactly the real-world hazard.
+db.prepare(
+  "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('PLNX', ?, 'Plan Test Co', 'manual')",
+).run(exchangeId);
+const soldOut = await tx.recordBuy({
+  holderId: traderHolder.id,
+  symbol: "PLNX",
+  transactionDate: "2026-08-09",
+  quantity: 10,
+  price: 200,
+});
+const closingPlan = plans.createPlanForTrade(traderHolder.id, soldOut.id);
+plans.addExit(traderHolder.id, closingPlan.id, { kind: "TAKE_PROFIT", quantity: 10, priceLow: 250 });
+check("Plan is open while shares are held", plans.getPlan(traderHolder.id, closingPlan.id).plan.status === "open");
+check("closePlanIfExhausted leaves a held plan alone", plans.closePlanIfExhausted(closingPlan.id).closed === 0);
+
+await tx.recordSell({
+  holderId: traderHolder.id,
+  symbol: "PLNX",
+  transactionDate: "2026-08-10",
+  quantity: 10,
+  price: 210,
+});
+check("Selling out empties the plan", plans.planRemainingQuantity(closingPlan.id) === 0);
+check("...so the plan closes", plans.closePlanIfExhausted(closingPlan.id).closed === 1);
+check(
+  "...and its unreachable rungs are cancelled rather than left pending",
+  plans.listExits(closingPlan.id).every((e) => e.status !== "pending"),
+);
+check(
+  "A closed plan's rungs are no longer evaluated",
+  !plans.listPendingExits().some((e) => e.plan_id === closingPlan.id),
+);
+
 console.log("\n9b. Frontend: regression guards for two fixed UI bugs");
 
 // BUG 9: server text into innerHTML. The dashboard's ticker-detail dialog was

@@ -299,7 +299,16 @@ CREATE TABLE watched_items (
 -- tells you history (and is what "hit me up" notifications get sent from).
 CREATE TABLE alerts (
   id                INTEGER PRIMARY KEY,
-  watched_item_id   INTEGER NOT NULL REFERENCES watched_items(id) ON DELETE CASCADE,
+  -- An alert comes from ONE of two places, never both:
+  --   watched_item_id -- a plan to get IN was reached (entry band)
+  --   plan_exit_id    -- a rung of a plan to get OUT was reached
+  -- Kept in one table rather than two because everything downstream reads
+  -- alerts as a single stream: the bell, the acknowledge endpoints, and the
+  -- Home Assistant webhook. Two tables would mean polling and merging both,
+  -- and forgetting one of them is the kind of omission this codebase has
+  -- already paid for twice.
+  watched_item_id   INTEGER REFERENCES watched_items(id) ON DELETE CASCADE,
+  plan_exit_id      INTEGER REFERENCES plan_exits(id) ON DELETE CASCADE,
   triggered_at      TEXT NOT NULL DEFAULT (datetime('now')),
   trigger_price     REAL NOT NULL,
   -- WHICH level was crossed: 'STOP' | 'BUY' | 'TAKE_PROFIT' | 'TAKE_PROFIT_2'.
@@ -313,12 +322,83 @@ CREATE TABLE alerts (
   -- guessing one from prose would invent data.
   trigger_reason    TEXT CHECK (trigger_reason IN ('STOP','BUY','TAKE_PROFIT','TAKE_PROFIT_2')),
   message           TEXT,
-  acknowledged_at   TEXT
+  acknowledged_at   TEXT,
+  -- Exactly one parent. Enforced here rather than trusted to the service layer,
+  -- because an alert belonging to neither is invisible in every query that
+  -- joins, and an alert belonging to both would be counted twice.
+  CHECK ((watched_item_id IS NOT NULL) <> (plan_exit_id IS NOT NULL))
 );
 
 -- ============================================================================
 -- SECTION 4: Transactions & CSV Imports
 -- ============================================================================
+
+-- A plan is ONE ENTRY THESIS: the reason a position was opened, and the rules
+-- for getting back out of it. It owns the exit ladder.
+--
+-- Why exits hang off this and not off a transaction or a position:
+--
+--  * Not a position (holder+security). Buying one ticker twice on two different
+--    sources' recommendations is TWO theses. A position-level ladder merges
+--    them and destroys the attribution -- which is the entire purpose of this
+--    app. transactions.source_id exists per row precisely to keep them apart.
+--  * Not a single lot. Scaling into ONE thesis with two buys a week apart is
+--    one ladder, not two; per-lot ladders would collectively oversell.
+--
+-- So: one plan, one thesis, one or more lots, one ladder. In the common case
+-- (buy once, sell all) a plan is a single lot with a single rung, and the
+-- distinction costs nothing.
+--
+-- Deliberately NOT the larger `plans` redesign discussed in V2_BACKLOG.md --
+-- this does not absorb watchlist membership or journal ideas. It owns exits and
+-- groups lots. It is, however, the natural seed for that later.
+CREATE TABLE plans (
+  id            INTEGER PRIMARY KEY,
+  holder_id     INTEGER NOT NULL REFERENCES account_holders(id) ON DELETE CASCADE,
+  security_id   INTEGER NOT NULL REFERENCES securities(id) ON DELETE RESTRICT,
+  -- Inherited from the opening trade, and both nullable: a trade can exist with
+  -- no plan, and a plan can exist with nobody to credit. A whim trade that
+  -- still carries a stop is a normal thing, not a degraded one.
+  source_id     INTEGER REFERENCES advice_sources(id) ON DELETE SET NULL,
+  strategy_id   INTEGER REFERENCES strategies(id) ON DELETE SET NULL,
+  -- 'closed' means the thesis is done -- rungs exhausted, or the position sold
+  -- out. 'cancelled' means abandoned with the position possibly still open.
+  status        TEXT NOT NULL DEFAULT 'open'
+                   CHECK (status IN ('open','closed','cancelled')),
+  notes         TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One rung of an exit ladder: "sell THIS MUCH when price is in THIS BAND".
+--
+-- Rows, not columns, because partial sells need a quantity per target and
+-- take_profit_2_low/high was already the start of a ladder that would have
+-- grown a _3 and a _4, each with its own branch in the evaluator. That
+-- accretion is what made the second take-profit unreachable in practice
+-- (docs/BUGS.md #10).
+CREATE TABLE plan_exits (
+  id            INTEGER PRIMARY KEY,
+  plan_id       INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  -- A stop is just a rung. One evaluation path, no special case.
+  kind          TEXT NOT NULL CHECK (kind IN ('TAKE_PROFIT','STOP')),
+  sequence      INTEGER NOT NULL DEFAULT 0,   -- display/ladder order
+  quantity      REAL NOT NULL CHECK (quantity > 0),
+  -- A band, same convention as watched_items' existing targets. The rung fires
+  -- when the price sits inside it, so an open end is simply NULL:
+  --   TAKE_PROFIT at 110 or better -> price_low = 110, price_high = NULL
+  --   STOP at 90 or worse          -> price_low = NULL, price_high = 90
+  -- One predicate covers both directions, which is what collapses the old
+  -- four-case triggerReason into "which rung was crossed".
+  price_low     REAL,
+  price_high    REAL,
+  status        TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending','hit','cancelled')),
+  hit_at        TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  -- An unbounded rung would fire on every price forever.
+  CHECK (price_low IS NOT NULL OR price_high IS NOT NULL)
+);
 
 CREATE TABLE transactions (
   id                  INTEGER PRIMARY KEY,
@@ -338,6 +418,12 @@ CREATE TABLE transactions (
   quantity_remaining  REAL,               -- open-lot tracking for BUYs
   linked_buy_id       INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
   import_batch_id     INTEGER REFERENCES import_batches(id) ON DELETE SET NULL,
+  -- The thesis this lot belongs to, if any. Nullable on purpose: a trade can
+  -- exist with no plan, no source and no strategy -- someone bought something
+  -- without writing anything down first, which is a normal trade rather than a
+  -- degraded one. Trades sharing a plan_id were scaled into under one thesis
+  -- and share one exit ladder.
+  plan_id             INTEGER REFERENCES plans(id) ON DELETE SET NULL,
   external_ref        TEXT,               -- broker's own txn id, or a computed fingerprint
   notes               TEXT,
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
@@ -429,6 +515,13 @@ CREATE TABLE app_settings (
 -- Uniqueness on symbol alone matches how the app genuinely behaves. It forgoes
 -- listing one ticker on two exchanges, which nothing here supports anyway:
 -- there is one lookup path and it is by symbol. (BUG 6)
+CREATE INDEX idx_transactions_plan            ON transactions(plan_id);
+-- The evaluator's hot query is "every pending rung of an open plan".
+CREATE INDEX idx_plan_exits_pending
+  ON plan_exits (plan_id) WHERE status = 'pending';
+CREATE INDEX idx_plans_open ON plans (holder_id) WHERE status = 'open';
+CREATE INDEX idx_alerts_plan_exit ON alerts(plan_exit_id);
+
 CREATE UNIQUE INDEX idx_securities_symbol    ON securities(symbol);
 CREATE INDEX idx_historical_prices_security   ON historical_prices(security_id, date);
 CREATE INDEX idx_dividends_security           ON dividends(security_id);
@@ -464,4 +557,10 @@ CREATE TRIGGER trg_app_settings_updated_at
 AFTER UPDATE ON app_settings
 BEGIN
   UPDATE app_settings SET updated_at = datetime('now') WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER trg_plans_updated_at
+AFTER UPDATE ON plans
+BEGIN
+  UPDATE plans SET updated_at = datetime('now') WHERE id = NEW.id;
 END;
