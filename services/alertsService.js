@@ -180,6 +180,12 @@ export async function resolveAlert(holderId, alertId, input = {}) {
   const sale = await recordSell({
     holderId,
     accountId: alert.plan_account_id ?? null,
+    // The rung belongs to a thesis, so the sale does too. Without this a
+    // take-profit on one plan could draw down another plan's older lot, and
+    // closePlanIfExhausted() below would then check a plan whose share count
+    // never moved -- leaving a finished thesis open and evaluating rungs
+    // against a position it no longer has.
+    planId: alert.plan_id ?? null,
     symbol: alert.symbol,
     transactionDate: date,
     quantity: alert.rung_quantity,

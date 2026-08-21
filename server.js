@@ -880,6 +880,9 @@ app.post("/api/transactions", async (req, res) => {
     sourceId: body.sourceId ? Number(body.sourceId) : null,
     strategyId: body.strategyId ? Number(body.strategyId) : null,
     accountId: body.accountId ? Number(body.accountId) : null,
+    // Which thesis a sale belongs to. Optional, and only consulted on SELL --
+    // but when a holding spans two plans, recordSell refuses without it.
+    planId: body.planId ? Number(body.planId) : null,
   };
 
   try {

@@ -22,13 +22,13 @@ const insertTransaction = db.prepare(`
     import_batch_id,
     transaction_type, transaction_date, quantity, price, fees, cost_basis,
     quantity_remaining, linked_buy_id, external_ref, notes,
-    needs_review, review_reason
+    needs_review, review_reason, plan_id
   ) VALUES (
     @holderId, @accountId, @securityId, @watchedItemId, @sourceId, @strategyId, @isPaperTrade,
     @importBatchId,
     @transactionType, @transactionDate, @quantity, @price, @fees, @costBasis,
     @quantityRemaining, @linkedBuyId, @externalRef, @notes,
-    @needsReview, @reviewReason
+    @needsReview, @reviewReason, @planId
   ) RETURNING *
 `);
 
@@ -37,7 +37,13 @@ const insertTransaction = db.prepare(`
 // was missed. Defaulting here means only the paths that actually set a review
 // flag have to mention it.
 const insertTxn = (params) =>
-  insertTransaction.get({ needsReview: 0, reviewReason: null, importBatchId: null, ...params });
+  insertTransaction.get({
+    needsReview: 0,
+    reviewReason: null,
+    importBatchId: null,
+    planId: null,
+    ...params,
+  });
 
 // --- Stock splits --------------------------------------------------------
 // A split is a market event, not something a user logs -- it arrives via
@@ -204,6 +210,7 @@ export function recordBuyWith(security, input) {
       needsReview: input.needsReview ? 1 : 0,
       reviewReason: input.reviewReason ?? null,
       notes: input.notes ?? null,
+      planId: input.planId ?? null,
     });
 
     // Catch up a backdated entry: if this stock already split, on record,
@@ -238,6 +245,10 @@ const getOpenLots = db.prepare(`
     AND transaction_type = 'BUY' AND quantity_remaining > 0
     AND is_paper_trade = @isPaperTrade AND voided_at IS NULL
     AND (@accountId IS NULL OR account_id IS @accountId)
+    -- Thesis scope, same NULL-means-everything convention as accountId above.
+    -- Constraining here makes a plan-scoped sale FIFO *within* the thesis
+    -- rather than across the whole holding.
+    AND (@planId IS NULL OR plan_id IS @planId)
   ORDER BY transaction_date, id
 `);
 
@@ -279,12 +290,22 @@ export function recordSellWith(security, input) {
   const isPaperTrade = input.isPaperTrade ? 1 : 0;
 
   return withTransaction(() => {
+    const planId = input.planId == null ? null : Number(input.planId);
+    // Set only on the import path, where ambiguity is flagged rather than refused.
+    let ambiguousPlans = null;
+
     let lots = getOpenLots.all({
       holderId: input.holderId,
       securityId: security.id,
       isPaperTrade,
       accountId: input.accountId ?? null,
+      planId,
     });
+    if (planId != null && lots.length === 0) {
+      throw new Error(
+        `That plan holds no open ${security.symbol} lots to sell from.`,
+      );
+    }
 
     // No account named, and the holding spans several. Guessing would pick the
     // oldest lot regardless of where it is held, which is how the bug above
@@ -299,9 +320,51 @@ export function recordSellWith(security, input) {
       }
     }
 
+    // Narrow to a named lot FIRST. Naming a lot is the most specific
+    // instruction available -- more specific than naming a thesis -- so the
+    // ambiguity guard below must judge what is actually being sold, not the
+    // whole holding. Ordered the other way, selling one explicitly chosen lot
+    // was refused as ambiguous, which is the opposite of true.
     if (input.lotId) {
       lots = lots.filter((lot) => lot.id === Number(input.lotId));
       if (lots.length === 0) throw new Error("That lot is not open, or does not belong to you.");
+    }
+
+    // The same problem one axis over, and it is the more damaging one.
+    //
+    // FIFO across the whole holding is right for COST BASIS -- it is what a
+    // broker does and what a 1099 will say. It is wrong for ATTRIBUTION. If a
+    // Telegram call and a book pattern both hold RKLB, selling "the Telegram
+    // shares" draws down whichever lot is older, so the book's thesis quietly
+    // loses shares it still believes it owns. The position maths stays correct
+    // and the attribution -- the entire point of this app -- silently rots.
+    //
+    // It also breaks the ladder: planRemainingQuantity() counts a plan's own
+    // lots, so a plan can report shares another plan's sale already consumed,
+    // and the oversell guard on new rungs under-protects by exactly that much.
+    //
+    // Untagged lots count as their own bucket. "Some shares are under a thesis
+    // and some are not" is precisely as ambiguous as two named theses.
+    if (planId == null) {
+      const buckets = new Set(lots.map((lot) => lot.plan_id ?? 0));
+      if (buckets.size > 1) {
+        const named = [...new Set(lots.map((lot) => lot.plan_id).filter(Boolean))];
+        if (input.importBatchId) {
+          // A broker CSV cannot say which thesis a sale served -- the broker
+          // has never heard of theses. Refusing would dead-end the monthly
+          // audit over a question the file cannot answer, so this allocates
+          // FIFO as a broker would and flags the row instead. The judgement is
+          // deferred to a human, not skipped.
+          ambiguousPlans = named;
+        } else {
+          throw new Error(
+            `${security.symbol} is held under ${buckets.size} different theses` +
+              `${named.length ? ` (plan ${named.join(", plan ")}${buckets.has(0) ? ", plus untagged lots" : ""})` : ""}. ` +
+              `Say which plan this sale belongs to -- selling from the wrong thesis corrupts the attribution, ` +
+              `which is the thing this app exists to measure.`,
+          );
+        }
+      }
     }
 
     const available = lots.reduce((sum, lot) => sum + lot.quantity_remaining, 0);
@@ -351,9 +414,22 @@ export function recordSellWith(security, input) {
         // "this broker row has been imported", not "this database row".
         externalRef: sells.length === 0 ? (input.externalRef ?? null) : null,
         importBatchId: input.importBatchId ?? null,
-        needsReview: input.needsReview ? 1 : 0,
-        reviewReason: input.reviewReason ?? null,
+        // An ambiguous imported sale is flagged rather than refused, so it
+        // surfaces in the monthly audit with the question still answerable.
+        needsReview: input.needsReview || ambiguousPlans ? 1 : 0,
+        reviewReason:
+          input.reviewReason ??
+          (ambiguousPlans
+            ? `Allocated FIFO across theses: this holding spans plan ${ambiguousPlans.join(", plan ")}` +
+              ` and the broker file cannot say which one the sale served.`
+            : null),
         notes: input.notes ?? null,
+        // Which thesis actually gave up the shares. Recorded per fan-out row
+        // because a single sale can legitimately span lots -- and, on the
+        // import path above, lots belonging to different plans. Without this
+        // the attribution exists only in the buy rows, and a report asking
+        // "what did this source return" has to guess at the sell side.
+        planId: lot.plan_id ?? null,
       });
 
       reduceLot.run(take, take, lot.id);
@@ -415,9 +491,17 @@ const openPositionsQuery = db.prepare(`
     -- Which account this lot is in. Carried on every row so an all-accounts
     -- view can say whose position it is -- otherwise two identical-looking
     -- RKLB rows give no clue that they are in different brokerages.
-    acc.account_number, br.slug AS broker_slug, br.name AS broker_name
+    acc.account_number, br.slug AS broker_slug, br.name AS broker_name,
+    -- Which thesis owns this lot. The sell form needs it to say so before the
+    -- server has to refuse an ambiguous sale -- an error is a worse way to
+    -- learn that a holding spans two theses than simply being shown it.
+    t.plan_id, pl.notes AS plan_notes,
+    plsrc.name AS plan_source_name, plstrat.title AS plan_strategy_title
   FROM transactions t
   JOIN securities s ON s.id = t.security_id
+  LEFT JOIN plans pl ON pl.id = t.plan_id
+  LEFT JOIN advice_sources plsrc ON plsrc.id = pl.source_id
+  LEFT JOIN strategies plstrat ON plstrat.id = pl.strategy_id
   LEFT JOIN accounts acc ON acc.id = t.account_id
   LEFT JOIN brokers br ON br.id = acc.broker_id
   LEFT JOIN exchanges e ON e.id = s.exchange_id

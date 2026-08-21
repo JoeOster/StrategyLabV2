@@ -21,6 +21,10 @@ Much of the original Tier 1 and Tier 3 was built during the session that
 followed. Rewritten against what the code actually does now, verified rather
 than remembered.
 
+**Done 2026-08-21, later the same day:** FIFO now respects thesis
+boundaries -- a sale across two theses is refused rather than guessed at, and
+sell rows record which thesis gave up the shares. See `V2_BACKLOG.md`.
+
 **Done since this file was written:** the monthly import audit now completes
 (`applyCorrection`, wired to the preview UI); unknown market value renders as
 an em dash instead of break-even, on every surface and now in one shared
@@ -33,20 +37,7 @@ default-percentage settings pre-fill the exit ladder.
 
 ## Tier 1 — still open, in order
 
-### 1. FIFO sells ignore plan boundaries
-
-Selling draws down the oldest lot regardless of which thesis opened it, so a
-sale attributed to one source can silently consume another's position. Nothing
-in `transactionsService.js` references `plan_id` at all.
-
-**Why it is now first.** Every other item here is a missing output -- annoying,
-but the underlying data stays true and the report can be built later. This one
-corrupts the attribution *as trades are logged*, and attribution is the entire
-point of the app. Records written wrong today cannot be repaired later without
-the operator remembering which lot was meant. It gets more expensive every day
-the app is used.
-
-### 2. Execution efficiency should be the headline report
+### 1. Execution efficiency should be the headline report
 
 Still the first genuinely useful *output* the app can produce, and the thing
 Joe described first when asked what he wanted: signal says buy at $10, fill at
@@ -56,7 +47,7 @@ and at what price; trades record what happened. Nothing joins them.
 Needs a handful of trades to be meaningful, unlike source reliability which
 needs hundreds -- so it is the report that becomes useful soonest.
 
-### 3. No benchmark anywhere
+### 2. No benchmark anywhere
 
 "This source returned 8%" cannot be judged without "the market did 11% over the
 same holding period." Without it every source comparison is confounded by

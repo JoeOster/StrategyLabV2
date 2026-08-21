@@ -392,13 +392,30 @@ export function renderSourceOptions(sources) {
 }
 
 export function renderLotOptions(lots) {
+  // Does this holding span more than one thesis? Untagged lots count as their
+  // own, matching the server's rule exactly -- the dropdown and the guard must
+  // agree about what "ambiguous" means or the UI contradicts the error.
+  const theses = new Set(lots.map((l) => l.plan_id ?? 0));
+  const spans = theses.size > 1;
+
+  // When it does, FIFO across the whole holding is not a choice the user can
+  // meaningfully make, so the default stops offering it as one. Saying this in
+  // the control is better than saying it in an error after they submit.
+  const first = spans
+    ? `<option value="">— pick a lot: this holding spans ${theses.size} theses —</option>`
+    : `<option value="">Oldest first (FIFO)</option>`;
+
   return (
-    `<option value="">Oldest first (FIFO)</option>` +
+    first +
     lots
-      .map(
-        (l) =>
-          `<option value="${l.lot_id}">${escapeHtml(l.transaction_date)} · ${formatQty(l.quantity_remaining)} @ ${money(l.cost_per_share)}</option>`,
-      )
+      .map((l) => {
+        const thesis = l.plan_id
+          ? l.plan_source_name || l.plan_strategy_title || l.plan_notes || `plan ${l.plan_id}`
+          : "no thesis";
+        return `<option value="${l.lot_id}">${escapeHtml(l.transaction_date)} · ${formatQty(l.quantity_remaining)} @ ${money(l.cost_per_share)}${
+          spans ? ` · ${escapeHtml(String(thesis))}` : ""
+        }</option>`;
+      })
       .join("")
   );
 }

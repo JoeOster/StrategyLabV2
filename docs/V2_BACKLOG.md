@@ -717,45 +717,46 @@ Three consequences:
   whether Joe routinely receives and would log such signals. Do not build until
   answered -- an unfilled table is worse than no table.
 
-## FIFO sells ignore plan boundaries (found 2026-08-21 while building exits)
+## FIFO sells ignore plan boundaries -- RESOLVED 2026-08-21
 
-Surfaced by a test that failed for the right reason. `recordSell` allocates
-FIFO across **every open lot the holder has in that security**, oldest first.
-It knows nothing about plans.
+`recordSell` allocated FIFO across every open lot the holder had in a security,
+oldest first, knowing nothing about plans. Two theses holding the same ticker
+meant a sale made for one could silently draw its shares from the other, purely
+because that lot happened to be older. Position maths stayed correct;
+attribution rotted. It also let `planRemainingQuantity` overstate, so the
+oversell guard on new rungs under-protected by exactly the stolen amount.
 
-So if two theses hold the same ticker -- one from a Telegram call, one from a
-book pattern -- selling shares attributed to thesis A can silently draw down
-thesis B's lot instead, because B's lot happens to be older. The position
-maths stays correct; the *attribution* does not. And attribution is the point
-of the app.
+Three options were written down. What shipped is closest to (3) -- refuse and
+ask -- because it matches what the codebase already does one axis over, where a
+sale spanning two accounts is refused rather than guessed at.
 
-It also breaks the ladder's own accounting: a plan can report shares it no
-longer effectively owns, so `planRemainingQuantity` overstates and the oversell
-guard under-protects.
+**What it does now:**
 
-**Not a bug in the FIFO engine.** FIFO is the correct default for cost basis
-and is what a broker does. The gap is that nothing tells it which thesis a
-sale belongs to.
+- `recordSell` takes an optional `planId`. Given one, allocation is FIFO
+  *within that thesis* and nothing else is touched.
+- Without one, if the holding spans more than one thesis, the sale is refused
+  and the message names the plans. Untagged lots count as their own bucket:
+  "some shares under a thesis, some not" is exactly as ambiguous as two named
+  theses, and was the case most likely to be waved through.
+- A named `lotId` is checked FIRST and never trips the guard. Naming a lot is
+  more specific than naming a thesis, and refusing it would have been the
+  opposite of true.
+- Imports are flagged, not refused. A broker CSV has never heard of theses, so
+  refusing would dead-end the monthly audit over a question the file cannot
+  answer. Ambiguous imported sales allocate FIFO as a broker would and set
+  `needs_review` with a reason naming the plans.
+- Sell rows now carry `plan_id`, taken from the lot they drew from. Attribution
+  used to live only on the buy side, which would have left the efficiency
+  report guessing at the other half of every round trip.
+- The sell form's lot picker shares the guard's definition of ambiguous: when a
+  holding spans theses it withdraws "Oldest first (FIFO)" as a default and
+  labels each lot with its thesis, so the user is shown the question before the
+  server has to refuse an answer.
 
-**The tool already exists.** `recordSell` accepts `lotId` for specific-lot
-selling. A plan-aware sell would constrain allocation to the plan's own lots --
-FIFO *within* the thesis rather than across the account.
-
-Options, roughly in order of increasing honesty and cost:
-
-1. **Do nothing, document it.** Fine while one thesis per ticker is the norm,
-   which it is today. Silently wrong the first time it is not.
-2. **Plan-scoped sells.** Selling against a plan allocates only within that
-   plan's lots. Correct for attribution; diverges from broker FIFO for cost
-   basis, which matters if these numbers are ever compared to a 1099.
-3. **Warn at sell time** when the holder has open lots in that security under
-   more than one plan, and ask which thesis the sale belongs to. Keeps FIFO
-   honest and puts the judgement where it belongs.
-
-(3) fits the app's character best -- it is a journal that asks rather than
-assumes -- but it is a UI decision, so it is Joe's call. Until then the test
-suite pins the current behaviour by using a dedicated ticker in section 13d,
-with a comment saying why.
+**What is deliberately unchanged.** Cost basis is still per-lot and FIFO within
+whatever scope applies, so figures remain comparable to a broker's. This does
+not attempt a second parallel P&L basis for tax; that would be a real feature
+with a real cost, and nothing here needs it yet.
 
 ## Vocabulary and the trade/plan/source model (Joe, 2026-08-21)
 

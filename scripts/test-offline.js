@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 465;
+const MIN_EXPECTED_CHECKS = 495;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -3188,6 +3188,200 @@ const { renderSummary } = await import("../public/js/modules/shared/summary.js")
   // A partially-priced portfolio must admit it.
   check("A partial market value says how many are priced",
     renderSummary({ ...priced, pricedCount: 2, unpricedCount: 1 }).includes("2/3 priced"));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n21. FIFO respects thesis boundaries");
+// The failure this prevents is not an arithmetic one -- the share counts and
+// the cost basis stayed correct throughout. It is that a sale made for one
+// thesis silently drew its shares from another, because that other lot merely
+// happened to be older. The position was right and the ATTRIBUTION was wrong,
+// which for an app that exists to measure source reliability is the worse of
+// the two.
+{
+  const boundaryHolder = db
+    .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Boundary Test', 0) RETURNING *")
+    .get();
+  db.prepare(
+    "INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('RKLB', ?, 'Rocket Lab', 'manual')",
+  ).run(exchangeId);
+
+  const mk = (date, qty, price) =>
+    tx.recordBuy({
+      holderId: boundaryHolder.id, symbol: "RKLB",
+      transactionDate: date, quantity: qty, price,
+    });
+
+  // Thesis A is OLDER, so plain FIFO would always reach for it first.
+  const buyA = await mk("2026-01-10", 100, 10);
+  const buyB = await mk("2026-02-10", 100, 20);
+  const planA = plans.createPlanForTrade(boundaryHolder.id, buyA.id, { notes: "telegram call" });
+  const planB = plans.createPlanForTrade(boundaryHolder.id, buyB.id, { notes: "book pattern" });
+
+  check("Two theses can hold the same ticker", planA.id !== planB.id);
+  check("Each thesis counts only its own shares", plans.planRemainingQuantity(planA.id) === 100);
+
+  // The guard.
+  let refused = "";
+  try {
+    await tx.recordSell({
+      holderId: boundaryHolder.id, symbol: "RKLB",
+      transactionDate: "2026-03-01", quantity: 50, price: 30,
+    });
+  } catch (err) { refused = err.message; }
+  check("An unattributed sale across two theses is refused", /different theses/.test(refused));
+  check("...and the refusal names the plans", refused.includes("plan " + planA.id));
+  check("...and says why it matters", /attribution/.test(refused));
+
+  // Selling the YOUNGER thesis must not touch the older, cheaper lot.
+  const soldB = await tx.recordSell({
+    holderId: boundaryHolder.id, symbol: "RKLB", planId: planB.id,
+    transactionDate: "2026-03-01", quantity: 50, price: 30,
+  });
+  check("A plan-scoped sale succeeds", soldB.sells.length === 1);
+  check("It draws from that thesis's lot", soldB.sells[0].linked_buy_id === buyB.id);
+  check("...and leaves the older thesis untouched", plans.planRemainingQuantity(planA.id) === 100);
+  check("...while its own count falls", plans.planRemainingQuantity(planB.id) === 50);
+
+  // Cost basis proves which lot was actually consumed: B cost $20, A cost $10.
+  check("Realized P&L uses the SELLING thesis's cost", Math.abs(soldB.realizedPnl - 500) < 1e-9);
+
+  // The sell row records the thesis, which the efficiency report will need.
+  check(
+    "The sell row records which thesis gave up the shares",
+    db.prepare("SELECT plan_id FROM transactions WHERE id = ?").get(soldB.sells[0].id).plan_id === planB.id,
+  );
+
+  // A plan cannot sell shares it does not hold, even when the ACCOUNT has them.
+  let overPlan = "";
+  try {
+    await tx.recordSell({
+      holderId: boundaryHolder.id, symbol: "RKLB", planId: planB.id,
+      transactionDate: "2026-03-02", quantity: 80, price: 30,
+    });
+  } catch (err) { overPlan = err.message; }
+  check("A thesis cannot oversell itself while the account still holds more", /only 50/.test(overPlan));
+  check("...and the account genuinely did still hold 150", plans.planRemainingQuantity(planA.id) === 100);
+
+  // Naming a lot is MORE specific than naming a thesis, so it must not trip
+  // the ambiguity guard. Ordered wrongly, this was refused -- the one case
+  // where the user had been maximally explicit.
+  const lotSell = await tx.recordSell({
+    holderId: boundaryHolder.id, symbol: "RKLB", lotId: buyA.id,
+    transactionDate: "2026-05-01", quantity: 10, price: 30,
+  });
+  check("Selling an explicitly named lot is never ambiguous", lotSell.sells.length === 1);
+  check("...and it comes from the named lot", lotSell.sells[0].linked_buy_id === buyA.id);
+  check(
+    "...and inherits that lot's thesis",
+    db.prepare("SELECT plan_id FROM transactions WHERE id = ?").get(lotSell.sells[0].id).plan_id === planA.id,
+  );
+
+  // Untagged lots are their own bucket: "some under a thesis, some not" is
+  // exactly as ambiguous as two named theses, and was the case most likely to
+  // be waved through.
+  const looseHolder = db
+    .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Loose Lot Test', 0) RETURNING *")
+    .get();
+  const tagged = await tx.recordBuy({
+    holderId: looseHolder.id, symbol: "RKLB", transactionDate: "2026-01-05", quantity: 10, price: 10,
+  });
+  const loosePlan = plans.createPlanForTrade(looseHolder.id, tagged.id);
+  await tx.recordBuy({
+    holderId: looseHolder.id, symbol: "RKLB", transactionDate: "2026-01-06", quantity: 10, price: 11,
+  });
+  let mixed = "";
+  try {
+    await tx.recordSell({
+      holderId: looseHolder.id, symbol: "RKLB",
+      transactionDate: "2026-02-01", quantity: 5, price: 12,
+    });
+  } catch (err) { mixed = err.message; }
+  check("Tagged plus untagged lots also refuse an unattributed sale", /different theses/.test(mixed));
+  check("...and the message mentions the untagged ones", /untagged/.test(mixed));
+  check("...and a plan-scoped sale still works", (await tx.recordSell({
+    holderId: looseHolder.id, symbol: "RKLB", planId: loosePlan.id,
+    transactionDate: "2026-02-01", quantity: 5, price: 12,
+  })).sells.length === 1);
+
+  // Backward compatibility: the ordinary case must not have become harder.
+  const plainHolder = db
+    .prepare("INSERT INTO account_holders (name, is_default) VALUES ('No Plans Test', 0) RETURNING *")
+    .get();
+  await tx.recordBuy({
+    holderId: plainHolder.id, symbol: "RKLB", transactionDate: "2026-01-01", quantity: 10, price: 10,
+  });
+  await tx.recordBuy({
+    holderId: plainHolder.id, symbol: "RKLB", transactionDate: "2026-01-02", quantity: 10, price: 12,
+  });
+  const plainSell = await tx.recordSell({
+    holderId: plainHolder.id, symbol: "RKLB", transactionDate: "2026-02-01", quantity: 15, price: 20,
+  });
+  check("With no plans at all, FIFO spans lots exactly as before", plainSell.sells.length === 2);
+  check("...oldest first", plainSell.sells[0].cost_basis === 100);
+
+  // The import path must not dead-end: a broker file cannot answer the
+  // question, so the row is flagged for the monthly audit instead of refused.
+  const importAcct = acctSvcEarly.createAccount(boundaryHolder.id, {
+    broker: "fidelity",
+    accountNumber: "8801",
+  });
+  const batch = db
+    .prepare("INSERT INTO import_batches (account_id, broker, row_count) VALUES (?, 'test', 1) RETURNING *")
+    .get(importAcct.id);
+  const imported = await tx.recordSell({
+    holderId: boundaryHolder.id, symbol: "RKLB",
+    transactionDate: "2026-04-01", quantity: 20, price: 30,
+    importBatchId: batch.id,
+  });
+  check("An ambiguous IMPORTED sale is allowed through", imported.sells.length >= 1);
+  const flagged = db.prepare("SELECT needs_review, review_reason FROM transactions WHERE id = ?")
+    .get(imported.sells[0].id);
+  check("...but flagged for review", flagged.needs_review === 1);
+  check("...with a reason naming the theses it spanned", /plan /.test(flagged.review_reason));
+  check("...and saying the file could not answer it", /broker file/.test(flagged.review_reason));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n22. The sell form's lot picker agrees with the server's guard");
+// The dropdown and the ambiguity guard must share one definition of
+// "ambiguous". If they drift, the control offers a choice the server then
+// refuses, which reads as the app being broken rather than the user being
+// asked a fair question.
+{
+  const { renderLotOptions } = await import("../public/js/modules/orders/render.js");
+
+  const oneThesis = [
+    { lot_id: 1, transaction_date: "2026-01-10", quantity_remaining: 100, cost_per_share: 10, plan_id: 7, plan_source_name: "Telegram" },
+    { lot_id: 2, transaction_date: "2026-02-10", quantity_remaining: 50, cost_per_share: 12, plan_id: 7, plan_source_name: "Telegram" },
+  ];
+  const single = renderLotOptions(oneThesis);
+  check("One thesis still offers plain FIFO", single.includes("Oldest first (FIFO)"));
+  check("...and does not clutter the options with a thesis name", !single.includes("Telegram"));
+
+  const twoTheses = [
+    oneThesis[0],
+    { lot_id: 3, transaction_date: "2026-03-10", quantity_remaining: 40, cost_per_share: 20, plan_id: 9, plan_source_name: "Book X" },
+  ];
+  const spanning = renderLotOptions(twoTheses);
+  check("Two theses withdraw FIFO as a default", !spanning.includes("Oldest first (FIFO)"));
+  check("...and say why", /spans 2 theses/.test(spanning));
+  check("...and label each lot with its thesis", spanning.includes("Telegram") && spanning.includes("Book X"));
+
+  // Untagged lots are their own bucket on BOTH sides, or the two disagree.
+  const mixed = [oneThesis[0], { lot_id: 4, transaction_date: "2026-04-10", quantity_remaining: 10, cost_per_share: 15, plan_id: null }];
+  const mixedHtml = renderLotOptions(mixed);
+  check("Tagged plus untagged counts as spanning, exactly as the server has it", /spans 2 theses/.test(mixedHtml));
+  check("...and the untagged lot is labelled as such", mixedHtml.includes("no thesis"));
+
+  // Falls back through the identifiers a plan might actually have.
+  const noSource = [
+    oneThesis[0],
+    { lot_id: 5, transaction_date: "2026-05-10", quantity_remaining: 10, cost_per_share: 15, plan_id: 11, plan_strategy_title: "Volume breakout" },
+  ];
+  check("A plan with no source falls back to its strategy", renderLotOptions(noSource).includes("Volume breakout"));
+  const bare = [oneThesis[0], { lot_id: 6, transaction_date: "2026-06-10", quantity_remaining: 10, cost_per_share: 15, plan_id: 12 }];
+  check("A plan with neither still identifies itself", renderLotOptions(bare).includes("plan 12"));
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
