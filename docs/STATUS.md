@@ -111,11 +111,14 @@ basis and the void filter all apply. Routes are `POST /api/imports` (stage),
 `GET /api/imports/latest`. Only rows classified `new` are ever written.
 
 **The single next piece of work** is exit parameters on a trade -- a "Set
-Exits" button opening a ladder of exit rungs (`trade_exits`), decided with Joe
+Exits" button opening a ladder of exit rungs owned by a minimal `plans`
+table (exits belong to a THESIS, not to a lot or a position -- see the entry for
+why both obvious answers are wrong here), decided with Joe
 on 2026-08-21 after walking the Journal flow end to end. It is the keystone:
 nothing in plan-vs-actual can be measured until a trade knows where it was
 meant to exit. Full spec, including what was considered and rejected, is in
-`docs/V2_BACKLOG.md` under "Exit parameters on a trade".
+`docs/V2_BACKLOG.md` under "Exit parameters: a minimal plan owning a
+ladder of rungs".
 
 The import UI (upload, preview and approve screens over the four
 `/api/imports/*` routes, plus the per-account "latest imported" display) is an

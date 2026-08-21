@@ -556,36 +556,75 @@ obvious fit for the format, but this is real financial data. Artifacts are
 private by default, though they are still hosted -- so treat a published report
 as a deliberate decision each time, not a default output.
 
-## Exit parameters on a trade (Joe, 2026-08-21) -- NEXT PIECE OF WORK
+## Exit parameters: a minimal plan owning a ladder of rungs -- NEXT PIECE OF WORK
 
-Decided at the end of the flow walkthrough. This is the keystone: nothing in
-plan-vs-actual can be measured until a trade knows where it was meant to exit.
+Decided 2026-08-21 after walking the Journal flow end to end. This is the
+keystone: nothing in plan-vs-actual can be measured until a trade knows where
+it was meant to exit.
 
-**Shape: a "Set Exits" button on a trade, opening a ladder of exit rungs.**
-Joe's words: *"a plan should be a button on a trade that allows for high/low
-limits/partial sells and the like"*, and then *"basically adding parameters to
-the existing trade."*
+Joe's framing: *"a plan should be a button on a trade that allows for high/low
+limits/partial sells and the like"*, then *"basically adding parameters to the
+existing trade"*, and when asked whether to follow his habits or model it
+correctly: *"I almost always sell all or buy individual position, but what is
+more correct is what we should do."* So this is modelled for correctness, not
+for the common case -- though in the common case the two coincide.
 
-### Why this is not columns on `transactions`
+### Exits belong to a THESIS, not to a lot and not to a position
 
-Partial sells. "Sell 50 at $110, the other 50 at $120, stop the lot at $90"
-cannot be expressed by price bands alone -- there is nowhere to say how MUCH
-each target sells. `take_profit_2_low/high` was already the beginning of a
-ladder that would otherwise grow a `_3` and a `_4`, each needing its own branch
-in the evaluator. That accretion is exactly what produced BUG 10, where the
-second take-profit was unreachable in practice.
+Three candidate owners were considered. The reasoning matters, because the
+obvious two are both wrong in this app specifically.
 
-So exits are rows, not columns:
+**A position (holder + account + security) is wrong.** Buy INTC twice -- once
+because a Telegram group called it, once because the book's pattern appeared --
+and those are two theses from two sources. A position-level ladder merges them
+into one exit rule and destroys the attribution. `transactions.source_id`
+exists per row precisely to keep them distinct; position-level exits would
+discard that one layer up. Attribution is the entire purpose of the app, so
+anything that merges theses is disqualified.
+
+**A single lot is nearly right, but wrong the other way.** Scaling into ONE
+thesis with two buys a week apart is one plan and should be one ladder. Keyed
+per-lot it becomes two, which collectively oversell or under-cover.
+
+**So: exits belong to a plan, where a plan is one entry thesis covering one or
+more lots.**
+
+### Shape
 
 ```
-trade_exits
-  transaction_id   the lot these exits belong to
+plans
+  holder_id, security_id
+  source_id?, strategy_id?     -- inherited from the opening trade
+  status                       -- open | closed | cancelled
+  notes, created_at
+
+plan_exits                     -- the rungs
+  plan_id
   kind             TAKE_PROFIT | STOP
   sequence         rung order
   quantity         how much this rung sells
   price_low/high   the band, same convention as the existing targets
   status           pending | hit | cancelled
 ```
+
+`transactions` gains `plan_id`. Setting exits on a trade with no plan creates
+one and attaches that lot; adding to the thesis attaches the new lot to the
+same plan. A rung firing calls the existing `recordSell(quantity)` and FIFO
+allocates within the plan's lots -- **the accounting engine is untouched.**
+
+In the common case (buy once, sell all) a plan is one lot and one rung, so the
+button still reads as "set exits on this trade". The structure only starts
+mattering when scaling in or running two theses on one ticker -- which is
+exactly when the answer would otherwise be unavailable.
+
+### Why rungs are rows and not columns
+
+Partial sells. "Sell 50 at $110, the other 50 at $120, stop the lot at $90"
+cannot be expressed by price bands alone -- there is nowhere to say how MUCH
+each target sells. `take_profit_2_low/high` was already the beginning of a
+ladder that would otherwise grow a `_3` and a `_4`, each needing its own branch
+in the evaluator. That accretion is what produced BUG 10, where the second
+take-profit was unreachable in practice.
 
 A stop is simply a rung with `kind = STOP`, normally for the full remaining
 quantity. One evaluation path, no special case. `take_profit_2` and its enum
@@ -594,12 +633,12 @@ branch retire, and `triggerReason` collapses from four hard-coded cases into
 
 ### Division of labour with watched_items -- read before building
 
-Exits now exist in two places, which is the shape of BUG 10 and must not become
-it again. The split is by job, and it is clean:
+Exits will exist in two places, which is the shape of BUG 10 and must not
+become it again. The split is by job, and it is clean:
 
 - **`watched_items` exits govern getting IN.** Entry bands, alerting on a
   position not yet held.
-- **`trade_exits` govern getting OUT.** They cannot exist before there is a
+- **`plan_exits` govern getting OUT.** They cannot exist before there is a
   position to exit.
 
 Neither is a copy of the other and neither goes stale. If that ever stops being
@@ -608,46 +647,51 @@ true, one of them is wrong.
 ### What it buys
 
 Adherence becomes exact rather than inferred: *rung 1 said sell 50 at $110; you
-sold 50 at $109.20, two days late.* That is the execution-gap measurement that
-the four constraints (below) say should lead the reporting -- and unlike source
-reliability, it is answerable from a handful of trades.
+sold 50 at $109.20, two days late.* That is the execution-gap measurement the
+four constraints say should lead the reporting -- and unlike source reliability,
+it is answerable from a handful of trades.
 
-### Scope
+### Scope and consequences
 
-Deliberately self-contained. **No plans table, no signals table, no rewrite.**
-One new table, one button, one dialog, and evaluation reusing the alert engine
-that already exists -- `triggerReason`/`applyAlertIfTriggered` were wired and
-tested on 2026-08-21 and already fire once per level with `alerts.trigger_reason`
-recording which.
+Self-contained. **No signals table, no rewrite of watched_items, no change to
+the accounting engine or the importer.** Two new tables, one column on
+`transactions`, one button, one dialog, and evaluation reusing the alert engine
+wired and tested on 2026-08-21 -- which already fires once per level and records
+which level via `alerts.trigger_reason`.
 
-Consequences to handle:
+To handle during the build:
 
-- A plan is only finished when its rungs are exhausted or cancelled, so
-  whatever status the ladder carries has to reflect partial completion rather
-  than firing once.
+- A plan is finished only when its rungs are exhausted or cancelled, so status
+  must reflect partial completion rather than firing once.
 - Rungs must not oversell: the sum of pending rung quantities should not exceed
-  `quantity_remaining` on the lot.
+  the plan's remaining quantity across its lots.
 - Paper and real trades get this identically -- see the paper/real parity
-  principle below. Put the field handling through the shared mapper.
+  principle below. Field handling goes through the shared mapper.
+- `alerts.watched_item_id` assumes a watched_item. A rung firing is an alert
+  against a PLAN, so alerts needs to reference either, or the rung fire needs
+  its own record. Decide before building; do not bolt it on.
 
-### Considered and NOT chosen (recorded so it is not re-litigated)
+### This supersedes the earlier `trade_exits` sketch
 
-A larger redesign was discussed and set aside as the immediate step:
+An earlier version of this entry keyed rungs on `transaction_id` directly. That
+was closer to Joe's phrasing but wrong for the reason above: it cannot express
+one thesis spanning two lots. The rung shape survived the change unaltered --
+only its owner moved.
 
-- **A first-class `plans` table**, splitting the four jobs `watched_items`
-  currently does (watchlist membership, journal idea, trade plan, and
-  "just tracking" via the `order_type = 'WATCH'` null-object). Still
-  attractive; it would retire that enum hack and let one plan own both legs of
-  a promoted paper trade. Deferred as too large for the next step.
+### Still considered and NOT chosen
+
+- **The full `plans` redesign** absorbing all four jobs `watched_items`
+  currently does (watchlist membership, journal idea, trade plan, and "just
+  tracking" via the `order_type = 'WATCH'` null-object). The minimal `plans`
+  table above is deliberately NOT that -- it owns exits and groups lots, nothing
+  more. It is, however, the natural seed for the larger version later.
 - **A `signals` table** recording what a source said and when, independent of
-  whether it was acted on. This would make Joe's Telegram example measurable
-  (*"the sell signal goes out for $10.75 and I miss it"* -- there is currently
-  nowhere to record that they said it), and it doubles as the fix for the
-  selection-bias constraint, since a signal with no plan is exactly "they
-  called it, I passed". **Open question, unanswered:** whether Joe routinely
-  receives and would log such signals, or whether that example was
-  aspirational. Do not build this table until that is answered -- an unfilled
-  table is worse than no table.
+  whether it was acted on. Would make Joe's Telegram example measurable (*"the
+  sell signal goes out for $10.75 and I miss it"* -- there is nowhere to record
+  that they said it), and doubles as the selection-bias fix, since a signal with
+  no plan is exactly "they called it, I passed". **Open question, unanswered:**
+  whether Joe routinely receives and would log such signals. Do not build until
+  answered -- an unfilled table is worse than no table.
 
 ## Vocabulary and the trade/plan/source model (Joe, 2026-08-21)
 
