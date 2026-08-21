@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 495;
+const MIN_EXPECTED_CHECKS = 503;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -3382,6 +3382,57 @@ console.log("\n22. The sell form's lot picker agrees with the server's guard");
   check("A plan with no source falls back to its strategy", renderLotOptions(noSource).includes("Volume breakout"));
   const bare = [oneThesis[0], { lot_id: 6, transaction_date: "2026-06-10", quantity_remaining: 10, cost_per_share: 15, plan_id: 12 }];
   check("A plan with neither still identifies itself", renderLotOptions(bare).includes("plan 12"));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n23. Dividend reinvestment buys shares");
+// REINVESTMENT was not classified at all, so it fell through to
+// skipped.unknownAction. The failure was one-sided and therefore quiet: the
+// matching DIVIDEND RECEIVED row imported fine, so the income appeared while
+// the shares it bought never did. A holding on a reinvestment plan drifts
+// steadily below its real share count, and everything derived from it --
+// market value, cost basis, realized P&L on later sales -- understates by a
+// margin that grows with every distribution.
+{
+  const H = "Run Date,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Settlement Date";
+  // Note the column order: Fidelity puts Price BEFORE Quantity. Read the other
+  // way round, 8.23 shares at $29.03 becomes 29.03 shares at $8.23 -- the same
+  // $238.94, so the amount cross-check cannot catch it.
+  const dripCsv = [
+    H,
+    "08/08/2025,DIVIDEND RECEIVED FIDELITY MEGA CAP STOCK FUND (FGRTX) (Cash),FGRTX,FIDELITY MEGA CAP STOCK FUND,Cash,,0,,,,238.94,",
+    "08/08/2025,REINVESTMENT FIDELITY MEGA CAP STOCK FUND (FGRTX) (Cash),FGRTX,FIDELITY MEGA CAP STOCK FUND,Cash,29.03,8.23,,,,\"-238.94\",",
+  ].join("\n");
+  const drip = fidelityParser.parse(dripCsv);
+
+  check("A reinvestment is no longer an unknown action", drip.skipped.unknownAction === 0);
+  const buys = drip.rows.filter((r) => r.transactionType === "BUY");
+  check("It is classified as a purchase", buys.length === 1);
+  check("...with the shares it actually bought", Math.abs(buys[0].quantity - 8.23) < 1e-9);
+  check("...at the price paid, not the amount", Math.abs(buys[0].price - 29.03) < 1e-9);
+  // Relative, not absolute: Fidelity rounds the share count to three decimals,
+  // so 8.23 x 29.03 is $238.917 against a stated $238.94. The gap is rounding,
+  // and a tolerance tight enough to reject it would reject every real row.
+  check(
+    "...and quantity x price reconciles to the cash amount",
+    Math.abs(buys[0].quantity * buys[0].price - 238.94) / 238.94 < 0.001,
+  );
+  check(
+    "The income half is still recorded separately",
+    drip.rows.filter((r) => r.transactionType === "DIVIDEND").length === 1,
+  );
+
+  // The reason this is safe: core sweeps are filtered before classification.
+  // Every cash movement generates a REINVESTMENT row against them, and
+  // treating those as purchases would invent a position in a cash fund.
+  const sweepCsv = [
+    H,
+    "07/31/2026,REINVESTMENT FIDELITY GOVERNMENT CASH RESERVES (FDRXX) (Cash),FDRXX,FIDELITY GOVERNMENT CASH RESERVES,Cash,1,16.06,,,,\"-16.06\",",
+    "07/31/2026,REINVESTMENT FIDELITY GOVERNMENT MONEY MARKET (SPAXX) (Cash),SPAXX,FIDELITY GOVERNMENT MONEY MARKET,Cash,1,20.00,,,,\"-20.00\",",
+  ].join("\n");
+  const sweep = fidelityParser.parse(sweepCsv);
+  check("Reinvestment into a core cash sweep is still skipped", sweep.rows.length === 0);
+  check("...and counted as cash, not as an unknown action", sweep.skipped.cash === 2);
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

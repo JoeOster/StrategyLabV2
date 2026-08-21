@@ -77,6 +77,22 @@ export function parse(text) {
     if (A.startsWith("YOU BOUGHT")) type = "BUY";
     else if (A.startsWith("YOU SOLD")) type = "SELL";
     else if (A.startsWith("DIVIDEND RECEIVED")) type = "DIVIDEND";
+    // A reinvested distribution IS a purchase -- it has a share count, a price
+    // and a cash amount, and it opens a lot exactly as a manual buy would.
+    //
+    // This was previously unclassified, so it fell through to
+    // skipped.unknownAction. The effect was quiet and one-sided: the matching
+    // DIVIDEND RECEIVED row was imported, so the income appeared, while the
+    // shares it bought never did. A holding on a reinvestment plan therefore
+    // drifted steadily below its real share count, and every figure derived
+    // from it -- market value, cost basis, realized P&L on later sales --
+    // was understated by a margin that grew with each distribution.
+    //
+    // The core money-market sweeps are already skipped above, which is what
+    // makes this safe: those generate a REINVESTMENT row for every cash
+    // movement, and treating THOSE as purchases would invent a position in a
+    // cash fund. Everything reaching this line is a real security.
+    else if (A.startsWith("REINVESTMENT")) type = "BUY";
     // Fund capital-gain distributions and bond interest: income against a
     // holding, no share movement. Same shape as a dividend.
     else if (A.startsWith("LONG-TERM CAP GAIN") || A.startsWith("SHORT-TERM CAP GAIN") || A.startsWith("INTEREST")) {

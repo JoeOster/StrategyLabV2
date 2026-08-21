@@ -45,6 +45,38 @@ overlapping, now fixed) -- a per-alert notification cooldown was never built.
 **Fix:** either wire all three up, or take them out of the UI. A control that
 silently does nothing is worse than one that is not there.
 
+### 17. Dividend reinvestment bought no shares -- FIXED (2026-08-21)
+
+**File:** `services/importers/fidelity.js`
+
+`REINVESTMENT` was not in the action classification at all, so it fell through
+to `skipped.unknownAction`. The matching `DIVIDEND RECEIVED` row imported
+normally.
+
+That one-sidedness is what made it quiet. The income appeared, so the account
+looked like it was receiving its distributions; only the shares those
+distributions bought were missing. A holding on a reinvestment plan therefore
+drifts below its true share count by a little more every quarter, and market
+value, cost basis and the realized P&L of any later sale all understate by a
+margin that grows over time. Nothing throws, and every number on screen looks
+reasonable.
+
+Three real rows were affected across the two IRA exports -- FGRTX, FTRNX and
+FCNTX. All three funds have since been transferred out and currently sit at
+zero, so no open position is wrong today. Joe confirmed reinvestment is
+something he does, so this would have recurred.
+
+**Fixed:** `REINVESTMENT` classifies as `BUY`. Safe because the core
+money-market sweeps (`SPAXX`, `FDRXX`, `FZFXX`, `FCASH`) are filtered out
+before classification -- they generate a reinvestment row for every cash
+movement, and treating those as purchases would invent a position in a cash
+fund. Eight checks in section 23, including that sweep rows stay skipped.
+
+**Note for the next import.** The three historical rows are still absent from
+the ledger; the fix only affects imports run from now on. Re-importing
+`IRA_b.csv` would add them, which is a change to closed historical positions
+and should be reviewed in the import preview rather than applied blind.
+
 ### 14. `securities.asset_type` is never set
 
 **File:** `services/priceService.js` (`insertSecurity`), `schema.sql:46`
