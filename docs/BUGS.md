@@ -77,7 +77,7 @@ the ledger; the fix only affects imports run from now on. Re-importing
 `IRA_b.csv` would add them, which is a change to closed historical positions
 and should be reviewed in the import preview rather than applied blind.
 
-### 14. `securities.asset_type` is never set
+### 14. `securities.asset_type` is never set -- FIXED (2026-08-21)
 
 **File:** `services/priceService.js` (`insertSecurity`), `schema.sql:46`
 
@@ -97,6 +97,29 @@ in `V2_BACKLOG.md` certainly will.
 
 **Fix:** have `getOrCreateSecurity` set it from the Yahoo profile's quote type,
 and let the importers pass what they already worked out.
+
+**Fixed.** Yahoo returns `quoteType` in the `price` module and the provider
+was discarding it -- the data was there the whole time. `getProfile` now
+returns it raw, `mapAssetType` translates it into this schema's vocabulary, and
+`getOrCreateSecurity` writes it. An explicit `opts.assetType` wins over the
+lookup, for a caller who worked it out from the statement.
+
+Unrecognised types default to `stock` rather than null, because that is the
+column's own NOT NULL default -- so an unmapped security is indistinguishable
+from one written before this existed, which is the honest position. `INDEX`,
+`CURRENCY` and `FUTURE` are deliberately left to fall through rather than being
+forced into the nearest slot: a futures contract recorded as a stock is a worse
+answer than the default.
+
+`npm run db:backfill-asset-types` fills in existing rows, and takes `--dry-run`.
+On the live database it reclassified **14 of 117**: nine mutual funds (not the
+six this entry originally claimed) and five ETFs, one of them SPY -- the
+benchmark every source is now measured against. Everything currently held is a
+stock, which matches Joe's own description of how he trades.
+
+The script is idempotent and fails safe. Re-running it immediately hit the
+app's own 300-calls-per-60s usage budget; it reported those as "could not be
+looked up" and left their stored values alone rather than clobbering them.
 
 ### 15. `dividends.pay_date` cannot be filled -- FIXED (2026-08-21, schema v20)
 

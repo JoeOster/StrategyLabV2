@@ -13,7 +13,8 @@
     "db:stamp": "node scripts/stamp-schema-version.js",
     "db:migrate": "node scripts/migrate.js",
     "smoke:watchlist": "node scripts/smoke-test-watchlist.js",
-    "test:offline": "node scripts/test-offline.js"
+    "test:offline": "node scripts/test-offline.js",
+    "db:backfill-asset-types": "node scripts/backfill-asset-types.js"
   },
   "license": "ISC",
   "dependencies": {

@@ -85,6 +85,12 @@ export async function getProfile(symbol) {
     return {
       name: price.longName ?? price.shortName ?? null,
       currency: price.currency ?? null,
+      // Yahoo has always returned this in the `price` module and it was simply
+      // dropped on the floor, which is why every security in the database is
+      // recorded as a stock -- including six Fidelity mutual funds. Raw here;
+      // the mapping to our own vocabulary belongs in priceService, not in a
+      // provider whose job is to report what the upstream said.
+      quoteType: price.quoteType ?? null,
       exchange: price.fullExchangeName ?? price.exchangeName ?? null,
       sector: profile.sector ?? null,
       industry: profile.industry ?? null,

@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 664;
+const MIN_EXPECTED_CHECKS = 676;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4238,6 +4238,59 @@ console.log("\n35. Cash movements are importable");
   check("The same movement cannot be imported twice", dup);
   check("...and the balance is unchanged by the attempt",
     Math.abs(cashSvc.cashBalance(acct.id).balance - (start + 495)) < 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n36. Securities know what kind of thing they are");
+// asset_type enumerated seven types from the first schema and nothing ever
+// wrote it, so every row said 'stock' -- including nine Fidelity mutual funds
+// and five ETFs, one of which is SPY, the benchmark everything is measured
+// against.
+//
+// Latent while nothing filtered on it. It stops being latent the moment
+// anything treats a fund differently from a stock, which the backtester will:
+// a mutual fund has no intraday price and cannot be shorted.
+{
+  const { mapAssetType } = await import("../services/priceService.js");
+
+  check("Equities are stocks", mapAssetType("EQUITY") === "stock");
+  check("Funds are not stocks", mapAssetType("MUTUALFUND") === "mutual_fund");
+  check("ETFs are their own thing", mapAssetType("ETF") === "etf");
+  check("Money-market sweeps are cash", mapAssetType("MONEYMARKET") === "cash");
+  check("Crypto is crypto", mapAssetType("CRYPTOCURRENCY") === "crypto");
+  check("Options are options", mapAssetType("OPTION") === "option");
+  check("Yahoo's casing is not trusted", mapAssetType("mutualfund") === "mutual_fund");
+
+  // Things the app cannot hold fall through to the default rather than being
+  // forced into the nearest slot -- a futures contract recorded as a stock is
+  // a worse answer than the honest default.
+  check("An index is not forced into a slot", mapAssetType("INDEX") === "stock");
+  check("Nothing at all still yields a valid value", mapAssetType(null) === "stock");
+  check("...and so does an unknown label", mapAssetType("SOMETHING_NEW") === "stock");
+
+  // Every mapped value has to satisfy the CHECK constraint, or an import dies
+  // on a ticker nobody anticipated.
+  const allowed = new Set(["stock", "etf", "crypto", "mutual_fund", "bond", "option", "cash"]);
+  const mapped = ["EQUITY", "ETF", "MUTUALFUND", "MONEYMARKET", "CRYPTOCURRENCY", "OPTION", "INDEX", "CURRENCY", "FUTURE", null, ""]
+    .map(mapAssetType);
+  check("Every mapping satisfies the schema's CHECK", mapped.every((v) => allowed.has(v)));
+
+  // And the column actually accepts them.
+  const exId = db.prepare("SELECT id FROM exchanges LIMIT 1").get().id;
+  let inserted = 0;
+  for (const t of allowed) {
+    db.prepare("INSERT INTO securities (symbol, exchange_id, name, asset_type, data_source) VALUES (?, ?, ?, ?, 'manual')")
+      .run("AT_" + t.toUpperCase(), exId, "Asset type probe", t);
+    inserted++;
+  }
+  check("The schema accepts every enumerated type", inserted === allowed.size);
+
+  let rejected = false;
+  try {
+    db.prepare("INSERT INTO securities (symbol, exchange_id, name, asset_type, data_source) VALUES ('AT_BAD', ?, 'bad', 'commodity', 'manual')")
+      .run(exId);
+  } catch { rejected = true; }
+  check("...and rejects one that is not", rejected);
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

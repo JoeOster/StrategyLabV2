@@ -24,10 +24,46 @@ const getSecurityAnySymbol = db.prepare(
   "SELECT * FROM securities WHERE symbol = ? ORDER BY id LIMIT 1",
 );
 const insertSecurity = db.prepare(`
-  INSERT INTO securities (symbol, exchange_id, name, currency, sector, industry, logo_url, description, data_source, profile_updated_at)
-  VALUES (@symbol, @exchangeId, @name, @currency, @sector, @industry, @logoUrl, @description, @dataSource, datetime('now'))
+  INSERT INTO securities (symbol, exchange_id, name, currency, sector, industry, logo_url, description, data_source, asset_type, profile_updated_at)
+  VALUES (@symbol, @exchangeId, @name, @currency, @sector, @industry, @logoUrl, @description, @dataSource, @assetType, datetime('now'))
   RETURNING *
 `);
+
+// Yahoo's vocabulary to ours. The column has enumerated seven types since the
+// first schema and nothing ever wrote it, so everything defaulted to 'stock'
+// -- including the six Fidelity mutual funds that dominate the IRA import.
+//
+// Impact was latent while nothing filtered on it. It stops being latent the
+// moment anything needs to treat a fund differently from a stock, which the
+// backtester in V2_BACKLOG certainly will: a mutual fund has no intraday
+// price, cannot be shorted, and settles differently.
+const ASSET_TYPE_BY_QUOTE_TYPE = {
+  EQUITY: "stock",
+  ETF: "etf",
+  MUTUALFUND: "mutual_fund",
+  MONEYMARKET: "cash",
+  CRYPTOCURRENCY: "crypto",
+  OPTION: "option",
+  // INDEX, CURRENCY and FUTURE have no home in the enum and are not things
+  // this app can hold. Left to fall through rather than forced into the
+  // nearest slot, because a futures contract recorded as a stock is a worse
+  // answer than the honest default.
+};
+
+/**
+ * @param {string|null} quoteType Yahoo's own label
+ * @returns {string} one of the enum values; 'stock' when unknown
+ *
+ * Defaults to 'stock' rather than null because the column is NOT NULL with
+ * exactly that default -- so an unrecognised type is indistinguishable from
+ * every row written before this existed, which is the honest position. It is
+ * not a claim that the thing IS a stock, and nothing should read it as one
+ * without checking `profile_updated_at`.
+ */
+export function mapAssetType(quoteType) {
+  if (!quoteType) return "stock";
+  return ASSET_TYPE_BY_QUOTE_TYPE[String(quoteType).toUpperCase()] ?? "stock";
+}
 
 function resolveExchangeId(exchangeCode) {
   if (!exchangeCode) return null;
@@ -120,6 +156,11 @@ async function createSecurity(upperSymbol, opts) {
       logoUrl: profile.logoUrl,
       description: profile.description,
       dataSource: "yahoo",
+      // An explicit hint wins over Yahoo's answer: the Fidelity parser already
+      // identifies money-market sweeps and CUSIP-shaped bonds in order to skip
+      // them, and a caller who has worked it out from the statement knows more
+      // than a lookup does.
+      assetType: opts.assetType ?? mapAssetType(profile.quoteType),
     });
   } catch (err) {
     // The in-memory guard above only covers this process, and scripts run
