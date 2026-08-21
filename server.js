@@ -41,6 +41,7 @@ const alertScheduler = await import("./services/alertScheduler.js");
 const summary = await import("./services/summaryService.js");
 const journal = await import("./services/journalService.js");
 const bookLookup = await import("./services/bookLookupService.js");
+const accounts = await import("./services/accountsService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -331,6 +332,39 @@ app.post("/api/sources/:id/delete", (req, res) => {
 // Auto-fill helper for the book source dialog: enter an ISBN, get back a
 // title/author to pre-populate. Purely a convenience -- the form works fine
 // without it, so a miss or a lookup failure is a 404, not a 500.
+// --- Accounts ----------------------------------------------------------------
+// The accounts table shipped in schema v1 but nothing ever wrote to it, which
+// blocked CSV import outright (import_batches.account_id is NOT NULL).
+//
+// The listing carries two dates that are routinely far apart and answer
+// different questions: last_transaction_date (how current the data is) and
+// last_imported_at (when an import last ran). See docs/IMPORTS.md -- the first
+// is what tells you what span to download next, and should be presented as a
+// point to start *before*, since overlapping exports deduplicate safely and a
+// gap silently loses transactions.
+app.get("/api/accounts", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  res.json(accounts.listAccounts(holder.id));
+});
+
+app.post("/api/accounts", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.status(201).json(accounts.createAccount(holder.id, req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put("/api/accounts/:id", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(accounts.updateAccount(holder.id, Number(req.params.id), req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get("/api/book-lookup", async (req, res) => {
   try {
     const result = await bookLookup.lookupBook(req.query.isbn || "");

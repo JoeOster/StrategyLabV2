@@ -144,7 +144,14 @@ CREATE TABLE account_holders (
 CREATE TABLE accounts (
   id            INTEGER PRIMARY KEY,
   holder_id     INTEGER NOT NULL REFERENCES account_holders(id) ON DELETE CASCADE,
-  broker        TEXT NOT NULL CHECK (broker IN ('fidelity','etrade','robinhood','other')),
+  -- Add a broker here BEFORE opening an account with them. This CHECK fails
+  -- at insert time, not at startup, so a missing broker looks like "creating
+  -- accounts is broken" rather than "the schema is stale" -- the same trap that
+  -- made ISBN lookup appear broken for weeks (see lib/schemaVersion.js v8).
+  -- schwab and tradestation are listed ahead of use: both accounts exist but
+  -- are unfunded and unused as of 2026-08-21. A CSV parser for each is still
+  -- future work; 'other' is the fallback until then.
+  broker        TEXT NOT NULL CHECK (broker IN ('fidelity','etrade','robinhood','schwab','tradestation','other')),
   account_type  TEXT,                     -- 'brokerage', 'roth_ira', 'ira', etc.
   nickname      TEXT,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
