@@ -110,7 +110,13 @@ basis and the void filter all apply. Routes are `POST /api/imports` (stage),
 `GET /api/imports/:id` (preview), `POST /api/imports/:id/approve`, and
 `GET /api/imports/latest`. Only rows classified `new` are ever written.
 
-**The single next piece of work** is exit parameters on a trade -- a "Set
+**Exit plans are BUILT** (branch ' + BT + 'plan-exits' + BT + ', schema v14, running on port 3114
+alongside main on 3113 for comparison). A trade can carry a ladder of exit
+rungs owned by the thesis that opened it; a rung reaching its band raises an
+alert and never sells. See ' + BT + 'docs/IMPROVEMENTS.md' + BT + ' for a full ranked list of what
+is still wrong or missing, and where AI assistance genuinely fits.
+
+The previous next-piece-of-work entry, kept for its reasoning: exit parameters on a trade -- a "Set
 Exits" button opening a ladder of exit rungs owned by a minimal `plans`
 table (exits belong to a THESIS, not to a lot or a position -- see the entry for
 why both obvious answers are wrong here), decided with Joe
