@@ -183,9 +183,26 @@ export function stageImport({ accountId, files }) {
   const rows = disambiguateRefs(parsed.flatMap((p) => p.rows));
   const skipped = parsed.flatMap((p) => p.skipped ?? []);
 
-  const { accepted, dropped, summary } = reconcile(rows, {
+  const { accepted, dropped: allDropped, summary } = reconcile(rows, {
     openingPositions: openPositionsBySymbol(accountId),
   });
+
+  // reconcile() runs BEFORE the duplicate check, so a sale already sitting in
+  // the ledger is dropped for having no matching buy -- the buy having been
+  // consumed by that very sale on a previous import. Reported as-is, the
+  // preview says "5 dropped, no matching buy" about five rows that are present
+  // and correct, which reads as missing data and sends the reader hunting an
+  // export that would change nothing.
+  //
+  // Split here rather than inside reconcile: reconcile is a pure function over
+  // one file's rows and giving it database access to answer this would be the
+  // wrong trade.
+  const dropped = [];
+  const droppedAlreadyImported = [];
+  for (const d of allDropped) {
+    if (refAlreadyUsed.get(accountId, d.externalRef)) droppedAlreadyImported.push(d);
+    else dropped.push(d);
+  }
 
   // Cash movements bypass reconcile entirely: there are no shares to match, so
   // none of its FIFO reasoning applies. They are classified only against the
@@ -249,6 +266,9 @@ export function stageImport({ accountId, files }) {
         quantity: d.quantity,
         reason: d.dropReason,
       })),
+      // Unmatched only because they are already recorded. Counted rather than
+      // listed: it is reassurance, not something to act on.
+      droppedAlreadyImported: droppedAlreadyImported.length,
       skipped,
       // Cash is reported separately from trades throughout. They are different
       // kinds of thing with different failure modes, and a single "47 rows"

@@ -165,6 +165,11 @@ export function renderPreview(staged, discrepancies) {
       <strong>${c.matched + c.duplicate}</strong> already agree ·
       <strong>${dropped.length}</strong> dropped
       ${dropped.length ? `(${escapeHtml([...new Set(dropped.map((d) => d.symbol))].join(", "))} — no matching buy in the export window)` : ""}
+      ${
+        staged.droppedAlreadyImported
+          ? `<br /><span class="muted-cell">${staged.droppedAlreadyImported} more were unmatched only because they are already recorded — nothing to do.</span>`
+          : ""
+      }
     </p>
 
     <p class="panel-hint">Implied positions after import: ${

@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 727;
+const MIN_EXPECTED_CHECKS = 732;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4501,6 +4501,61 @@ console.log("\n39. A staged import can be found again");
   check("...and a way to throw it away", /discard-batch-btn/.test(html));
   check("...saying nothing has been written yet", /nothing from it is in your ledger yet/.test(html));
   check("...and what it would add", html.includes("3 to add"));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n40. Rows dropped only because they are already recorded");
+// reconcile() runs before the duplicate check, so a sale already sitting in the
+// ledger is dropped for having no matching buy -- the buy having been consumed
+// by that very sale on an earlier import. Reported plainly, the preview says
+// "5 dropped, no matching buy" about five rows that are present and correct.
+//
+// That reads as missing data and sends the reader off to fetch an export that
+// would change nothing. Being wrong in the alarming direction is still being
+// wrong.
+{
+  const imports = await import("../services/importService.js");
+  const acct = acctSvcEarly.createAccount(holder.id, { broker: "robinhood", accountNumber: "DROP1" });
+
+  const H = '"Activity Date","Process Date","Settle Date","Instrument","Description","Trans Code","Quantity","Price","Amount"';
+  const file = [
+    H,
+    '"10/02/2025","10/02/2025","10/03/2025","ZZZ","Test Co","Sell","10","$5.00","$50.00"',
+  ].join("\n");
+
+  // First pass: nothing in the ledger, no buy in the file -- a real orphan.
+  const first = imports.stageImport({
+    accountId: acct.id,
+    files: [{ filename: "orphan.csv", text: file }],
+  });
+  check("A sale with no buy anywhere is genuinely dropped", first.dropped.length === 1);
+  check("...and not excused as already recorded", first.droppedAlreadyImported === 0);
+  check("...with a reason naming both places looked", /this file/.test(first.dropped[0].reason) && /ledger/.test(first.dropped[0].reason));
+  imports.discardBatch(first.batch.id);
+
+  // Now record the sale by hand, as an earlier import would have, then re-stage
+  // the same file. The row is still unmatched -- and now for a harmless reason.
+  const sec = db.prepare("SELECT id FROM securities WHERE symbol = 'ZZZ'").get()
+    ?? db.prepare("INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('ZZZ', ?, 'Test Co', 'manual') RETURNING *")
+      .get(db.prepare("SELECT id FROM exchanges LIMIT 1").get().id);
+  // The ref has to be the one the PARSER produces -- the preview's dropped
+  // rows deliberately carry only display fields, so it is derived from the
+  // same source the importer uses rather than guessed at.
+  const rhParser = await import("../services/importers/robinhood.js");
+  const parsedRef = rhParser.parse(file).rows[0].externalRef;
+  db.prepare(`INSERT INTO transactions
+      (holder_id, account_id, security_id, is_paper_trade, transaction_type, transaction_date,
+       quantity, price, fees, cost_basis, external_ref)
+      VALUES (?, ?, ?, 0, 'SELL', '2025-10-02', 10, 5, 0, 40, ?)`)
+    .run(holder.id, acct.id, sec.id, parsedRef);
+
+  const second = imports.stageImport({
+    accountId: acct.id,
+    files: [{ filename: "orphan.csv", text: file }],
+  });
+  check("Re-staging the same file reports nothing alarming", second.dropped.length === 0);
+  check("...and counts it as already recorded instead", second.droppedAlreadyImported === 1);
+  imports.discardBatch(second.batch.id);
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -107,7 +107,7 @@ database is the one that must survive.
 | Fidelity 146518557 (IRA) | $23,646.37 | $23,677.51 | live price drift |
 | Fidelity 266356256 (IRA, wife) | $15,327.69 | $15,352.65 | live price drift |
 | E*TRADE 7178 | $319.99 | $320.89 | live price drift |
-| Robinhood | $1,636.81 | $1,638.91 | live price drift |
+| Robinhood | $1,636.83 | $1,638.91 | live price drift |
 | Schwab (thinkorswim) | $100.00 | $100.00 | funded, no positions, no parser |
 | TradeStation | $100.00 | $100.00 | funded, no positions, no parser |
 
@@ -133,31 +133,45 @@ clear that it was caught only because the preview was actually read this time.
 The earlier Robinhood import was driven through curl and its `dropped` list
 went unexamined.
 
-Two older exports followed on 2026-08-21, covering 2025-01-27 to 2025-10-21.
-They added 47 rows and pulled 2026 realized to -$1,277.80 against the app's YTD
--$1,272.24, within $5.56, while recovering +$1,092.98 of 2025 realized that the
-ledger had never seen.
+Robinhood is fully reconciled as of 2026-08-21. Four exports were needed
+because Robinhood only hands back a window at a time, and each one exposed
+something the previous had hidden:
 
-**They also opened a window that is still missing: 2025-10-22 to 2025-11-13.**
-The files end 10-21 and the original export begins 11-14. Three positions
-bought in that last week -- TEM 14, HIVE 80, PLUG 5 -- were sold inside the gap,
-so the ledger shows them as still held. They are not phantom in the sense of
-being wrong data; the buys are real. The sells are simply absent, and until
-that window is imported the account shows 19 positions where Robinhood shows
-16, and `accountTotal` is correctly null because those lots have no quote.
+- the 60-day file closed a five-week gap and turned up the reconcile bug, where
+  a sale was dropped for having no covering buy in the file while the lot sat
+  in the ledger;
+- two older files backfilled 2025-01 to 2025-10 and, by ending three weeks
+  short of the original export, left TEM, HIVE and PLUG reading as still held;
+- the final file covered 2025-10 to 2025-12 and closed that window.
 
-Voiding those three buys would be the wrong fix: it would erase real purchases
-and the realized P&L of the sales that closed them. The right fix is the
-missing export.
+**The three-week hole was worth more than it looked.** It held the sells that
+clear those three positions AND the missing IONQ purchase -- 27 shares at
+$59.33 on 2025-10-29, whose two sales had been unmatched since the very first
+import. That round trip is now whole: -$9.36 and -$349.00 realized. Nothing in
+this account is orphaned any more.
 
-The two IONQ sales still cannot be recovered. Their buys predate any window
-Robinhood will export, so those 27 shares have no cost basis and their realized
-P&L is permanently unknown. `reconcile()` drops them rather than inventing one.
+Worth recording what the phantom positions did while the gap was open. For
+several hours the account showed `accountTotal` as an em dash, because those
+lots had no quote -- honestly unknown. Then the 22:00 price refresh fetched
+quotes for them, and the total became $2,908.24 against a real $1,638.91: a
+confident, plausible, wrong number. The null-discipline had been protecting the
+figure right up until the data arrived to make it lie. That is the limit of
+that technique and it is worth remembering: unknown-shaped data eventually gets
+filled in.
 
-Non-trade cash rows being unstaged costs nothing today, because every one of
-them predates the 2026-08-21 baseline and so cannot move the balance. It will
-start to matter the moment an import covers a period after the baseline. See
-`docs/V2_BACKLOG.md`.
+| account | Strategy Lab | statement | diff |
+| --- | --- | --- | --- |
+| Fidelity 146518557 | $23,645.37 | $23,677.51 | -$32.14 |
+| Fidelity 266356256 | $15,327.39 | $15,352.65 | -$25.26 |
+| E*TRADE 7178 | $320.19 | $320.89 | -$0.70 |
+| Robinhood | $1,636.83 | $1,638.91 | -$2.08 |
+| Schwab | $100.00 | $100.00 | $0.00 |
+| TradeStation | $100.00 | $100.00 | $0.00 |
+| **ALL** | **$41,129.78** | **$41,189.96** | **-$60.18** |
+
+Robinhood realized for 2026 is -$1,277.80 against the app's YTD -$1,272.24, a
+$5.56 difference between all-time-to-date and year-to-date rather than missing
+data. 2025 comes out at +$752.24, which the ledger had never seen at all.
 
 Schwab and TradeStation hold $100 each and nothing else. Both have
 `has_parser = 0`, so until a parser exists every trade in them has to be
