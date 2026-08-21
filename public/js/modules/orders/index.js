@@ -34,6 +34,12 @@ const state = {
   positionsSort: { key: "symbol", dir: "asc" },
   historySort: { key: "transaction_date", dir: "desc" },
   positionsFilter: "",
+  // security_ids whose individual lots are showing. A Set so it survives
+  // re-renders -- the table redraws on every price refresh and filter change.
+  expandedGroups: new Set(),
+  // null means every account. Explicit rather than undefined so the filter has
+  // one source of truth from the first render.
+  accountId: null,
   sources: [],
   strategies: [],
   // Non-null when the order dialog is editing an existing transaction rather
@@ -173,6 +179,19 @@ export async function initializeOrdersModule() {
  * answer to two of the three -- and actively unhelpful when 133 rows are
  * sitting in a pending batch.
  */
+/**
+ * Which tickers are showing their individual lots.
+ *
+ * Held in module state rather than the DOM so a price refresh or a filter
+ * change does not collapse everything the user opened -- the table re-renders
+ * constantly and losing your place each time would make the feature useless.
+ */
+function toggleGroup(securityId) {
+  if (state.expandedGroups.has(securityId)) state.expandedGroups.delete(securityId);
+  else state.expandedGroups.add(securityId);
+  renderPositions();
+}
+
 function emptyPositionsMessage() {
   if (state.accountId == null) {
     return 'No open positions. Use "+ Log Order" to record a purchase, or import a statement.';
@@ -202,13 +221,17 @@ async function populateAccountFilter() {
   const accounts = await api.fetchAccountsForFilter();
   // Kept so the empty state can explain ITSELF rather than guessing.
   state.accounts = accounts;
-  const current = els.positionsAccount.value;
   els.positionsAccount.innerHTML =
     '<option value="">All accounts</option>' +
     accounts
       .map((a) => `<option value="${a.id}">${a.label.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</option>`)
       .join("");
-  els.positionsAccount.value = current;
+  // Driven FROM state, never read back into it. Chrome restores <select>
+  // values across a reload without firing `change`, so reading the DOM as the
+  // source of truth let the dropdown show one account while the table showed
+  // another -- the control and the data silently disagreeing, which is worse
+  // than either being wrong on its own.
+  els.positionsAccount.value = state.accountId == null ? "" : String(state.accountId);
 }
 
 export async function reloadOrdersView() {
@@ -260,6 +283,7 @@ function renderPositions() {
   );
   els.positionsTbody.innerHTML = renderPositionsRows(visible, state.positionColumns, {
     emptyMessage: emptyPositionsMessage(),
+    expanded: state.expandedGroups,
   });
   // Totals the VISIBLE rows, so the footer agrees with the filter above it
   // rather than contradicting the rows it sits under.
@@ -328,6 +352,9 @@ function handleSort(event, sortStateKey, rerender) {
 }
 
 async function handlePositionsAction(event) {
+  const toggle = event.target.closest(".group-toggle");
+  if (toggle) return toggleGroup(Number(toggle.dataset.securityId));
+
   const exitsBtn = event.target.closest(".exits-btn");
   if (exitsBtn) {
     return openExitsDialog(Number(exitsBtn.dataset.id), exitsBtn.dataset.symbol, () => reloadOrdersView());

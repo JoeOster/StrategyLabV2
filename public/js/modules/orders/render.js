@@ -112,28 +112,148 @@ const ACTION_ICONS = {
   edit: "\u270E\uFE0E",
 };
 
+/**
+ * Collapses a ticker's lots into one row, expandable to the individual
+ * purchases -- the shape a broker statement uses, and for the same reason: at a
+ * glance you want the holding, and on demand you want how you got it.
+ *
+ * The per-lot model stays underneath untouched. Each lot keeps its own entry
+ * price, holding period and thesis, and every action still operates on a
+ * specific lot -- the group row is a summary, not a new kind of thing. That is
+ * why the actions live on the lot rows: selling, editing, and above all setting
+ * an exit ladder are per-lot decisions, and a plan belongs to one entry thesis.
+ * A group-level Exits button would quietly imply the lots share a plan.
+ *
+ * A single-lot ticker renders exactly as before, with no disclosure control --
+ * an expander that reveals one row identical to the one above it is noise.
+ */
 export function renderPositionsRows(positions, columns, opts = {}) {
-  const { showPromote = false, emptyMessage = 'No open positions. Use "+ Log Order" to record a purchase.' } = opts;
+  const {
+    showPromote = false,
+    emptyMessage = 'No open positions. Use "+ Log Order" to record a purchase.',
+    expanded = new Set(),
+  } = opts;
+
   if (positions.length === 0) {
     return `<tr><td colspan="${columns.length + 1}" class="empty-row">${escapeHtml(emptyMessage)}</td></tr>`;
   }
-  return positions
-    .map((p) => {
+
+  // Preserve the incoming order -- it is whatever the user sorted by.
+  const groups = [];
+  const byKey = new Map();
+  for (const p of positions) {
+    const key = p.security_id;
+    if (!byKey.has(key)) {
+      const g = { key, lots: [] };
+      byKey.set(key, g);
+      groups.push(g);
+    }
+    byKey.get(key).lots.push(p);
+  }
+
+  return groups
+    .map((g) => {
+      if (g.lots.length === 1) return lotRow(g.lots[0], columns, showPromote, { indented: false });
+
+      const isOpen = expanded.has(g.key);
+      const summary = summariseLots(g.lots);
       const cells = columns
-        .map((col) => (POSITION_CELL_RENDERERS[col.key] || (() => "<td>—</td>"))(p))
+        .map((col) => (GROUP_CELL_RENDERERS[col.key] || (() => "<td></td>"))(summary, isOpen))
         .join("");
-      return `
-        <tr>
+
+      const header = `
+        <tr class="group-row${isOpen ? " group-open" : ""}" data-security-id="${g.key}">
           ${cells}
-          <td class="actions-cell">
-            ${showPromote ? `<button type="button" class="icon-btn promote-txn-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Promote to a real purchase" aria-label="Promote ${escapeHtml(p.symbol)} to a real purchase">${ACTION_ICONS.promote}</button>` : ""}
-            <button type="button" class="icon-btn sell-lot-btn" data-symbol="${escapeHtml(p.symbol)}" data-lot-id="${p.lot_id}" data-qty="${p.quantity_remaining}" title="Sell from this lot" aria-label="Sell ${escapeHtml(p.symbol)}">${ACTION_ICONS.sell}</button>
-            <button type="button" class="icon-btn exits-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Exit plan: take-profit and stop rungs" aria-label="Exit plan for ${escapeHtml(p.symbol)}">${ACTION_ICONS.exits}</button>
-            <button type="button" class="icon-btn edit-txn-btn" data-id="${p.lot_id}" title="Correct this purchase" aria-label="Edit ${escapeHtml(p.symbol)} purchase">${ACTION_ICONS.edit}</button>
-          </td>
+          <td class="actions-cell"></td>
         </tr>`;
+
+      const children = isOpen
+        ? g.lots.map((lot) => lotRow(lot, columns, showPromote, { indented: true })).join("")
+        : "";
+
+      return header + children;
     })
     .join("");
+}
+
+/**
+ * A ticker's lots as one holding.
+ *
+ * Entry is the WEIGHTED average -- total cost over total shares -- not the mean
+ * of the entry prices, which would misreport any position built in unequal
+ * sizes. Unrealized is taken over priced lots only, so a partially-quoted
+ * holding does not compare two different sets of shares.
+ */
+function summariseLots(lots) {
+  const first = lots[0];
+  const shares = lots.reduce((s, l) => s + l.quantity_remaining, 0);
+  const cost = lots.reduce((s, l) => s + l.cost_basis, 0);
+  const priced = lots.filter((l) => l.market_value != null);
+  const value = priced.length ? priced.reduce((s, l) => s + l.market_value, 0) : null;
+  const pricedCost = priced.reduce((s, l) => s + l.cost_basis, 0);
+  const unrealized = value == null ? null : value - pricedCost;
+
+  return {
+    security_id: first.security_id,
+    symbol: first.symbol,
+    security_name: first.security_name,
+    exchange_code: first.exchange_code,
+    last_price: first.last_price,
+    lotCount: lots.length,
+    quantity_remaining: shares,
+    cost_per_share: shares > 0 ? cost / shares : null,
+    cost_basis: cost,
+    market_value: value,
+    unrealized_pnl: unrealized,
+    unrealized_pnl_percent: unrealized != null && pricedCost > 0 ? (unrealized / pricedCost) * 100 : null,
+    // Deliberately absent at group level: lots bought months apart have no
+    // single holding period, and averaging days held invents a number.
+    days_held: null,
+  };
+}
+
+const GROUP_CELL_RENDERERS = {
+  symbol: (g, isOpen) => `
+    <td>
+      <button type="button" class="group-toggle" data-security-id="${g.security_id}"
+              aria-expanded="${isOpen}"
+              title="${isOpen ? "Hide" : "Show"} the ${g.lotCount} purchases behind this holding">
+        <span class="group-caret">${isOpen ? "\u25BE" : "\u25B8"}</span><strong>${escapeHtml(g.symbol)}</strong>
+      </button>
+    </td>`,
+  security_name: (g) => `<td>${escapeHtml(g.security_name || "")}</td>`,
+  exchange_code: (g) => `<td>${escapeHtml(g.exchange_code || "—")}</td>`,
+  quantity_remaining: (g) => `<td>${formatQty(g.quantity_remaining)}</td>`,
+  cost_per_share: (g) => `<td title="Weighted average across ${g.lotCount} lots">${formatPrice(g.cost_per_share)}</td>`,
+  cost_basis: (g) => `<td>${money(g.cost_basis)}</td>`,
+  last_price: (g) => `<td class="price-cell">${formatPrice(g.last_price)}</td>`,
+  market_value: (g) => `<td>${money(g.market_value)}</td>`,
+  unrealized_pnl: (g) =>
+    `<td class="${g.unrealized_pnl == null ? "" : g.unrealized_pnl >= 0 ? "change-up" : "change-down"}">${signedMoney(g.unrealized_pnl)}</td>`,
+  unrealized_pnl_percent: (g) =>
+    `<td class="${g.unrealized_pnl_percent == null ? "" : g.unrealized_pnl_percent >= 0 ? "change-up" : "change-down"}">${
+      g.unrealized_pnl_percent == null
+        ? "—"
+        : `${g.unrealized_pnl_percent >= 0 ? "+" : ""}${g.unrealized_pnl_percent.toFixed(2)}%`
+    }</td>`,
+  days_held: (g) => `<td class="muted-cell">${g.lotCount} lots</td>`,
+};
+
+/** One purchase. Unchanged from before, except it can be shown as a child. */
+function lotRow(p, columns, showPromote, { indented }) {
+  const cells = columns
+    .map((col) => (POSITION_CELL_RENDERERS[col.key] || (() => "<td>—</td>"))(p))
+    .join("");
+  return `
+    <tr class="${indented ? "lot-row" : ""}">
+      ${cells}
+      <td class="actions-cell">
+        ${showPromote ? `<button type="button" class="icon-btn promote-txn-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Promote to a real purchase" aria-label="Promote ${escapeHtml(p.symbol)} to a real purchase">${ACTION_ICONS.promote}</button>` : ""}
+        <button type="button" class="icon-btn sell-lot-btn" data-symbol="${escapeHtml(p.symbol)}" data-lot-id="${p.lot_id}" data-qty="${p.quantity_remaining}" title="Sell from this lot" aria-label="Sell ${escapeHtml(p.symbol)}">${ACTION_ICONS.sell}</button>
+        <button type="button" class="icon-btn exits-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Exit plan: take-profit and stop rungs" aria-label="Exit plan for ${escapeHtml(p.symbol)}">${ACTION_ICONS.exits}</button>
+        <button type="button" class="icon-btn edit-txn-btn" data-id="${p.lot_id}" title="Correct this purchase" aria-label="Edit ${escapeHtml(p.symbol)} purchase">${ACTION_ICONS.edit}</button>
+      </td>
+    </tr>`;
 }
 
 /**

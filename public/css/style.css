@@ -806,3 +806,38 @@ dialog input, dialog select, dialog textarea {
   border-top: 2px solid var(--border);
   padding-top: 0.5rem;
 }
+
+/* Consolidated holding rows, and the individual lots behind them. */
+.group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.group-caret {
+  color: var(--muted);
+  font-size: 0.75rem;
+  width: 0.7rem;
+}
+
+/* Lots read as belonging to the row above: indented, quieter, and without the
+   heavy top border that separates one holding from the next. */
+.lot-row td {
+  background: #fafbfc;
+  color: var(--muted);
+  font-size: 0.92em;
+}
+.lot-row td:first-child {
+  padding-left: 2rem;
+}
+.lot-row td strong {
+  font-weight: 400;
+}
+.group-open td {
+  border-bottom: none;
+}
