@@ -109,6 +109,39 @@ export function cashBalance(accountId) {
   };
 }
 
+// What the account has paid out and taken in, grouped by the broker's own
+// label for the movement.
+//
+// This is the reader `source_code` was added for, and writing the column
+// without it would have been the exact failure this project keeps a sweep for:
+// a value stored, never consulted, and eventually trusted by nobody. "What
+// have I paid in subscription fees" is the question it exists to answer, and
+// it is a GROUP BY rather than a search through prose.
+const cashBySourceStmt = db.prepare(`
+  SELECT
+    COALESCE(source_code, 'MANUAL') AS source_code,
+    COUNT(*) AS movements,
+    -- Same single direction rule as cashBalance: kind decides sign, amount is
+    -- always positive. Two rules about direction eventually disagree.
+    SUM(CASE kind WHEN 'DEPOSIT' THEN amount WHEN 'OPENING_BALANCE' THEN amount ELSE -amount END) AS net,
+    MIN(transaction_date) AS first_date,
+    MAX(transaction_date) AS last_date
+  FROM cash_transactions
+  WHERE account_id = @accountId AND voided_at IS NULL
+  GROUP BY 1
+  ORDER BY ABS(SUM(CASE kind WHEN 'DEPOSIT' THEN amount WHEN 'OPENING_BALANCE' THEN amount ELSE -amount END)) DESC
+`);
+
+/**
+ * Cash movements grouped by the broker's own label.
+ *
+ * @returns {Array<{source_code: string, movements: number, net: number,
+ *                  first_date: string, last_date: string}>}
+ */
+export function cashBySource(accountId) {
+  return cashBySourceStmt.all({ accountId });
+}
+
 export function listCashTransactions(accountId) {
   return listCashStmt.all(accountId);
 }

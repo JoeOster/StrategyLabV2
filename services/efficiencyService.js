@@ -225,6 +225,19 @@ export function scoreEntry(row) {
       ? row.planned_price - row.actual_price
       : null;
 
+  // A BUY_LIMIT can name a BAND, not just a ceiling, and the gap above measures
+  // only against the ceiling -- so a fill at the floor scores as a large win
+  // when it was squarely within what the plan asked for. Reporting whether the
+  // fill landed inside the band keeps that distinction available instead of
+  // letting a wide band quietly inflate the entry figures.
+  //
+  // Null when no floor was set, which is most of them: a one-sided limit has no
+  // band to be inside or outside of, and false would be a claim.
+  const withinPlannedBand =
+    row.planned_floor == null || row.actual_price == null
+      ? null
+      : row.actual_price >= row.planned_floor && row.actual_price <= row.planned_price;
+
   return {
     kind: "ENTRY",
     transactionId: row.transaction_id,
@@ -237,6 +250,7 @@ export function scoreEntry(row) {
     isPaperTrade: !!row.is_paper_trade,
     plannedPrice: row.planned_price,
     plannedFloor: row.planned_floor ?? null,
+    withinPlannedBand,
     actualPrice: row.actual_price,
     actualDate: row.actual_date,
     quantity: row.actual_quantity,

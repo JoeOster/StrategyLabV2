@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 696;
+const MIN_EXPECTED_CHECKS = 710;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4364,6 +4364,65 @@ console.log("\n37. Fidelity and E*TRADE cash movements");
   const refs = disambiguateRefs(same).map((r) => r.externalRef);
   check("Identical same-day movements get distinct refs", new Set(refs).size === 3);
   check("...with the first left untouched", refs[0] === "2026-06-05|CASH|SLIP|0.01");
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n38. The new columns are actually read");
+// Written-but-never-read is a failure class this project keeps a sweep for,
+// and the cash work introduced two of them: source_code was stored on every
+// movement and consulted by nothing, and planned_floor was carried through the
+// efficiency scorer and never looked at. Both were justified when added --
+// "so fee totals are a GROUP BY", "so a band is not treated as a ceiling" --
+// and a justification with no reader behind it is how a column becomes data
+// nobody trusts.
+{
+  const cashSvc = await import("../services/cashService.js");
+  const acct = acctSvcEarly.createAccount(holder.id, { broker: "robinhood", accountNumber: "SRC1" });
+
+  cashSvc.recordCash({ accountId: acct.id, kind: "FEE", amount: 5, transactionDate: "2026-01-05", externalRef: "g1", sourceCode: "GOLD" });
+  cashSvc.recordCash({ accountId: acct.id, kind: "FEE", amount: 5, transactionDate: "2026-02-05", externalRef: "g2", sourceCode: "GOLD" });
+  cashSvc.recordCash({ accountId: acct.id, kind: "DEPOSIT", amount: 1000, transactionDate: "2026-01-02", externalRef: "a1", sourceCode: "ACH" });
+  cashSvc.recordCash({ accountId: acct.id, kind: "DEPOSIT", amount: 25, transactionDate: "2026-01-03", externalRef: "m1" });
+
+  const bySource = cashSvc.cashBySource(acct.id);
+  const byCode = Object.fromEntries(bySource.map((r) => [r.source_code, r]));
+
+  check("Movements group by the broker's own label", "GOLD" in byCode && "ACH" in byCode);
+  check("Repeated fees are counted", byCode.GOLD.movements === 2);
+  check("...and totalled as money OUT", Math.abs(byCode.GOLD.net - -10) < 1e-9);
+  check("Deposits total as money in", Math.abs(byCode.ACH.net - 1000) < 1e-9);
+  check("A hand-entered movement is labelled MANUAL, not left blank", "MANUAL" in byCode);
+  check("Each group carries its date range", byCode.GOLD.first_date === "2026-01-05" && byCode.GOLD.last_date === "2026-02-05");
+  check("The biggest mover sorts first", bySource[0].source_code === "ACH");
+  check(
+    "The grouping reconciles with the balance",
+    Math.abs(bySource.reduce((s, r) => s + r.net, 0) - cashSvc.cashBalance(acct.id).balance) < 1e-9,
+  );
+
+  // planned_floor: a band is not a ceiling.
+  const eff = await import("../services/efficiencyService.js");
+  const entry = (over) => eff.scoreEntry({
+    transaction_id: 1, actual_date: "2026-08-01", actual_quantity: 100, is_paper_trade: 0,
+    watched_item_id: 2, symbol: "XYZ", source_id: null, source_name: null,
+    strategy_id: null, strategy_title: null,
+    planned_price: 10, planned_floor: 9, actual_price: 9.5, ...over,
+  });
+
+  check("A fill inside the planned band says so", entry({}).withinPlannedBand === true);
+  check("...and one below the floor does not", entry({ actual_price: 8.5 }).withinPlannedBand === false);
+  check("...nor one above the ceiling", entry({ actual_price: 10.5 }).withinPlannedBand === false);
+  check(
+    "A one-sided limit has no band to be inside of",
+    entry({ planned_floor: null }).withinPlannedBand === null,
+  );
+  check(
+    "...which is not the same as being outside it",
+    entry({ planned_floor: null }).withinPlannedBand !== false,
+  );
+  check(
+    "The gap is still measured against the ceiling",
+    Math.abs(entry({}).gapPerShare - 0.5) < 1e-9,
+  );
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

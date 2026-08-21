@@ -498,6 +498,7 @@ app.get("/api/accounts/:id/cash", (req, res) => {
   res.json({
     ...cash.cashBalance(accountId),
     movements: cash.listCashTransactions(accountId),
+    bySource: cash.cashBySource(accountId),
   });
 });
 
