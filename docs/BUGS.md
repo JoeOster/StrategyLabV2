@@ -2,6 +2,10 @@
 
 ## Open (found via code review, 2026-08-09)
 
+**Seven of the nine were fixed on 2026-08-21** (#4, 5, 7, 8, 9, 11, 12) and are
+recorded below under "Fixed". The two left here are the ones that need a
+decision rather than a patch.
+
 Found by reading `server.js`, every `services/*.js` file, and the frontend
 under `public/js/` cold, cross-checked against `schema.sql`'s own
 constraints -- not from any known-issue list. Two related findings from the
@@ -11,38 +15,6 @@ same-day (see `applySplitToOpenLots`/`recordBuy` in
 `services/transactionsService.js`, verified by `6j`/`6k` in
 `scripts/test-offline.js`); the webhook one is recorded below as a
 deliberate deferral, not an open bug.
-
-### 4. `/api/scheduler/run-now` always reports success, even when the job fails
-
-**File:** `server.js:617-624` (route), `services/scheduler.js:29-53`
-(`runNightlyJob`)
-
-`runNightlyJob()` catches its own errors internally and only
-`console.error`s -- it never rethrows, so the route's `catch` block is dead
-code. Hitting `POST /api/scheduler/run-now` to manually verify the nightly
-job (its own stated purpose, per the route's comment) always returns
-`200 {"ok": true}`, even if Yahoo/Finnhub is down or `refreshAllHistory`
-throws for every ticker. The only place the real failure shows up is the
-server console.
-
-**Fix:** let `runNightlyJob()`'s failure propagate (or return a
-success/failure result the route actually checks) so this endpoint can be
-trusted as a real health signal.
-
-### 5. Journal idea execution has a double-execute race
-
-**File:** `services/journalService.js:263-297` (`executeJournalIdea`)
-
-No lock between reading `item.status` and writing `EXECUTED`. Two
-near-simultaneous calls for the same idea (double-click "Execute", or a
-client retry after a slow response) can both pass the status check before
-either commits, both call `recordBuy()`, and both mark the idea executed --
-recording the same trade twice with no error surfaced.
-
-**Fix:** move the status check + `recordBuy()` + status update into one
-`withTransaction`, checking status again as part of the same transaction
-(or add a `WHERE status = 'WATCHING'` guard to the update and check
-`changes` before proceeding).
 
 ### 6. Concurrent "add ticker" for a brand-new symbol can create duplicate `securities` rows
 
@@ -62,59 +34,6 @@ partial unique index `WHERE exchange_id IS NULL`), or serialize
 `getOrCreateSecurity` calls per-symbol in app code (e.g. an in-memory lock
 map keyed by symbol) for the lifetime of one request.
 
-### 7. Alert poller has no re-entrancy guard; nightly job and poller don't coordinate
-
-**File:** `services/alertScheduler.js:82` (`setInterval`, no guard),
-`services/scheduler.js:45` (nightly job's own `checkAlerts()` call)
-
-Nothing stops a slow `checkAlerts()` cycle (network degradation, a stalled
-webhook POST -- no fetch timeout anywhere) from still being in flight when
-the next 15-min tick starts, or from overlapping the nightly job's own
-`checkAlerts()` call if `nightly_refresh_hour` is ever set inside market
-hours (it's user-editable, not restricted). Either overlap can fire the same
-alert twice: duplicate `alerts` rows, duplicate HA webhook deliveries.
-
-**Fix:** an in-memory "already running" flag around `checkAlerts()`, checked
-by both schedulers.
-
-### 8. An uncaught DB error before the scheduler's own try-block can crash the process or silently stop rescheduling
-
-**File:** `services/alertScheduler.js:59`, `services/scheduler.js:56` +
-`:70-73`
-
-`getGeneralSettings()` (a synchronous read that can throw, e.g. on
-`SQLITE_BUSY` past `lib/db.js`'s 5s lock timeout) sits *before* either
-scheduler's own try/catch. No `process.on("unhandledRejection", ...)`
-exists anywhere in the codebase, so Node's default (crash) applies in
-`alertScheduler.js`. In `scheduler.js`, the equivalent call is inside
-`scheduleNext()` -- called both at startup and recursively after each run --
-so the same transient error can permanently stop the nightly job from ever
-rescheduling again for the life of the process, with nothing logged to
-explain why it just stopped.
-
-**Fix:** wrap the settings read (or the whole scheduler tick) in its own
-try/catch that logs and re-arms the timer regardless; add a top-level
-`unhandledRejection` handler as a backstop either way.
-
-### 9. Server error text reaches `innerHTML` unescaped in the ticker-detail dialog
-
-**File:** `public/js/modules/dashboard/index.js:185`, `:203-206`; sink
-originates at `server.js:611` (interpolates the raw `:symbol` URL param into
-a JSON error message with no sanitization)
-
-The only place in the whole frontend that breaks its own escape-everything
-convention (every `render.js` routes through a shared `escapeHtml()`).
-Today this isn't a one-click PoC -- `symbol` normally only reaches this path
-after surviving `getOrCreateSecurity()` -> Yahoo's `quoteSummary()`, which
-in practice rejects garbage/HTML-bearing tickers. But the frontend itself
-has no defense-in-depth here; any future change that relaxes that gate (a
-manual "add without lookup" option, a different provider, direct API access
-once this is ever exposed beyond localhost) turns it into immediate
-stored/reflected XSS with zero frontend change needed.
-
-**Fix:** use `textContent` (or the existing `escapeHtml()`) instead of
-`innerHTML`/`insertAdjacentHTML` in both spots.
-
 ### 10. `escape_price` / second take-profit target are stored but never evaluated
 
 **File:** `services/watchlistService.js` -- `insertWatchedItem`/
@@ -133,36 +52,6 @@ these fields).
 the columns/inputs until there's a UI for them, so the schema doesn't
 promise something the app doesn't do.
 
-### 11. Watchlist's "Add Ticker" / "New List" dialogs don't reset on open or Cancel
-
-**File:** `public/js/modules/watchlist/index.js:118-125` (Add Ticker),
-`:391-395` (New List)
-
-Every other "create" dialog in the app calls `.reset()` unconditionally on
-open (Orders, Paper Trade, Journal ideas/strategies, Settings sources).
-These two only reset on a *successful* submit. Cancel out of "Add Ticker"
-with data typed in, reopen it, and the old symbol/price/notes are still
-there -- edit just the symbol and submit, and you silently create an entry
-with another ticker's leftover target price and notes.
-
-**Fix:** call `.reset()` at the top of both open handlers, matching every
-other dialog in the app.
-
-### 12. Route error-handling mislabels unrelated failures as "could not resolve symbol"
-
-**File:** `server.js:136-139` (`POST /api/watched-items`), `:460-463`
-(`POST /api/journal/ideas`)
-
-Both catch blocks unconditionally format *any* error from
-`addWatchedItem`/`recordJournalIdea` as `502 Could not resolve "<symbol>":
-<message>`, even when the real failure has nothing to do with symbol lookup
--- e.g. a stale/deleted `watchlistId` (a FK violation) or a missing
-`sourceId` on a Journal idea. Wrong status class (502 implies an upstream
-provider failure) and a misleading message that points at the wrong cause.
-
-**Fix:** only use the "could not resolve" wording for errors actually
-thrown by `getOrCreateSecurity`; let other errors from these functions keep
-their own message and use 400 for bad input.
 
 ---
 
@@ -189,6 +78,57 @@ moment to harden this API generally rather than as an isolated patch now.
 ---
 
 ## Fixed (historical record)
+
+### 4, 5, 7, 8, 9, 11, 12 — the contained half of the code-review batch (2026-08-21)
+
+Fixed together, with the offline suite going from 372 to 382 checks. Kept as a
+record because several of them are the same *shape* of bug and that shape is
+worth recognising: **none of the seven would ever have thrown in normal use.**
+
+- **#4 — `run-now` always reported success.** `runNightlyJob()` caught its own
+  errors and never rethrew, so the route's `catch` was dead code and the
+  endpoint whose entire purpose is verifying the nightly job returned
+  `{ok: true}` even when every ticker failed. It now returns a result the route
+  checks, and "every ticker failed" counts as a failure even though nothing
+  threw.
+- **#5 — journal double-execute race.** The status check was a plain read with
+  an `await` between it and the write, so two overlapping calls both passed it
+  and both recorded a BUY. The status is now re-asserted in the UPDATE's own
+  `WHERE`, and zero changed rows aborts the transaction, rolling the loser's
+  BUY back. This one only became fixable *properly* this session: recordBuy's
+  network lookup used to force the write outside any transaction, and
+  `recordBuyWith` now takes an already-resolved security.
+  **Regression test:** four checks in `test-offline.js` that fire two executes
+  with `Promise.allSettled`. Verified to fail without the fix.
+- **#7 — no re-entrancy guard on alert checks.** A slow `checkAlerts()` could
+  still be running when the next 15-minute tick started, or overlap the nightly
+  job's own call, double-firing alerts and duplicating Home Assistant webhook
+  deliveries. Both schedulers now go through `checkAlertsGuarded()` and share
+  one in-flight flag, cleared in a `finally` so a failed check cannot wedge
+  alerting off permanently.
+- **#8 — a transient DB error could stop the nightly job forever.**
+  `getGeneralSettings()` sat outside both schedulers' try/catch. In
+  `scheduler.js` it is on the recursive re-arm path, so one `SQLITE_BUSY` used
+  to end the nightly job for the life of the process with nothing logged. It
+  now logs and retries in 5 minutes. A top-level `unhandledRejection` handler
+  was added as a backstop, since Node's default is to crash.
+- **#9 — server error text into `innerHTML`.** The two spots in the
+  ticker-detail dialog now build a real element with `textContent`. Not
+  exploitable today only because Yahoo's lookup rejects HTML-bearing tickers
+  first; that was a gate, not a defence.
+- **#11 — create dialogs didn't reset on open.** Cancelling "Add Ticker" with
+  data typed in left it there, so reopening and changing only the symbol
+  silently created an entry carrying the previous ticker's target price and
+  notes. Both dialogs now `.reset()` on open, matching every other dialog.
+- **#12 — route errors mislabelled.** Any failure from `addWatchedItem` /
+  `recordJournalIdea` was reported as `502 Could not resolve "<symbol>"`, even
+  a dead `watchlistId`. `getOrCreateSecurity` now tags genuine provider
+  failures with `code = "SYMBOL_LOOKUP_FAILED"`, and only those get the 502;
+  everything else keeps its own message and gets a 400.
+
+**Not covered by the offline suite:** #4, #7 and #8 need network or timer
+control the suite does not have. #5, #9, #11 and #12 all have regression
+checks.
 
 Kept for the record; nothing in this section is outstanding.
 

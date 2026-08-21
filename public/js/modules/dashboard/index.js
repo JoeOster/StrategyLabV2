@@ -173,6 +173,24 @@ async function handleOpenDetail(event) {
   await openDetailFor(target.dataset.symbol);
 }
 
+/**
+ * Error banner as a real element, built with textContent.
+ *
+ * BUG 9: these two sites were the only places in the frontend that put server
+ * text into innerHTML directly -- every render.js routes through escapeHtml.
+ * The message interpolates the raw :symbol URL param (server.js), so it is
+ * only not-XSS today because Yahoo's lookup happens to reject HTML-bearing
+ * tickers first. Any change that relaxes that gate would turn it into stored
+ * XSS with no frontend change at all. textContent cannot be talked into
+ * parsing markup, so the gate stops mattering.
+ */
+function errorBanner(message) {
+  const p = document.createElement("p");
+  p.className = "status-banner status-error";
+  p.textContent = message;
+  return p;
+}
+
 async function openDetailFor(symbol) {
   // Remembered so the dialog's own Refresh button knows what to refresh.
   state.detailSymbol = symbol;
@@ -182,7 +200,7 @@ async function openDetailFor(symbol) {
     const detail = await api.fetchTickerDetail(symbol);
     els.detailBody.innerHTML = renderTickerDetail(detail);
   } catch (err) {
-    els.detailBody.innerHTML = `<p class="status-banner status-error">${err.message}</p>`;
+    els.detailBody.replaceChildren(errorBanner(err.message));
   }
 }
 
@@ -200,10 +218,7 @@ async function handleTickerRefresh() {
     // Cards behind the dialog now show a stale price, so refresh those too.
     await reloadDashboardView();
   } catch (err) {
-    els.detailBody.insertAdjacentHTML(
-      "afterbegin",
-      `<p class="status-banner status-error">${err.message}</p>`,
-    );
+    els.detailBody.prepend(errorBanner(err.message));
   } finally {
     els.tickerRefreshBtn.disabled = false;
     els.tickerRefreshBtn.textContent = "Refresh Data";

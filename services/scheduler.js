@@ -5,7 +5,10 @@
 // Self-rearming setTimeout rather than a fixed setInterval: recomputing the
 // delay each night keeps it correct across daylight-saving shifts, which a
 // 24-hour interval would drift through.
-import { refreshAllHistory, checkAlerts } from "./watchlistService.js";
+import { refreshAllHistory } from "./watchlistService.js";
+// Via alertScheduler rather than watchlistService: both schedulers must share
+// one in-flight flag, or they can double-fire the same alert (BUG 7).
+import { checkAlertsGuarded } from "./alertScheduler.js";
 import { getGeneralSettings } from "./settingsService.js";
 
 let timer = null;
@@ -26,6 +29,13 @@ function shouldFetchEvents(now = new Date()) {
   return now.getDay() === 0; // Sunday
 }
 
+/**
+ * @returns {Promise<object>} a result the caller can actually check. It does
+ *   not throw: the nightly timer must re-arm no matter what happened. But
+ *   swallowing the outcome entirely made `POST /api/scheduler/run-now` -- whose
+ *   whole purpose is verifying this job works -- report `{ok: true}` even when
+ *   every ticker failed or the provider was down (BUG 4). `ok` now means it.
+ */
 async function runNightlyJob() {
   const startedAt = new Date();
   console.log(`[scheduler] Nightly refresh starting at ${startedAt.toISOString()}`);
@@ -42,18 +52,59 @@ async function runNightlyJob() {
     );
 
     // Refresh quotes too, so alerts evaluated overnight use fresh prices.
-    const fired = await checkAlerts();
-    console.log(
-      `[scheduler] Quotes: ${fired.refreshedCount ?? 0} refreshed, ${fired.length} alert(s) fired`,
-    );
+    const fired = await checkAlertsGuarded();
+    if (fired === null) {
+      console.warn("[scheduler] Alert check skipped: the 15-minute poller is mid-check.");
+    } else {
+      console.log(
+        `[scheduler] Quotes: ${fired.refreshedCount ?? 0} refreshed, ${fired.length} alert(s) fired`,
+      );
+    }
+
+    // Every ticker failing is not a successful run, even though nothing threw.
+    // That is precisely the "provider is down" case this endpoint exists to
+    // catch, and it comes back as a full result set of per-ticker errors.
+    const totalFailure = results.length > 0 && failed.length === results.length;
+    return {
+      ok: !totalFailure,
+      error: totalFailure ? `All ${results.length} ticker(s) failed to refresh.` : undefined,
+      tickers: results.length,
+      failed: failed.length,
+      newBars,
+      alertsFired: fired?.length ?? null,
+      withEvents,
+    };
   } catch (err) {
     // Never let a failed run kill the timer -- tomorrow should still try.
     console.error("[scheduler] Nightly refresh failed:", err.message);
+    return { ok: false, error: err.message };
   }
 }
 
+// How long to wait before trying again when we could not even read the
+// settings. Short enough that a transient lock costs one delayed run, long
+// enough not to spin.
+const RETRY_DELAY_MS = 5 * 60 * 1000;
+
 function scheduleNext() {
-  const settings = getGeneralSettings();
+  // BUG 8: this read sits on the recursive path -- scheduleNext() is called at
+  // startup AND after every run -- so one transient SQLITE_BUSY used to stop
+  // the nightly job for the life of the process, with nothing logged to say
+  // why it had gone quiet. Failing to read the settings must delay the job,
+  // never end it.
+  let settings;
+  try {
+    settings = getGeneralSettings();
+  } catch (err) {
+    console.error(
+      `[scheduler] Could not read settings (${err.message}); retrying in ` +
+        `${RETRY_DELAY_MS / 60000} min rather than giving up.`,
+    );
+    timer = setTimeout(scheduleNext, RETRY_DELAY_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    return;
+  }
+
   if (settings.nightly_refresh_enabled !== "1") {
     console.log("[scheduler] Nightly refresh disabled (Settings > General).");
     return;

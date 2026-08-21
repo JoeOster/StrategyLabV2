@@ -331,6 +331,13 @@ function updateTargetPriceVisibility() {
 // Watchlist -- the button used to live in the header and was reachable anywhere
 // (by accident, via a CSS bug); this makes that reach deliberate.
 export function openAddTickerDialog() {
+  // BUG 11: reset on OPEN, not just on successful submit -- every other create
+  // dialog in the app does. Cancelling with data typed in used to leave it
+  // there, so reopening and changing only the symbol silently created an entry
+  // carrying the previous ticker's target price and notes.
+  //
+  // Before the options are rendered, since reset() would undo the selection.
+  els.addForm.reset();
   els.addFormWatchlistSelect.innerHTML = renderWatchlistOptions(state.watchlists, state.activeWatchlistId);
   updateTargetPriceVisibility();
   els.addDialog.showModal();
@@ -395,6 +402,7 @@ function handleSortClick(event) {
 
 async function handleTabsClick(event) {
   if (event.target.closest("#new-list-tab")) {
+    els.newListForm.reset(); // BUG 11, same as openAddTickerDialog above.
     els.newListDialog.showModal();
     return;
   }

@@ -17,6 +17,34 @@ export const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
 let timer = null;
 
+// BUG 7: nothing used to stop a slow checkAlerts() cycle from still being in
+// flight when the next 15-minute tick started, or from overlapping the nightly
+// job's own call (nightly_refresh_hour is user-editable and can be set inside
+// market hours). Either overlap fires the same alert twice: duplicate `alerts`
+// rows and duplicate webhook deliveries to Home Assistant.
+//
+// One process, one flag. Both schedulers go through checkAlertsGuarded().
+let checkInFlight = false;
+
+/**
+ * checkAlerts() behind an "already running" flag.
+ *
+ * @returns the fired-alerts array, or `null` if a check was already in flight
+ *          and this call did nothing. Callers must distinguish the two: `null`
+ *          is "skipped", `[]` is "ran, nothing fired".
+ */
+export async function checkAlertsGuarded() {
+  if (checkInFlight) return null;
+  checkInFlight = true;
+  try {
+    return await checkAlerts();
+  } finally {
+    // finally, not after the await: an exception must clear the flag too, or
+    // one failed check wedges alerting off for the life of the process.
+    checkInFlight = false;
+  }
+}
+
 /**
  * Is the US stock market open right now? Regular session only (9:30am-4:00pm
  * Eastern, Mon-Fri) -- pre/post-market and 24-hour tickers aren't handled.
@@ -56,15 +84,24 @@ function easternParts(date) {
 
 /** One polling tick: checks the enabled flag and market hours, then defers to checkAlerts(). */
 export async function runAlertCheckNow() {
-  const settings = getGeneralSettings();
-  if (settings.alert_check_enabled !== "1") {
-    return { skipped: "disabled" };
-  }
-  if (!isMarketOpen()) {
-    return { skipped: "market-closed" };
-  }
+  // BUG 8: getGeneralSettings() is a synchronous DB read that can throw --
+  // SQLITE_BUSY past lib/db.js's 5s lock timeout, for one -- and it used to sit
+  // OUTSIDE this try. There is no unhandledRejection handler by default, so a
+  // throw here took the process down rather than skipping a tick.
   try {
-    const fired = await checkAlerts();
+    const settings = getGeneralSettings();
+    if (settings.alert_check_enabled !== "1") {
+      return { skipped: "disabled" };
+    }
+    if (!isMarketOpen()) {
+      return { skipped: "market-closed" };
+    }
+
+    const fired = await checkAlertsGuarded();
+    if (fired === null) {
+      console.warn("[alertScheduler] Previous check still running -- skipping this tick.");
+      return { skipped: "already-running" };
+    }
     if (fired.length > 0) {
       console.log(`[alertScheduler] ${fired.length} alert(s) fired.`);
     }

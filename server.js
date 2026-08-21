@@ -140,7 +140,14 @@ app.post("/api/watched-items", async (req, res) => {
     res.status(201).json(item);
   } catch (err) {
     console.error("Failed to add watched item:", err);
-    res.status(502).json({ error: `Could not resolve "${symbol}": ${err.message}` });
+    // Only a real lookup failure is a 502. Anything else -- a deleted
+    // watchlistId hitting a FK constraint, bad input -- kept its own cause but
+    // was reported as an unresolvable symbol, pointing at the wrong thing
+    // entirely (BUG 12).
+    if (err.code === "SYMBOL_LOOKUP_FAILED") {
+      return res.status(502).json({ error: `Could not resolve "${symbol}": ${err.message}` });
+    }
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -549,7 +556,11 @@ app.post("/api/journal/ideas", async (req, res) => {
     res.status(201).json(item);
   } catch (err) {
     console.error("Failed to add journal idea:", err);
-    res.status(502).json({ error: `Could not resolve "${symbol}": ${err.message}` });
+    // See the watched-items route above (BUG 12).
+    if (err.code === "SYMBOL_LOOKUP_FAILED") {
+      return res.status(502).json({ error: `Could not resolve "${symbol}": ${err.message}` });
+    }
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -725,10 +736,13 @@ app.get("/api/ticker/:symbol", (req, res) => {
 // 01:00 or changing the clock.
 app.post("/api/scheduler/run-now", async (req, res) => {
   try {
-    await scheduler.runNightlyJob();
-    res.json({ ok: true });
+    // runNightlyJob() reports rather than throws, so its result has to be
+    // checked -- returning {ok:true} unconditionally made this endpoint claim
+    // success even when every ticker failed (BUG 4).
+    const result = await scheduler.runNightlyJob();
+    res.status(result.ok ? 200 : 500).json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -760,6 +774,13 @@ function shutdown(signal) {
   }
   process.exit(0);
 }
+
+// BUG 8 backstop. Node's default for an unhandled rejection is to crash, and
+// this app has async timers (both schedulers) whose rejections reach no caller.
+// A dropped nightly tick should be a log line, not a dead process.
+process.on("unhandledRejection", (reason) => {
+  console.error("[server] Unhandled promise rejection:", reason instanceof Error ? reason.message : reason);
+});
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));

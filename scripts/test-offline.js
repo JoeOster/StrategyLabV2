@@ -1995,6 +1995,75 @@ try {
 }
 check("An already-executed idea cannot be executed again", doubleExecuteRejected);
 
+// BUG 5: the status check at the top of executeJournalIdea is a plain read,
+// and there used to be an await (the security lookup, inside recordBuy)
+// between it and the write. Two overlapping calls both passed the check, both
+// recorded a BUY and both marked the idea EXECUTED -- the same trade booked
+// twice, no error raised. Sequential double-execute (just above) never caught
+// it, because sequentially the status really has changed by the second call.
+//
+// Fired together on purpose: both reach the status check before either writes.
+const raceIdea = await journalSvc.recordJournalIdea({
+  holderId: traderHolder.id,
+  symbol: "NVDA",
+  orderType: "BUY_LIMIT",
+  targetPrice: 50,
+  sourceId: bookSource.id,
+  notes: "double-execute race",
+  skipBackfill: true,
+});
+const positionsBeforeRace = tx.listOpenPositions(traderHolder.id).length;
+
+const raceResults = await Promise.allSettled([
+  journalSvc.executeJournalIdea(traderHolder.id, raceIdea.id, {
+    transactionDate: "2026-07-20",
+    quantity: 7,
+    price: 51,
+  }),
+  journalSvc.executeJournalIdea(traderHolder.id, raceIdea.id, {
+    transactionDate: "2026-07-20",
+    quantity: 7,
+    price: 51,
+  }),
+]);
+
+const raceFulfilled = raceResults.filter((r) => r.status === "fulfilled");
+check("Concurrent execute: exactly one call succeeds", raceFulfilled.length === 1);
+check(
+  "Concurrent execute: the loser is rejected, not silently duplicated",
+  raceResults.some((r) => r.status === "rejected" && /already executed/i.test(r.reason.message)),
+);
+check(
+  "Concurrent execute: only ONE position is opened",
+  tx.listOpenPositions(traderHolder.id).length === positionsBeforeRace + 1,
+);
+check(
+  "Concurrent execute: the losing call rolls its BUY back entirely",
+  tx.listTransactions(traderHolder.id, { symbol: "NVDA", type: "BUY" })
+    .filter((t) => t.watched_item_id === raceIdea.id).length === 1,
+);
+
+// BUG 12: a failure that has nothing to do with symbol lookup must not be
+// dressed up as one. Only errors from the provider carry SYMBOL_LOOKUP_FAILED,
+// and the routes key their 502-vs-400 choice on exactly that.
+let nonLookupError = null;
+try {
+  await addWatchedItem({
+    holderId: traderHolder.id,
+    symbol: "NVDA", // already in `securities`, so no lookup happens at all
+    orderType: "WATCH",
+    watchlistId: 999999, // dead id -> FK violation
+    skipBackfill: true,
+  });
+} catch (err) {
+  nonLookupError = err;
+}
+check("A non-lookup failure still throws", nonLookupError !== null);
+check(
+  "A non-lookup failure is NOT tagged as a symbol-resolution failure",
+  nonLookupError !== null && nonLookupError.code !== "SYMBOL_LOOKUP_FAILED",
+);
+
 check(
   "executeJournalIdea rejects an unknown idea id",
   await journalSvc
@@ -2118,6 +2187,35 @@ check(
 check(
   "parseBookLookupResponse returns null for an entry with no title",
   parseBookLookupResponse("333", { "ISBN:333": { authors: [{ name: "Ghost" }] } }) === null,
+);
+
+console.log("\n9b. Frontend: regression guards for two fixed UI bugs");
+
+// BUG 9: server text into innerHTML. The dashboard's ticker-detail dialog was
+// the only place in the frontend bypassing the escape-everything convention.
+const dashboardSrc = fs.readFileSync(
+  path.join(process.cwd(), "public/js/modules/dashboard/index.js"),
+  "utf8",
+);
+check(
+  "Dashboard never interpolates err.message into innerHTML/insertAdjacentHTML",
+  !/(innerHTML|insertAdjacentHTML)[^;]*\$\{err\.message\}/s.test(dashboardSrc),
+);
+check("Dashboard builds its error banner with textContent", /errorBanner[\s\S]{0,220}textContent/.test(dashboardSrc));
+
+// BUG 11: create dialogs must reset on OPEN, not only after a successful
+// submit, or cancelled input leaks into the next entry.
+const watchlistSrc = fs.readFileSync(
+  path.join(process.cwd(), "public/js/modules/watchlist/index.js"),
+  "utf8",
+);
+check(
+  "openAddTickerDialog resets the form before showing it",
+  /function openAddTickerDialog\(\)[\s\S]{0,400}?addForm\.reset\(\)[\s\S]{0,400}?showModal\(\)/.test(watchlistSrc),
+);
+check(
+  "The New List dialog resets before showing it",
+  /newListForm\.reset\(\)[\s\S]{0,120}?newListDialog\.showModal\(\)/.test(watchlistSrc),
 );
 
 console.log("\n9. Frontend wiring: every getElementById target exists in index.html");

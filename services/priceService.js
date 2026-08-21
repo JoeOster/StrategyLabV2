@@ -68,7 +68,18 @@ export async function getOrCreateSecurity(symbol, opts = {}) {
     : getSecurityAnySymbol.get(upperSymbol);
   if (existing) return existing;
 
-  const profile = await yahoo.getProfile(upperSymbol);
+  // Tagged so callers can tell a genuine symbol-resolution failure (an
+  // upstream provider problem, worth a 502) from every other error they used
+  // to relabel as one -- a stale watchlistId, a missing sourceId (BUG 12).
+  let profile;
+  try {
+    profile = await yahoo.getProfile(upperSymbol);
+  } catch (err) {
+    err.code = "SYMBOL_LOOKUP_FAILED";
+    err.symbol = upperSymbol;
+    throw err;
+  }
+
   const resolvedExchangeCode = normalizeExchangeCode(profile.exchange);
   if (!exchangeId && resolvedExchangeCode) {
     exchangeId = resolveExchangeId(resolvedExchangeCode);

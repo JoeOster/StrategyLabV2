@@ -10,7 +10,8 @@
 // "Journal / Strategy Lab" section for the judgment calls made here.
 import db, { withTransaction } from "../lib/db.js";
 import { addWatchedItem, deleteWatchedItems } from "./watchlistService.js";
-import { recordBuy } from "./transactionsService.js";
+import { recordBuyWith } from "./transactionsService.js";
+import { getOrCreateSecurity } from "./priceService.js";
 
 // --- Strategies --------------------------------------------------------------
 // A strategy is source-independent (schema v5+): the same strategy ("Buy the
@@ -235,8 +236,12 @@ export async function recordJournalIdea(input) {
 }
 
 const getIdeaStmt = db.prepare("SELECT * FROM watched_items WHERE id = ? AND holder_id = ?");
+// The status is re-asserted in the UPDATE, not just checked beforehand: zero
+// changed rows is then a reliable "someone else executed this first" signal.
+// See executeJournalIdea for why a prior read cannot stand in for it (BUG 5).
 const markExecuted = db.prepare(
-  "UPDATE watched_items SET status = 'EXECUTED', updated_at = datetime('now') WHERE id = ?",
+  `UPDATE watched_items SET status = 'EXECUTED', updated_at = datetime('now')
+    WHERE id = ? AND status IN ('WATCHING','ALERT')`,
 );
 
 /**
@@ -270,28 +275,41 @@ export async function executeJournalIdea(holderId, itemId, fill) {
 
   const security = db.prepare("SELECT symbol FROM securities WHERE id = ?").get(item.security_id);
 
-  // recordBuy does its own network call (getOrCreateSecurity) before any
-  // writes, so it can't be nested inside withTransaction (better-sqlite3/
-  // node:sqlite transactions must be synchronous). Run it first, then wrap
-  // only the status flip -- if that somehow failed, the transaction still
-  // exists and is just missing its EXECUTED marker, which is recoverable by
-  // hand rather than a silently-lost trade.
-  const transaction = await recordBuy({
-    holderId,
-    symbol: security.symbol,
-    transactionDate: fill.transactionDate,
-    quantity: fill.quantity,
-    price: fill.price,
-    fees: fill.fees ?? 0,
-    accountId: fill.accountId ?? null,
-    sourceId: item.source_id,
-    watchedItemId: item.id,
-    isPaperTrade: false,
-    notes: fill.notes ?? null,
-  });
+  // BUG 5: the status check above is advisory only. Two near-simultaneous
+  // calls -- a double-clicked Execute, or a client retry after a slow response
+  // -- could both pass it, both record a BUY, and both mark the idea executed,
+  // booking the same trade twice with nothing surfaced.
+  //
+  // It used to be unfixable here without duplicating recordBuy: it does a
+  // network lookup before writing, and withTransaction takes a synchronous
+  // function, so the buy had to happen outside any transaction. That is no
+  // longer true. The lookup is hoisted out and recordBuyWith takes the
+  // resolved security, so the write and the status flip now happen in one
+  // transaction with no await between them -- which, in a single-threaded
+  // process, is genuinely atomic.
+  const resolvedSecurity = await getOrCreateSecurity(security.symbol);
 
-  withTransaction(() => {
-    markExecuted.run(itemId);
+  const transaction = withTransaction(() => {
+    const txn = recordBuyWith(resolvedSecurity, {
+      holderId,
+      transactionDate: fill.transactionDate,
+      quantity: fill.quantity,
+      price: fill.price,
+      fees: fill.fees ?? 0,
+      accountId: fill.accountId ?? null,
+      sourceId: item.source_id,
+      watchedItemId: item.id,
+      isPaperTrade: false,
+      notes: fill.notes ?? null,
+    });
+
+    // Zero rows means another request executed this idea between our read and
+    // here. Throwing rolls the BUY back with it, so the loser of the race
+    // writes nothing at all rather than leaving a duplicate trade behind.
+    if (markExecuted.run(itemId).changes === 0) {
+      throw new Error("This idea was already executed by another request.");
+    }
+    return txn;
   });
 
   return { transaction, item: getIdeaStmt.get(itemId, holderId) };
