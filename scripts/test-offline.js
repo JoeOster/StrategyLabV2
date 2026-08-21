@@ -2756,6 +2756,76 @@ check(
 );
 check("Declining never writes a trade", db.prepare("SELECT resulting_transaction_id FROM alerts WHERE id = ?").get(badQueued.id).resulting_transaction_id === null);
 
+console.log("\n14d. Import audit: correcting a typo");
+const imports = await import("../services/importService.js");
+
+// The whole point of a monthly audit: a trade recorded by hand whose numbers
+// disagree with the broker. Until now match.js found these and nothing could
+// act on them -- approveBatch writes only rows classified `new`.
+const auditAcct = acctSvcEarly.createAccount(holder.id, { broker: "fidelity", accountNumber: "7788" });
+db.prepare("INSERT INTO securities (symbol, name, data_source) VALUES ('AUDT','Audit Co','manual')").run();
+
+// Typed from memory at the wrong price, then partly sold -- so a correction
+// has to fix the realized P&L of the sale too, not just the purchase.
+const typo = await tx.recordBuy({
+  holderId: holder.id, accountId: auditAcct.id, symbol: "AUDT",
+  transactionDate: "2026-03-02", quantity: 100, price: 79.49,
+});
+await tx.recordSell({
+  holderId: holder.id, accountId: auditAcct.id, symbol: "AUDT",
+  transactionDate: "2026-04-01", quantity: 50, price: 85,
+});
+const auditPnlBefore = tx.listTransactions(holder.id, { symbol: "AUDT", type: "SELL" })[0].realized_pnl;
+check(
+  "A typo’d buy gives the wrong realized P&L on its sale",
+  Math.abs(auditPnlBefore - 50 * (85 - 79.49)) < 1e-9,
+);
+
+// Stage a broker row for the same trade at the true price.
+const csv = [
+  "Run Date,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Settlement Date",
+  "03/02/2026,YOU BOUGHT AUDIT CO (AUDT) (Cash),AUDT,AUDIT CO,Cash,79.94,100,,,,\"-7994\",03/03/2026",
+].join("\n");
+const staged = imports.stageImport({ accountId: auditAcct.id, files: [{ filename: "audit.csv", text: csv }] });
+check(
+  "The audit flags the trade as a discrepancy rather than a new trade",
+  staged.counts.needs_review === 1 && staged.counts.new === 0,
+);
+
+const discrepancies = imports.listDiscrepancies(staged.batch.id);
+check("The discrepancy is listed with its fields", discrepancies.length === 1);
+check(
+  "...naming ledger vs broker",
+  discrepancies[0].differences.some((d) => d.field === "price" && d.ledger === 79.49 && d.broker === 79.94),
+);
+
+const corrected = imports.applyCorrection(holder.id, staged.batch.id, discrepancies[0].rowId, {
+  fields: ["price"],
+});
+check("Applying the correction changes the price", corrected.after.price === 79.94);
+check("...and reports what it changed from", corrected.before.price === 79.49);
+
+// The reason corrections go through updateTransaction rather than writing
+// columns: fixing the buy re-derives the cost basis of every sell linked to
+// it, so past realized P&L is corrected too rather than left inconsistent.
+const auditPnlAfter = tx.listTransactions(holder.id, { symbol: "AUDT", type: "SELL" })[0].realized_pnl;
+check(
+  "Correcting the buy also fixes the realized P&L of the sale already made",
+  Math.abs(auditPnlAfter - 50 * (85 - 79.94)) < 1e-9,
+);
+
+let doubleCorrectRejected = false;
+try {
+  imports.applyCorrection(holder.id, staged.batch.id, discrepancies[0].rowId);
+} catch (err) {
+  doubleCorrectRejected = /can be corrected/.test(err.message);
+}
+check("A row cannot be corrected twice", doubleCorrectRejected);
+
+db.prepare("DELETE FROM transactions WHERE account_id = ?").run(auditAcct.id);
+db.prepare("DELETE FROM accounts WHERE id = ?").run(auditAcct.id);
+db.prepare("DELETE FROM securities WHERE symbol = 'AUDT'").run();
+
 console.log("\n15. Brokerages and accounts");
 const acctSvc = await import("../services/accountsService.js");
 

@@ -550,6 +550,18 @@ export function getPortfolioSummary(holderId, { isPaperTrade = false } = {}) {
 }
 
 const getTransaction = db.prepare("SELECT * FROM transactions WHERE id = ? AND holder_id = ?");
+
+/**
+ * One transaction, scoped to its holder.
+ *
+ * Exported because the CSV audit needs to read a row before and after applying
+ * a correction, to report what actually changed. The holder scope is not
+ * decoration: every read path in this app is holder-scoped, and a getter that
+ * quietly is not would be the one place a stray id could cross the boundary.
+ */
+export function getTransactionById(holderId, id) {
+  return getTransaction.get(id, holderId) ?? null;
+}
 const voidTransactionStmt = db.prepare(
   `UPDATE transactions SET voided_at = datetime('now'), void_reason = ?
      WHERE id = ? AND holder_id = ? AND voided_at IS NULL`,

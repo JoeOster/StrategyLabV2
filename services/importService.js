@@ -28,6 +28,7 @@ import { classify, summarize } from "./importers/match.js";
 import { getOrCreateSecurity } from "./priceService.js";
 import { TRANSFER_OUT_REASON } from "../lib/constants.js";
 import { recordBuyWith, recordSellWith, recordDividendWith } from "./transactionsService.js";
+import * as txns from "./transactionsService.js";
 
 const PARSERS = { fidelity, robinhood, etrade };
 
@@ -298,6 +299,105 @@ export async function approveBatch(batchId, { rowIds = null } = {}) {
     setBatchStatus.run("reconciled", batch.id);
     return { batch: getBatch.get(batch.id), written, skippedDuplicates };
   });
+}
+
+// --- Corrections -----------------------------------------------------------
+//
+// The half of the audit that was missing. `match.js` finds a trade you already
+// recorded whose numbers disagree with the broker's -- {field, ledger, broker}
+// -- and until now nothing could act on it. `approveBatch` writes only rows
+// classified `new`; a `needs_review` row was reported and then dropped.
+//
+// That was right for an automatic loader. The original note says so: silently
+// rewriting history to agree with a CSV is how a journal stops being
+// trustworthy. But this import is a MONTHLY TYPO AUDIT, and correcting the typo
+// is the entire point of running it -- so the answer is not "never apply", it is
+// "apply one row at a time, explicitly, and only what the broker actually
+// disagrees about".
+//
+// It goes through updateTransaction rather than writing columns, which matters
+// more than it looks: correcting a BUY's price recomputes the cost basis of
+// every sell already linked to that lot, so fixing a typo'd purchase also fixes
+// the realized P&L of past sales instead of leaving the books inconsistent.
+
+const getRawRow = db.prepare("SELECT * FROM import_raw_rows WHERE id = ? AND batch_id = ?");
+
+/**
+ * Applies the broker's figures to the transaction a staged row was matched to.
+ *
+ * @param {number} holderId
+ * @param {number} batchId
+ * @param {number} rowId a staged row classified `needs_review`
+ * @param {{fields?: string[]}} opts which differences to apply. Defaults to all
+ *   of them; naming a subset lets you take the price but not the date, which is
+ *   the common case when a broker reports settlement rather than trade date.
+ */
+export function applyCorrection(holderId, batchId, rowId, { fields = null } = {}) {
+  const batch = getBatch.get(batchId);
+  if (!batch) throw new Error("No such import batch.");
+
+  const raw = getRawRow.get(rowId, batchId);
+  if (!raw) throw new Error("That row is not part of this batch.");
+  if (raw.reconciliation_status !== "needs_review") {
+    throw new Error(
+      `Only a row the broker disagrees with can be corrected -- this one is "${raw.reconciliation_status}".`,
+    );
+  }
+  if (!raw.matched_transaction_id) {
+    throw new Error("That row is not matched to a transaction, so there is nothing to correct.");
+  }
+
+  const { differences = [], normalized } = JSON.parse(raw.raw_data);
+  if (differences.length === 0) throw new Error("That row has no differences to apply.");
+
+  const wanted = fields ? new Set(fields) : null;
+  const applying = differences.filter((d) => wanted == null || wanted.has(d.field));
+  if (applying.length === 0) throw new Error("None of the named fields differ on that row.");
+
+  // Only what actually differs. A blanket overwrite would quietly replace
+  // fields the broker never disagreed about -- including ones only the journal
+  // knows, like which source suggested the trade.
+  const patch = {};
+  for (const d of applying) {
+    if (d.field === "quantity") patch.quantity = d.broker;
+    else if (d.field === "price") patch.price = d.broker;
+    else if (d.field === "transaction_date") patch.transactionDate = d.broker;
+  }
+
+  const before = txns.getTransactionById(holderId, raw.matched_transaction_id);
+  if (!before) throw new Error("The matched transaction no longer exists.");
+
+  const after = txns.updateTransaction(holderId, raw.matched_transaction_id, patch);
+
+  // Reclassified so the row cannot be applied twice and the batch's counts stay
+  // honest about what was dealt with.
+  db.prepare("UPDATE import_raw_rows SET reconciliation_status = 'matched' WHERE id = ?").run(rowId);
+
+  return {
+    transactionId: raw.matched_transaction_id,
+    applied: applying,
+    before: { quantity: before.quantity, price: before.price, transaction_date: before.transaction_date },
+    after: { quantity: after.quantity, price: after.price, transaction_date: after.transaction_date },
+    symbol: normalized?.symbol ?? null,
+  };
+}
+
+/** Every row in a batch the broker disagrees with, ready to review. */
+export function listDiscrepancies(batchId) {
+  return getRawRows
+    .all(batchId)
+    .filter((r) => r.reconciliation_status === "needs_review")
+    .map((r) => {
+      const { normalized, differences } = JSON.parse(r.raw_data);
+      return {
+        rowId: r.id,
+        matchedTransactionId: r.matched_transaction_id,
+        symbol: normalized.symbol,
+        transactionType: normalized.transactionType,
+        transactionDate: normalized.transactionDate,
+        differences,
+      };
+    });
 }
 
 /**

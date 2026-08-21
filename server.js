@@ -566,6 +566,34 @@ app.get("/api/imports/:id", (req, res) => {
   }
 });
 
+// The rows the broker disagrees with -- the point of a monthly typo audit.
+app.get("/api/imports/:id/discrepancies", (req, res) => {
+  try {
+    res.json(imports.listDiscrepancies(Number(req.params.id)));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+// Body: { fields?: string[] } -- omit to apply every difference, or name a
+// subset to take the price but not the date, which is the common case when a
+// broker reports settlement date rather than trade date.
+//
+// One row at a time and explicitly, never in bulk: silently rewriting history
+// to agree with a CSV is how a journal stops being trustworthy.
+app.post("/api/imports/:id/rows/:rowId/correct", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  try {
+    res.json(
+      imports.applyCorrection(holder.id, Number(req.params.id), Number(req.params.rowId), {
+        fields: Array.isArray(req.body?.fields) ? req.body.fields : null,
+      }),
+    );
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.post("/api/imports/:id/approve", async (req, res) => {
   try {
     const rowIds = Array.isArray(req.body?.rowIds) ? req.body.rowIds : null;
