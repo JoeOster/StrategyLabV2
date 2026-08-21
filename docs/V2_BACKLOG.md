@@ -1137,3 +1137,34 @@ Open questions for the walkthrough, not to be answered by guessing:
   pipeline -- see "Backtesting / AI trade evaluation — multi-agent design"
   above for the researcher/backtester/auditor/chart-agent breakdown and
   suggested build order.
+
+## Import non-trade cash movements
+
+Broker exports carry more than trades. Robinhood's file alone has 48 rows the
+importer parses past: `RTP` and `ACH` transfers, `GOLD` subscription fees,
+`INT` interest, `SLIP` stock-lending income, `FUTSWP` futures sweeps. Fidelity
+and E*TRADE have their own equivalents.
+
+These map cleanly onto `cash_transactions`, which already exists and already
+has the right kinds -- `DEPOSIT`, `WITHDRAWAL`, `FEE`. The mapping is the easy
+part; the reason this is not done yet is that it interacts with the opening
+balance in a way that has to be got right.
+
+`OPENING_BALANCE` is a DATED baseline: only movements on or after its date
+count. Every non-trade row in the current exports predates the 2026-08-21
+baselines, so importing them today would change no balance at all. The moment
+an import covers a period after a baseline, though, an unstaged deposit means
+cash silently drifts from the broker's figure -- and cash drifting quietly is
+precisely the failure this app keeps having to correct after the fact.
+
+So the work is:
+
+1. Extend each parser to emit non-trade rows with a `cashKind`.
+2. Stage them alongside trades so the preview shows them and they can be
+   approved or rejected as a unit.
+3. Skip any row dated before the account's opening balance, and say so in the
+   preview rather than dropping it quietly -- the baseline already accounts
+   for it, and importing it would double-count.
+
+Worth doing before the next monthly import that covers new ground, not urgent
+for the historical backfill that is already reconciled.

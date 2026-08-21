@@ -107,18 +107,37 @@ database is the one that must survive.
 | Fidelity 146518557 (IRA) | $23,646.37 | $23,677.51 | live price drift |
 | Fidelity 266356256 (IRA, wife) | $15,327.69 | $15,352.65 | live price drift |
 | E*TRADE 7178 | $319.99 | $320.89 | live price drift |
-| Robinhood | -$1,140.65 | not compared | **cash derived, and impossible** |
+| Robinhood | $1,636.62 | $1,638.91 | live price drift |
 | Schwab (thinkorswim) | $100.00 | $100.00 | funded, no positions, no parser |
 | TradeStation | $100.00 | $100.00 | funded, no positions, no parser |
 
-Robinhood is the one account that does not reconcile, and it is worth being
-precise about why. Its cash is derived at -$2,766.79 because the export
-contains sales whose matching buys were never imported, so the ledger sees
-proceeds with no purchase behind them. A 60-day export cannot fix this: the
-missing buys predate any window Robinhood will hand back. It needs Joe's actual
-cash balance recorded as an `OPENING_BALANCE`, exactly as the other accounts
-got. Until then the all-accounts total is understated by that gap, which is why
-the cross-account strip shows no cash figure at all rather than a wrong one.
+Robinhood now reconciles too, but it took a real cash figure to get there and
+the way it failed is worth keeping. Its derived cash sat at -$2,766.79 because
+the export is a window, not a history: 48 of its 156 rows are non-trade cash
+movements the importer does not stage (a $2,000 instant deposit, nine Gold
+subscription fees totalling $45, interest, stock-lending income, futures
+sweeps), and two IONQ sales -- 2 shares on 2025-11-04 and 25 on 2025-11-13 --
+were dropped because their opening purchases predate the file. Recording
+$10.48 as a dated OPENING_BALANCE baselines all of that away, and cash is now
+exact against the app.
+
+Two caveats that survive the reconciliation:
+
+- **Realized P&L is understated for 2026.** The app reports -$1,136.86 against
+  Robinhood's YTD -$1,272.24. The export ends 2026-07-15 and today is
+  2026-08-21, so roughly five weeks of activity are simply not in the file.
+  This is a data-coverage gap, not an arithmetic one; a fresh export closes it.
+- **The dropped IONQ sales cannot be recovered by exporting again.** Their buys
+  predate any window Robinhood will hand back, so those 27 shares have no cost
+  basis and their realized P&L is permanently unknown. `reconcile()` drops them
+  rather than inventing a basis, which is the right call, and the import
+  preview names them explicitly -- they were only invisible here because this
+  import was driven through curl rather than the UI.
+
+Non-trade cash rows being unstaged costs nothing today, because every one of
+them predates the 2026-08-21 baseline and so cannot move the balance. It will
+start to matter the moment an import covers a period after the baseline. See
+`docs/V2_BACKLOG.md`.
 
 Schwab and TradeStation hold $100 each and nothing else. Both have
 `has_parser = 0`, so until a parser exists every trade in them has to be
