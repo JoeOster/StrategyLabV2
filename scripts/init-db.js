@@ -10,6 +10,7 @@ import { SCHEMA_VERSION } from "../lib/schemaVersion.js";
 // Imported from lib/constants.js, NOT from the service -- see that file for
 // why importing a service here would break init.
 import { DEFAULT_WATCHLIST_NAME } from "../lib/constants.js";
+import { baseline } from "../lib/migrate.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, "..", "schema.sql");
@@ -46,6 +47,12 @@ try {
     ).run(DEFAULT_WATCHLIST_NAME);
   });
   console.log(`Seeded default holder and "${DEFAULT_WATCHLIST_NAME}" list.`);
+
+  // schema.sql already contains every migration's effect, so they are recorded
+  // as applied rather than replayed -- replaying them here would fail on
+  // "table already exists" and a rebuild step could discard rows.
+  const baselined = baseline();
+  console.log(`Baselined ${baselined.length} migration(s) as already applied.`);
 
   stampSchemaVersion();
   console.log(`Stamped schema version ${SCHEMA_VERSION}.`);

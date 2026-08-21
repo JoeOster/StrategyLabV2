@@ -16,6 +16,14 @@ const schema = fs.readFileSync(path.join(process.cwd(), "schema.sql"), "utf8");
 db.exec(schema);
 console.log("Schema applied to test DB.");
 
+// schema.sql already contains every migration's effect, so the ledger is
+// baselined rather than replayed -- the same thing scripts/init-db.js does for
+// a real install. ANY path that applies schema.sql directly has to do this, or
+// a later `npm run db:migrate` will try to re-apply files the database already
+// has and fail on "table already exists".
+const { baseline: baselineMigrations } = await import("../lib/migrate.js");
+baselineMigrations();
+
 const {
   addWatchedItem,
   listWatchedItems,
@@ -33,6 +41,31 @@ const {
   acknowledgeAlert,
   acknowledgeAllAlerts,
 } = await import("../services/watchlistService.js");
+
+// The suite once threw part-way through and took 216 checks down with it,
+// unnoticed for weeks, because a crash still exits non-zero and the visible
+// output still ended in a long list of OKs. An exit code nobody reads is not
+// a signal, so the count itself is checked: a run doing far fewer checks than
+// expected has aborted, however healthy it looks.
+//
+// Raise this when tests are added. Never lower it to make a run pass -- if the
+// count dropped, find out what stopped running.
+const MIN_EXPECTED_CHECKS = 450;
+
+// Registered as an exit handler, NOT checked at the end of the run: the
+// failure this guards against is the suite THROWING part-way through, which
+// never reaches the end of the file. An exit handler fires however the
+// process ends, so the abort is stated in words after the stack trace rather
+// than left for someone to infer from a check count they were not counting.
+process.on("exit", () => {
+  const total = passed + failed;
+  if (total < MIN_EXPECTED_CHECKS) {
+    console.error(
+      `\nABORTED: only ${total} checks ran, expected at least ${MIN_EXPECTED_CHECKS}.` +
+        `\nThe suite stopped early. Any passes above are NOT a clean run.`,
+    );
+  }
+});
 
 let passed = 0;
 let failed = 0;
@@ -2583,6 +2616,40 @@ check(
   "A closed plan's rungs are no longer evaluated",
   !plans.listPendingExits().some((e) => e.plan_id === closingPlan.id),
 );
+
+console.log("\n14. Migrations");
+const mig = await import("../lib/migrate.js");
+const { SCHEMA_VERSION: CODE_VERSION } = await import("../lib/schemaVersion.js");
+const migFiles = mig.listMigrationFiles();
+
+check("Migration files are discovered", migFiles.length > 0);
+check(
+  "They are ordered by version",
+  migFiles.every((m, i) => i === 0 || m.version > migFiles[i - 1].version),
+);
+check(
+  "Versions are contiguous -- a gap means a migration was never written",
+  migFiles.every((m, i) => i === 0 || m.version === migFiles[i - 1].version + 1),
+);
+
+// The invariant that keeps the by-hand era from returning: bumping
+// SCHEMA_VERSION without adding a migration file is exactly how a database
+// ends up structurally behind what the code believes it is.
+check(
+  `The newest migration matches SCHEMA_VERSION (v${CODE_VERSION})`,
+  migFiles[migFiles.length - 1].version === CODE_VERSION,
+);
+check("Every migration file has content", migFiles.every((m) => fs.readFileSync(m.path, "utf8").trim().length > 0));
+check(
+  "coversFrom is one below the earliest migration",
+  mig.coversFrom() === migFiles[0].version - 1,
+);
+
+// This suite's database was built from schema.sql, so init should have
+// baselined the ledger -- leaving it empty would make a later migrate try to
+// replay every file onto a database that already has all of it.
+check("The test database has a migration ledger", mig.appliedVersions().size > 0);
+check("...and nothing is pending against it", mig.pendingMigrations().length === 0);
 
 console.log("\n9b. Frontend: regression guards for two fixed UI bugs");
 
