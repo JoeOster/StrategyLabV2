@@ -257,6 +257,43 @@ never been persisted.
 Zero negative positions in any of them. The IRA's expected positions are
 ASTS 30, KLAR 100, KTOS 30, MRVL 30, MU 3, RKLB 50.
 
+### Blocker found 2026-08-21: external_ref cannot be one-per-broker-row
+
+A trial load of the IRA straight through `POST /api/transactions` (skipping
+staging) got **302/302 buys in and only 94/204 sells**. 110 sells were rejected
+as duplicate constraint violations against an empty database.
+
+Cause: `recordSell` fans a single sale out across the lots it consumes, writing
+**one transaction row per lot**. That is correct FIFO behaviour. But every row
+in that fan-out carries the same `external_ref`, and the partial
+`UNIQUE (account_id, external_ref)` index rejects all but the first.
+
+So the dedupe assumes *one broker row equals one transaction row*, and that is
+false for any sale spanning more than one purchase lot -- which in this ledger
+is most of them, because the pattern is repeated buys followed by a bulk sell.
+
+The resulting database was **worse than empty**: every buy and under half the
+sells, reading as 235 positions and $409,781 of cost basis against a real six
+positions and about $24,000. Partial imports are not a safe failure mode here,
+which is an argument for staging doing the whole batch in one transaction.
+
+**Fix, for whoever builds the write path:**
+
+1. Check `external_ref` *before* writing anything. If a non-voided transaction
+   already has it for this account, skip the whole broker row and report it as
+   a duplicate -- do not attempt the write and interpret the constraint error,
+   which is what produced the misleading "already-present" count above.
+2. Inside `recordSell`'s fan-out, only the first inserted row carries
+   `external_ref`; the rest carry null. The constraint then means "this broker
+   row has been imported", which is what it was always meant to mean.
+3. Load a batch inside a single transaction so a mid-run failure rolls back
+   rather than leaving a half-populated ledger.
+
+Note the trial load was otherwise sound: 396 rows written in 14 seconds through
+the ordinary API, with FIFO, cost basis and validation applied normally, and
+zero unexpected failures. The write path is not far off -- it just cannot treat
+one CSV row as one database row.
+
 **Next piece of work**, in order:
 
 1. `import_batches` + `import_raw_rows` writes — stage the parsed rows with
