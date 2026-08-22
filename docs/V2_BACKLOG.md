@@ -1174,3 +1174,100 @@ not optional: three separate $0.01 stock-lending payments land on the same day,
 one per security, with otherwise identical refs. Two of the three were being
 swallowed as duplicates of the first.
 
+
+## Ideas, none urgent (captured 2026-08-21, end of a 14-hour session)
+
+Nothing here is a defect and nothing is blocking. The app is complete, tested
+and running. These are the things worth doing next, in the order I would do
+them, with enough context that nobody has to re-derive the reasoning.
+
+### 1. Sequence patterns -- the strongest finding in the ledger
+
+The trade after a win averages **+$70.44**; the trade after a loss averages
+**-$60.35**. A $130 swing on essentially identical position sizes ($1,529 vs
+$1,487), so it is not sizing up after a loss. It is worse *results* after one.
+
+Worse still when re-trading the same name: **-$83.16** staying in the ticker
+that just lost, against -$42.76 moving on.
+
+**The caveat has to ship with the number.** Part of this is market regime, not
+behaviour: SPY moved +0.19% on the days after his wins and +0.02% after his
+losses. Losses cluster in bad tape and so does the next trade. That explains
+some of the gap and not all of it, and 540 trades cannot cleanly separate them.
+Any panel showing this must show the SPY comparison beside it, or it reads as
+proof of tilt when it is partly proof of weather.
+
+Belongs in `patternsService.js` as a `sequencePatterns()` detector.
+
+### 2. Cadence awareness -- the confound found the hard way
+
+Every pattern detector treats each sale as a decision. That assumption breaks
+where engagement does. Joe's cadence:
+
+```
+2026-05  222 trades      2026-07   13
+2026-06   82             2026-08    9
+```
+
+He stopped in July -- coursework, and a rough term. So the recent tail is
+mostly positions left running rather than choices made, and any pattern
+spanning that boundary is partly measuring absence. "Seven KTOS losses stepping
+down from $94 to $48" runs March to August and crosses it.
+
+At minimum the Patterns tab should show trades-per-month and let the reader see
+where the engaged periods are. Better: a date range, defaulting to something
+sensible, so the analysis can be pointed at a period where he was actually
+trading. Do this BEFORE building more detectors, since every one of them
+inherits the flaw.
+
+### 3. Names traded well, not only badly
+
+Patterns lists the ten names that cost money. It says nothing about RDW
+(**49 of 63 sales up, +$5,836**) or CIFR (45 of 61, +$3,373). There are names
+here traded genuinely well at real sample sizes, and showing only the failures
+is both dispiriting and a worse description of the ledger.
+
+Same table, sorted the other way. Cheap.
+
+### 4. Split `watchlistService.js` -- the only real seam problem
+
+896 lines, 25 exports, three unrelated jobs:
+
+- watchlists and watched items CRUD -- belongs here
+- `backfillSecurityHistory`, `refreshAllHistory`, `refreshSingleTicker` --
+  belongs in `priceService.js`
+- `applyAlertIfTriggered`, `applyExitAlert`, `checkAlerts`, `acknowledgeAlert`,
+  `acknowledgeAllAlerts`, `listUnacknowledgedAlerts` -- belongs in
+  `alertsService.js`
+
+The alert split is the sharp end: alert code lives in **both** files today.
+`watchlistService` raises and acknowledges; `alertsService` lists and resolves.
+"Where does alert logic go" has two answers, which is how it ends up in a third
+next time.
+
+Nothing is broken, which is why it has not bitten. It is a mechanical move with
+969 tests behind it, and it gets more expensive with every feature that lands
+on top.
+
+### 5. Dust positions
+
+Roughly twenty fractional lots from one bulk buy on 2026-05-19 -- 0.067 AXON,
+0.00085 ORCL, 0.000033 DDS. Each is a full row in every position view and worth
+cents. A grouping, a threshold, or a "hide dust" toggle would clear real
+clutter without deleting anything.
+
+### 6. Entry alerts exist and have never been used
+
+Zero `BUY_LIMIT` watched items. The whole entry-side path -- target, alert,
+"did I actually buy it" discipline, the `entryAlerts` section of the efficiency
+report -- is built, tested, and idle. This is not something to build; it is
+something to use, and worth a nudge rather than a feature.
+
+### Deliberately not on this list
+
+Anything that forecasts prices. The measured edge is +$9.36 a trade across 540
+trades and it comes from frequency and discipline, which is what this app
+measures. A forecast bolted on would be a fourth opinion competing with the
+three already here, and unmeasurable until it had been traded for months. If it
+is ever wanted, the right shape is a SOURCE whose calls get logged and scored
+like any other -- which needs no new code at all.
