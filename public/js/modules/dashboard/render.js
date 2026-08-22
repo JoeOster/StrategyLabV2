@@ -293,3 +293,107 @@ function escapeHtml(str) {
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
   );
 }
+
+/**
+ * Is this a URL a browser should be allowed to follow from a news item?
+ *
+ * Exported and separate from the renderer because it is the only part of the
+ * news panel that is a DECISION rather than structure. The rest of the panel's
+ * safety is structural -- it builds nodes and sets textContent, which cannot
+ * be talked into parsing markup no matter what a headline contains -- and a
+ * test for that against a faked DOM would only be testing the fake.
+ *
+ * This, by contrast, can genuinely be got wrong, and getting it wrong turns a
+ * headline into a click-to-run script.
+ */
+export function isSafeNewsUrl(url) {
+  if (typeof url !== "string") return false;
+  // Parsed rather than pattern-matched. "java	script:alert(1)" and
+  // " javascript:alert(1)" both defeat a naive prefix check and both are
+  // resolved correctly here.
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "http:" || parsed.protocol === "https:";
+}
+
+/**
+ * Recent headlines for a ticker.
+ *
+ * Every string here comes from a third party and none of it is trusted. The
+ * headline, source and summary go in as TEXT, and the link is built as a real
+ * anchor whose href is checked to be http(s) first -- a `javascript:` URL in a
+ * news feed would otherwise become a click-to-run script in this page. That is
+ * not paranoia about Finnhub specifically; it is that this is the first place
+ * in the app where somebody else's content is rendered at all.
+ */
+export function renderTickerNews(payload) {
+  const wrap = document.createElement("div");
+  wrap.className = "ticker-news";
+
+  const h = document.createElement("h4");
+  h.textContent = "Recent headlines";
+  wrap.append(h);
+
+  if (payload?.error) {
+    const p = document.createElement("p");
+    p.className = "panel-hint";
+    p.textContent = `Headlines unavailable: ${payload.error}`;
+    wrap.append(p);
+    return wrap;
+  }
+
+  const items = payload?.news ?? [];
+  if (items.length === 0) {
+    const p = document.createElement("p");
+    p.className = "panel-hint";
+    p.textContent = "No headlines in the last 14 days.";
+    wrap.append(p);
+    return wrap;
+  }
+
+  const list = document.createElement("ul");
+  list.className = "news-list";
+  for (const n of items) {
+    const li = document.createElement("li");
+
+    const date = document.createElement("span");
+    date.className = "news-date";
+    date.textContent = String(n.datetime).slice(0, 10);
+
+    // An anchor only when the URL is one a browser should follow. Anything
+    // else degrades to plain text rather than being dropped -- the headline is
+    // still worth reading even if its link is unusable.
+    let title;
+    if (isSafeNewsUrl(n.url)) {
+      title = document.createElement("a");
+      title.href = n.url;
+      title.target = "_blank";
+      // noopener: the opened page gets no handle back to this one.
+      title.rel = "noopener noreferrer";
+    } else {
+      title = document.createElement("span");
+    }
+    title.textContent = n.headline;
+
+    const src = document.createElement("span");
+    src.className = "news-source";
+    src.textContent = n.source;
+
+    li.append(date, title, src);
+    list.append(li);
+  }
+  wrap.append(list);
+
+  const note = document.createElement("p");
+  note.className = "panel-hint";
+  note.textContent = payload.cached
+    ? `Headlines from Finnhub, cached — fetched ${String(payload.fetchedAt).slice(0, 16).replace("T", " ")}.`
+    : "Headlines from Finnhub. Dates and sources only — nothing here has been read against your position.";
+  wrap.append(note);
+
+  return wrap;
+}

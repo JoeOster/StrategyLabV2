@@ -501,16 +501,42 @@ none.
 
 ---
 
-## Finnhub-powered news in the detail panel
+## Finnhub-powered news in the detail panel -- BUILT 2026-08-21
 
-Separate from the skill above and complementary to it: Finnhub's free tier
-includes company news, earnings calendar, and basic sentiment. Those could
-populate the detail dialog with real headlines and dates without any LLM
-involvement, refreshed by the existing polling machinery.
+Was blocked on "getting a `FINNHUB_API_KEY` and running the Finnhub provider
+path live for the first time". The key had since been added to `.env` and
+nobody had noticed the blocker was gone.
 
-Blocked on: getting a `FINNHUB_API_KEY` and running the Finnhub provider
-path live for the first time — it's written but has never executed (see
-STATUS.md).
+`getCompanyNews` on the existing provider, `GET /api/ticker/:symbol/news`, and
+a panel appended to the ticker dialog. Twelve headlines over fourteen days,
+with dates, sources and links.
+
+**Why it exists alongside the skill.** This is the half of research a browser
+can genuinely do: real dated headlines, no model in the loop. It does not
+cross-reference anything against the position -- that needs reasoning, which
+is what the Claude skill is for -- and the panel says so in as many words,
+because a list of headlines sitting under a position invites being read as
+analysis of it.
+
+**Cached in memory for fifteen minutes**, not in a table. News is ephemeral and
+nothing reasons over yesterday's headlines, so a `news_cache` table would carry
+rows nobody reads twice. It also keeps the free tier honest: opening the same
+dialog five times in a minute is one call.
+
+**Fetched after the dialog renders, not with it.** Finnhub is a third party and
+the rest of the panel does not depend on it; blocking the dialog on it would
+make a slow news API look like a slow app. The late arrival checks the dialog
+is still showing the same ticker before appending, or opening NVDA then quickly
+opening TSLA drops NVDA's headlines into TSLA's panel.
+
+**This is the first third-party content the app renders.** Headlines, sources
+and summaries are set as `textContent` on real nodes rather than interpolated
+into HTML -- the same choice `errorBanner` made after BUG 9. Links are built
+only when `isSafeNewsUrl` says the scheme is http or https, and that check
+PARSES the URL rather than matching a prefix, because `" javascript:alert(1)"`
+and `"java	script:alert(1)"` both defeat a prefix test. Thirteen checks cover
+that predicate; the structural safety is deliberately not tested, since against
+a faked DOM the fake would be what was under test.
 
 ---
 

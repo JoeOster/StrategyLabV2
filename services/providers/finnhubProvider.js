@@ -81,3 +81,49 @@ export async function getProfile(symbol) {
     };
   });
 }
+
+/**
+ * Recent company news headlines.
+ *
+ * The one thing the browser can genuinely do on its own for research: real,
+ * dated headlines with sources, no model in the loop. It is not the synthesis
+ * a Claude session produces -- nothing here cross-references a headline
+ * against your cost basis -- but "what has been said about this lately" is
+ * half the question and it needs no reasoning to answer.
+ *
+ * @param {string} symbol
+ * @param {{days?: number, limit?: number}} [opts]
+ * @returns {Promise<Array<{datetime: string, headline: string, source: string,
+ *   url: string, summary: string|null}>>}
+ */
+export async function getCompanyNews(symbol, { days = 14, limit = 12 } = {}) {
+  return withUsageLog("finnhub", `news:${symbol}`, async () => {
+    const to = new Date();
+    const from = new Date(to.getTime() - days * 86400000);
+    const rows = await finnhubGet("/company-news", {
+      symbol,
+      from: from.toISOString().slice(0, 10),
+      to: to.toISOString().slice(0, 10),
+    });
+
+    // Finnhub returns an object rather than an array on error cases the HTTP
+    // status does not cover -- an unsupported symbol on the free tier, for
+    // one. Treated as "no news" rather than allowed to throw on .map.
+    if (!Array.isArray(rows)) return [];
+
+    return rows
+      .filter((n) => n?.headline && n?.url)
+      .sort((a, b) => (b.datetime ?? 0) - (a.datetime ?? 0))
+      .slice(0, limit)
+      .map((n) => ({
+        // Seconds, not milliseconds. Multiplying is the difference between
+        // 2026 and 1970, and a date of 1970 in the panel would look like a
+        // data problem in this app rather than a unit mistake.
+        datetime: new Date((n.datetime ?? 0) * 1000).toISOString(),
+        headline: String(n.headline),
+        source: String(n.source ?? "unknown"),
+        url: String(n.url),
+        summary: n.summary ? String(n.summary) : null,
+      }));
+  });
+}

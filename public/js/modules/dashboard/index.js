@@ -8,6 +8,7 @@ import {
   renderTableRows,
   renderExchangeOptions,
   renderTickerDetail,
+  renderTickerNews,
   sortPositions,
   filterPositions,
 } from "./render.js";
@@ -210,6 +211,25 @@ function errorBanner(message) {
 }
 
 /**
+ * Adds the headlines panel once it arrives.
+ *
+ * Deliberately fire-and-forget: it checks the dialog is still showing the same
+ * ticker before appending, because opening NVDA and then quickly opening TSLA
+ * would otherwise drop NVDA's headlines into TSLA's dialog when the slower
+ * request landed.
+ */
+async function loadTickerNews(symbol) {
+  let payload;
+  try {
+    payload = await api.fetchTickerNews(symbol);
+  } catch (err) {
+    payload = { error: err.message };
+  }
+  if (state.detailSymbol !== symbol) return;
+  els.detailBody.append(renderTickerNews(payload));
+}
+
+/**
  * Fetches the ticker's price history, then shows how to research it.
  *
  * The app backfills history on demand and nothing had ever demanded it: 117 of
@@ -322,6 +342,12 @@ async function openDetailFor(symbol) {
     const detail = await api.fetchTickerDetail(symbol);
     state.detailData = detail;
     els.detailBody.innerHTML = renderTickerDetail(detail);
+
+    // Appended after the dialog has already rendered, not awaited alongside
+    // the detail fetch. Finnhub is a network call to a third party and the
+    // rest of the dialog does not depend on it -- blocking the whole panel on
+    // it would make a slow news API look like a slow app.
+    loadTickerNews(symbol);
   } catch (err) {
     els.detailBody.replaceChildren(errorBanner(err.message));
   }

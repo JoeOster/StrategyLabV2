@@ -19,5 +19,8 @@ export const fetchTickerDetail = (symbol, days = 180) =>
 export const refreshPrices = () =>
   fetch("/api/check-alerts", { method: "POST" }).then(handleResponse);
 
+export const fetchTickerNews = (symbol) =>
+  fetch(`/api/ticker/${encodeURIComponent(symbol)}/news`).then(handleResponse);
+
 export const refreshTicker = (symbol) =>
   fetch(`/api/ticker/${encodeURIComponent(symbol)}/refresh`, { method: "POST" }).then(handleResponse);

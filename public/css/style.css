@@ -938,3 +938,23 @@ dialog input, dialog select, dialog textarea {
   background: color-mix(in srgb, currentColor 10%, transparent);
   font-weight: 600;
 }
+
+/* Recent headlines in the ticker dialog. */
+.ticker-news { margin-top: 1rem; }
+.ticker-news h4 { margin: 0 0 0.4rem; }
+.news-list { list-style: none; margin: 0; padding: 0; }
+.news-list li {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr auto;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.news-date, .news-source {
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.news-list a { text-decoration: none; }
+.news-list a:hover { text-decoration: underline; }

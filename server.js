@@ -49,6 +49,7 @@ const alertsSvc = await import("./services/alertsService.js");
 const efficiencySvc = await import("./services/efficiencyService.js");
 const benchmarkSvc = await import("./services/benchmarkService.js");
 const priceService = await import("./services/priceService.js");
+const finnhub = await import("./services/providers/finnhubProvider.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -1013,6 +1014,37 @@ app.post("/api/ticker/:symbol/refresh", async (req, res) => {
   } catch (err) {
     console.error(`Refresh failed for ${req.params.symbol}:`, err);
     res.status(502).json({ error: err.message });
+  }
+});
+
+// Recent headlines for a ticker.
+//
+// Cached in memory for fifteen minutes rather than in a table. News is
+// ephemeral -- nothing in this app reasons over yesterday's headlines, and a
+// news_cache table would be a schema change carrying rows nobody reads twice.
+// A Map that dies with the process is the honest size of the problem.
+//
+// The cache also protects the free tier: opening the same ticker dialog five
+// times in a minute is one Finnhub call, not five.
+const newsCache = new Map();
+const NEWS_TTL_MS = 15 * 60 * 1000;
+
+app.get("/api/ticker/:symbol/news", async (req, res) => {
+  const symbol = String(req.params.symbol).trim().toUpperCase();
+  const hit = newsCache.get(symbol);
+  if (hit && Date.now() - hit.at < NEWS_TTL_MS) {
+    return res.json({ symbol, fetchedAt: new Date(hit.at).toISOString(), cached: true, news: hit.news });
+  }
+  try {
+    const news = await finnhub.getCompanyNews(symbol, { days: 14, limit: 12 });
+    newsCache.set(symbol, { at: Date.now(), news });
+    res.json({ symbol, fetchedAt: new Date().toISOString(), cached: false, news });
+  } catch (err) {
+    // A news failure must not look like a broken ticker. Finnhub is optional
+    // and the rest of the dialog does not depend on it, so this reports the
+    // reason and the panel says so rather than the dialog failing.
+    console.error(`News fetch failed for ${symbol}:`, err.message);
+    res.status(502).json({ error: err.message, symbol });
   }
 });
 

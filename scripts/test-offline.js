@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 772;
+const MIN_EXPECTED_CHECKS = 780;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4687,5 +4687,39 @@ console.log("\n42. Price history is fetched, not merely fetchable");
   check("...without changing the range window", windowed.range.bar_count === filled.range.bar_count);
   check("...so the 52-week range is unaffected by the chart window", windowed.range.low_52w === 50);
 }
+
+// ---------------------------------------------------------------------------
+console.log("\n43. News links are somebody else's URLs");
+// The news panel is the first place this app renders content it did not
+// produce. Most of its safety is STRUCTURAL -- it builds nodes and sets
+// textContent, which cannot be talked into parsing markup whatever a headline
+// contains -- and structural safety is not worth testing against a faked DOM,
+// because the fake would be what is under test.
+//
+// The link check is different. It is a decision, it can be got wrong, and
+// getting it wrong turns a headline into a click-to-run script.
+{
+  const { isSafeNewsUrl } = await import("../public/js/modules/dashboard/render.js");
+
+  check("An ordinary https link is followable", isSafeNewsUrl("https://example.com/a"));
+  check("...and http, since plenty of feeds still use it", isSafeNewsUrl("http://example.com/a"));
+
+  check("javascript: is refused", !isSafeNewsUrl("javascript:alert(1)"));
+  check("...whatever its casing", !isSafeNewsUrl("JavaScript:alert(1)"));
+  // A prefix check on the raw string passes the next two. Parsing does not,
+  // which is why this parses rather than pattern-matches.
+  check("...with leading whitespace", !isSafeNewsUrl("  javascript:alert(1)"));
+  check("...with an embedded tab", !isSafeNewsUrl("java\tscript:alert(1)"));
+  check("data: is refused", !isSafeNewsUrl("data:text/html,<script>alert(1)</script>"));
+  check("vbscript: is refused", !isSafeNewsUrl("vbscript:msgbox(1)"));
+  check("file: is refused", !isSafeNewsUrl("file:///etc/passwd"));
+
+  check("A relative path is not a link", !isSafeNewsUrl("/local/thing"));
+  check("Nonsense is not a link", !isSafeNewsUrl("not a url"));
+  check("Nothing at all is not a link", !isSafeNewsUrl(null) && !isSafeNewsUrl(undefined));
+  check("Neither is a non-string", !isSafeNewsUrl(42) && !isSafeNewsUrl({}));
+}
+
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
