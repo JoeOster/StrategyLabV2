@@ -1271,3 +1271,57 @@ measures. A forecast bolted on would be a fourth opinion competing with the
 three already here, and unmeasurable until it had been traded for months. If it
 is ever wanted, the right shape is a SOURCE whose calls get logged and scored
 like any other -- which needs no new code at all.
+
+### 7. Move alerts, announced through Becca
+
+Joe: *"hey dummy dropped 20%"* / *"hey X on the watchlist is blowing up"*.
+
+**This is a different trigger from everything built.** Every alert in the app
+today fires on a level named in advance -- a buy limit, a take-profit rung, a
+stop. This one needs no plan at all: it is magnitude, not a target. A stock
+moving 20% is worth knowing about precisely when you had no view on it.
+
+That makes it the first alert that can fire on a ticker with nothing set up,
+which is also what makes it useful -- the positions that hurt are rarely the
+ones being watched closely.
+
+**What it would need:**
+
+- A percentage threshold, probably two: one for held positions, a looser one
+  for watchlist-only tickers. The move is against the previous close, which
+  `quotes_cache` already stores as `prev_close` alongside `last_price`.
+- **Once per ticker per day.** The poller runs every fifteen minutes, so a
+  stock that crosses the threshold at 10:00 would announce itself twenty-four
+  more times before the close. This is the whole difficulty of the feature and
+  everything else is easy. The `alerts` table already carries `triggered_at`,
+  so the check is "has this ticker already fired a move alert today".
+- Market hours only, which `isMarketOpen()` now answers correctly including
+  holidays.
+- A magnitude that has to be crossed going OUT, not re-announced while it sits
+  there. A stock down 22% at 10:00 and down 21% at 14:00 has not done anything
+  new.
+
+**Delivery: emit structured data, never prose.** StrategyLab should post
+`{symbol, changePercent, lastPrice, prevClose, positionValue, unrealizedDelta}`
+to the webhook and let Becca decide how to say it. Two reasons, and the second
+matters more than it looks. Voice phrasing belongs to the thing that speaks --
+the same alert reads differently at 09:35 than at 15:55, and Becca knows that
+context while this app does not. And the app's own rule is that outcome data
+lives in queryable columns rather than prose; a sentence is exactly the format
+that cannot later be grouped, counted or measured.
+
+**The webhook is already built** -- `alert_webhook_url` and its optional auth
+header, currently PARKED because it needs Joe's Home Assistant token. This
+feature is the reason to un-park it, and the honest sequencing is: build the
+detector first, watch it fire into the notifications tab for a week, and only
+then point it at a voice that will interrupt him. An announcement that turns
+out to be noisy is much more annoying than a row in a list that turns out to
+be noisy.
+
+**Worth deciding before building:** whether a move alert should be a
+`watched_items` row with a new order type, or its own thing. It has no target
+prices, no quantity and no plan, so forcing it into `watched_items` would mean
+a row where most columns are null -- which is how `escape_price` ended up
+stored in one place and evaluated in none (BUG 10). A separate small table, or
+a settings-level threshold applied to everything held or watched, is probably
+cleaner than a per-ticker row.
