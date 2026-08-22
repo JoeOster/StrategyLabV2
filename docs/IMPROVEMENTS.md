@@ -58,12 +58,11 @@ Nothing on this list is a defect. They are decisions and unbuilt features.
 
 ### Needs Joe, not code
 
-- **The alert webhook** is unset. It needs a Home Assistant URL and token, and
-  entering credentials on someone's behalf is not something to do even when
-  handed them directly -- his own session rule, and it still holds.
-- **Attribution.** One source, one strategy, one attributed trade, and 37 open
-  lots with no plan. The efficiency and benchmark reports are complete and have
-  nothing to describe. No further code changes that.
+- ~~**The alert webhook**~~ -- **parked by Joe on 2026-08-21.** Maybe pile.
+  Deliberate, not forgotten. Do not list it as open again unless he raises it.
+- **Attribution.** The efficiency and benchmark reports are complete and fill
+  in as plans and sources get attached to trades. Joe knows; it has been said
+  more than once and does not need saying again.
 
 ### Small, and genuinely unbuilt
 

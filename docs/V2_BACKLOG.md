@@ -545,7 +545,15 @@ a faked DOM the fake would be what was under test.
 
 ---
 
-## Wire the alert webhook up for real (HA + Becca)
+## Wire the alert webhook up for real (HA + Becca) -- PARKED (Joe, 2026-08-21)
+
+**Maybe pile.** Joe parked this deliberately; it is not an oversight and should
+not be raised as an open item again. There is nothing to build in this repo
+either way -- the mechanism and its auth header are done, and what remains is
+Joe typing his own credentials plus a service in a different project.
+
+Un-park it if he asks. The detail below is kept so nobody has to work it out
+twice.
 
 The webhook mechanism and its optional auth header are both built (see
 STATUS.md's "Scheduled alerts + webhook delivery" section, "Where this
