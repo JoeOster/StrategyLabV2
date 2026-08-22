@@ -42,10 +42,25 @@ genuinely cannot run a chat skill -- that is the design, not a gap -- so the
 honest thing is to hand over the phrase rather than pretend or stay "coming
 soon" indefinitely. Pressing it again dismisses the panel.
 
-**Known limit worth stating.** Most tickers have no stored price history: the
-app backfills on demand and only SPY has been filled. The skill checks for an
-empty `series` and says so rather than treating missing history as a flat
-chart, and knows the one call that fixes it.
+**The button also fetches history**, which turned out to matter more than the
+hint text. `backfillSecurityHistory` has always pulled two years on a first
+fetch and nothing ever called it: 117 of 118 securities had no stored prices,
+so every ticker dialog drew an empty chart and reported no 52-week range, and
+the benchmark had exactly one security it could measure against. The capability
+existed the whole time and was simply never asked for.
+
+Two years rather than the six months requested, because that is the existing
+first-fetch default and because six months cannot fill a 52-WEEK range -- the
+shorter window would leave the figure most worth having still blank.
+
+Fetched only when there is none. Topping up is what the dialog's own Refresh
+button is for, and doing it here as well would be two controls quietly
+competing over the same job.
+
+`npm run db:backfill-history` does the same in bulk, defaulting to currently
+held securities and taking `--all` and `--dry-run`. Run once on the live data:
+23 held securities, 501 bars each except KLAR at 238 (a recent listing), none
+failed. Every open position now has a 52-week range.
 
 ---
 

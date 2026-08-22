@@ -29,6 +29,9 @@ const state = {
   sortKey: "symbol",
   sortDir: "asc",
   detailSymbol: null,
+  // The payload behind the open dialog, so the Research button can tell
+  // whether this ticker has any stored price history without re-fetching.
+  detailData: null,
 };
 
 const els = {};
@@ -206,33 +209,76 @@ function errorBanner(message) {
 }
 
 /**
- * Shows how to research the ticker currently open.
+ * Fetches the ticker's price history, then shows how to research it.
  *
- * The button cannot DO the research: it is a Claude skill invoked in a chat
- * session, which is the deliberate design -- no API key, no per-call cost, no
- * LLM code in a two-dependency app. So the honest thing for a button in the
- * web UI is to hand over the exact phrase, with the ticker already filled in,
- * rather than either pretending or saying "coming soon" forever.
+ * The app backfills history on demand and nothing had ever demanded it: 117 of
+ * 118 securities had no stored prices at all, so the detail dialog drew no
+ * chart and reported no 52-week range for almost everything in the portfolio.
+ * The capability existed and was simply never called.
+ *
+ * Two years rather than the six months this was asked for, because that is
+ * what backfillSecurityHistory already fetches on a first pull and because six
+ * months cannot fill a 52-WEEK range -- the shorter window would leave the very
+ * figure most worth having still blank.
+ *
+ * Only fetched when there is none. An incremental top-up is what the dialog's
+ * own Refresh button is for, and doing it here too would mean two controls
+ * quietly competing to do the same job.
  */
-function showResearchHint() {
+async function showResearchHint() {
   const symbol = state.detailSymbol;
   if (!symbol) return;
+
   const existing = els.detailBody.querySelector(".research-hint");
   if (existing) return existing.remove(); // pressing it again closes it
 
+  const hasHistory = (state.detailData?.series?.length ?? 0) > 0;
+  if (!hasHistory) {
+    els.researchBtn.disabled = true;
+    els.researchBtn.textContent = "Fetching history…";
+    try {
+      await api.refreshTicker(symbol);
+      // Re-open rather than patch the DOM: the chart, the 52-week bar and the
+      // range figures all derive from the series, and rebuilding them by hand
+      // would be a second renderer to keep in step with the first.
+      await openDetailFor(symbol);
+    } catch (err) {
+      els.detailBody.prepend(errorBanner(`Could not fetch history for ${symbol}: ${err.message}`));
+    } finally {
+      els.researchBtn.disabled = false;
+      els.researchBtn.textContent = "Research";
+    }
+  }
+
+  renderResearchHint(symbol, state.detailData);
+}
+
+/**
+ * The phrase to use, with the ticker filled in.
+ *
+ * The button cannot DO the research: it is a Claude skill invoked in a chat
+ * session, which is the design rather than a gap -- no API key, no per-call
+ * cost, no LLM code in a two-dependency app. So the honest thing for a button
+ * in a web page is to hand over the exact phrase.
+ */
+function renderResearchHint(symbol, detail) {
+  const bars = detail?.series?.length ?? 0;
   const panel = document.createElement("div");
   panel.className = "research-hint";
+
   // textContent throughout: symbol reaches here from a URL parameter, and this
   // is the same path BUG 9 was about.
   const p = document.createElement("p");
-  p.textContent = `Research runs as a Claude skill, not in the browser. In a Claude Code session on this project, say:`;
+  p.textContent = "Research runs as a Claude skill, not in the browser. In a Claude Code session on this project, say:";
   const code = document.createElement("code");
   code.textContent = `research ${symbol}`;
+
   const note = document.createElement("p");
   note.className = "panel-hint";
-  note.textContent =
-    "It reads this app's own record of the ticker — your position, cost basis and targets — " +
-    "then searches the web, and keeps the two clearly apart in what it writes back.";
+  note.textContent = bars
+    ? `It reads this app's record of ${symbol} — your position, cost basis, targets, and the ${bars} days of price history now stored — then searches the web, keeping the two clearly apart.`
+    : `It reads this app's record of ${symbol} — your position, cost basis and targets — then searches the web, keeping the two clearly apart. No price history could be fetched for this ticker.`;
+
   panel.append(p, code, note);
   els.detailBody.prepend(panel);
 }
@@ -244,6 +290,7 @@ async function openDetailFor(symbol) {
   els.detailDialog.showModal();
   try {
     const detail = await api.fetchTickerDetail(symbol);
+    state.detailData = detail;
     els.detailBody.innerHTML = renderTickerDetail(detail);
   } catch (err) {
     els.detailBody.replaceChildren(errorBanner(err.message));

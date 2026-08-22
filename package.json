@@ -14,7 +14,8 @@
     "db:migrate": "node scripts/migrate.js",
     "smoke:watchlist": "node scripts/smoke-test-watchlist.js",
     "test:offline": "node scripts/test-offline.js",
-    "db:backfill-asset-types": "node scripts/backfill-asset-types.js"
+    "db:backfill-asset-types": "node scripts/backfill-asset-types.js",
+    "db:backfill-history": "node scripts/backfill-history.js"
   },
   "license": "ISC",
   "dependencies": {

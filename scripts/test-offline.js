@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 760;
+const MIN_EXPECTED_CHECKS = 772;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4629,6 +4629,63 @@ console.log("\n41. Market holidays are computed, not listed");
   check("...closed on an observed holiday", !sch.isMarketOpen(new Date("2026-07-03T15:00:00Z")));
   check("...still closed at the weekend", !sch.isMarketOpen(new Date("2026-08-22T15:00:00Z")));
   check("...and still closed after 4pm ET", !sch.isMarketOpen(new Date("2026-08-21T21:30:00Z")));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n42. Price history is fetched, not merely fetchable");
+// backfillSecurityHistory has always pulled two years on a first fetch. Nothing
+// ever called it: 117 of 118 securities had no stored prices, so every ticker
+// dialog drew an empty chart and reported no 52-week range, and the benchmark
+// had exactly one security it could measure against. The capability existed
+// the whole time and was simply never asked for.
+{
+  const { getTickerDetail } = await import("../services/tickerDetailService.js");
+  const exId = db.prepare("SELECT id FROM exchanges LIMIT 1").get().id;
+  const sec = db
+    .prepare("INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('HISTX', ?, 'History Probe', 'manual') RETURNING *")
+    .get(exId);
+
+  const bare = getTickerDetail(holder.id, "HISTX");
+  check("With no stored bars the series is empty", bare.series.length === 0);
+  // The distinction the dialog depends on: no history is UNKNOWN, and must not
+  // render as a flat line at today's price or a range of zero.
+  check("...and the 52-week low is null, not zero", bare.range.low_52w === null);
+  check("...and the high too", bare.range.high_52w === null);
+  check("...and position-in-range is null, not 0%", bare.range.position_percent === null);
+  check("...and the bar count says so", bare.range.bar_count === 0);
+
+  // Fill 400 sessions ending today and the derived figures appear.
+  //
+  // Two details the first version of this test got wrong, both of which the
+  // real code depends on: the range is MIN(low)/MAX(high), not close -- a bar
+  // with only a close leaves it null -- and the window is 52 weeks back from
+  // NOW, so bars that stop six months ago fall outside it entirely.
+  const insert = db.prepare(
+    "INSERT INTO historical_prices (security_id, date, open, high, low, close, source) VALUES (?, ?, ?, ?, ?, ?, 'yahoo')",
+  );
+  const today = Date.UTC(2026, 7, 21);
+  for (let i = 399; i >= 0; i--) {
+    const d = new Date(today - i * 86400000).toISOString().slice(0, 10);
+    // A deterministic saw between 50 and 150, so the extremes are known.
+    const close = 50 + ((399 - i) % 101);
+    insert.run(sec.id, d, close, close, close, close);
+  }
+
+  const filled = getTickerDetail(holder.id, "HISTX", { seriesDays: 3650 });
+  check("Once filled, the series is returned", filled.series.length === 400);
+  check("The 52-week low is derived from the bars", filled.range.low_52w === 50);
+  check("...and the high", filled.range.high_52w === 150);
+  // Fewer than the 400 stored: the range deliberately looks back one year, so
+  // the older bars are present in the series and outside the range.
+  check("...over a one-year window, not everything stored", filled.range.bar_count < 400 && filled.range.bar_count > 300);
+
+  // The chart window is a VIEW, not the extent of what is stored -- 501 bars
+  // stored and 126 shown is correct, and reading the window as the whole
+  // history is how "we only got six months" gets concluded wrongly.
+  const windowed = getTickerDetail(holder.id, "HISTX", { seriesDays: 30 });
+  check("A short window returns fewer bars", windowed.series.length < filled.series.length);
+  check("...without changing the range window", windowed.range.bar_count === filled.range.bar_count);
+  check("...so the 52-week range is unaffected by the chart window", windowed.range.low_52w === 50);
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
