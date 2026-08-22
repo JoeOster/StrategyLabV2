@@ -7,8 +7,14 @@ up cold, including the open questions that would need answering first.
 
 ## Ticker research skill -- BUILT 2026-08-21
 
-`.claude/skills/ticker-research/SKILL.md`. Invoked in a Claude Code session on
-this project: "research NVDA".
+**Installed at `C:/Users/stree/.claude/skills/ticker-research/SKILL.md`**, on
+Joe's Windows machine -- NOT in this repo. A copy is kept here for reference,
+but the repo copy is inert: it lives on the NUC, and Claude Code sessions run
+from `C:\Projects`, so a skill inside `~/StrategyLabV2/.claude/` would never
+be loaded by anything. Putting it there first was a mistake worth recording,
+because the skill appeared complete and could not have run.
+
+Invoked by saying "research NVDA" to Claude in any session.
 
 It reads `GET /api/ticker/:symbol` over SSH first -- position, cost basis,
 lots, targets, trade history, stored price series -- and only then searches the

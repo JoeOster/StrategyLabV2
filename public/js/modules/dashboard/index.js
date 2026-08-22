@@ -276,15 +276,21 @@ function renderResearchHint(symbol, detail) {
   // textContent throughout: symbol reaches here from a URL parameter, and this
   // is the same path BUG 9 was about.
   const p = document.createElement("p");
-  p.textContent = "Research runs as a Claude skill, not in the browser. In a Claude Code session on this project, say:";
+  // Says what to DO, in the words the user would use.
+  //
+  // It first read "In a Claude Code session on this project, say:" which told
+  // Joe nothing -- he does not think of himself as being "on this project",
+  // he is simply talking to Claude, and the phrasing implied a setup step that
+  // does not exist. The instruction is: type this at Claude.
+  p.textContent = "Ask Claude:";
   const code = document.createElement("code");
   code.textContent = `research ${symbol}`;
 
   const note = document.createElement("p");
   note.className = "panel-hint";
   note.textContent = bars
-    ? `It reads this app's record of ${symbol} — your position, cost basis, targets, and the ${bars} days of price history now stored — then searches the web, keeping the two clearly apart.`
-    : `It reads this app's record of ${symbol} — your position, cost basis and targets — then searches the web, keeping the two clearly apart. No price history could be fetched for this ticker.`;
+    ? `Claude reads your position in ${symbol} — shares, cost basis, targets and ${bars} days of price history — then searches the web, and reports the two separately. The browser cannot do this itself.`
+    : `Claude reads your position in ${symbol} — shares, cost basis and targets — then searches the web, and reports the two separately. No price history could be fetched for this ticker.`;
 
   panel.append(p, code, note);
 
