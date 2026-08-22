@@ -1318,10 +1318,18 @@ then point it at a voice that will interrupt him. An announcement that turns
 out to be noisy is much more annoying than a row in a list that turns out to
 be noisy.
 
-**Worth deciding before building:** whether a move alert should be a
-`watched_items` row with a new order type, or its own thing. It has no target
-prices, no quantity and no plan, so forcing it into `watched_items` would mean
-a row where most columns are null -- which is how `escape_price` ended up
-stored in one place and evaluated in none (BUG 10). A separate small table, or
-a settings-level threshold applied to everything held or watched, is probably
-cleaner than a per-ticker row.
+**DECIDED (Joe, 2026-08-21): global settings, two thresholds.** Not a
+per-ticker row. One threshold for watchlist tickers and a separate one for
+positions actually held, because they are different questions -- a 20% move on
+something being watched is news, and the same move on something owned is a
+change in what he has. He will want to hear about the second sooner.
+
+That means two keys in `app_settings` alongside the existing whitelist,
+something like `move_alert_percent_orders` and `move_alert_percent_watchlist`,
+with an empty value meaning off -- the same convention `alert_webhook_url`
+already uses for "not configured".
+
+This also avoids the trap the per-ticker version would have walked into. A move
+alert has no target price, no quantity and no plan, so a `watched_items` row
+for one would be mostly null columns -- which is precisely how `escape_price`
+ended up stored in one place and evaluated in none (BUG 10).
