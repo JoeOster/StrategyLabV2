@@ -6,10 +6,33 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const TEST_DB_PATH = path.join(process.cwd(), "data", "strategy_lab.test-offline.db");
+// Unique per run, not a fixed filename.
+//
+// It was fixed, and two suites started within a second of each other -- a
+// manual run racing the pre-commit hook, which is exactly how it happened --
+// shared one database file. The second run's setup deleted the first run's
+// tables mid-flight, and the first reported two failures that were nothing to
+// do with the code. A suite that fails for reasons outside itself is worse
+// than one that fails honestly: it teaches you to re-run rather than to look.
+const TEST_DB_PATH = path.join(
+  process.cwd(),
+  "data",
+  `strategy_lab.test-offline.${process.pid}.db`,
+);
 fs.mkdirSync(path.dirname(TEST_DB_PATH), { recursive: true });
 fs.rmSync(TEST_DB_PATH, { force: true });
 process.env.DB_PATH = TEST_DB_PATH;
+
+// Removed however the process ends, including a failing run and a Ctrl-C, so
+// per-run filenames do not turn into a pile of stale databases.
+for (const signal of ["exit", "SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      fs.rmSync(TEST_DB_PATH + suffix, { force: true });
+    }
+    if (signal !== "exit") process.exit(1);
+  });
+}
 
 const { default: db } = await import("../lib/db.js");
 const schema = fs.readFileSync(path.join(process.cwd(), "schema.sql"), "utf8");
@@ -56,7 +79,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 814;
+const MIN_EXPECTED_CHECKS = 832;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4876,6 +4899,91 @@ console.log("\n45. A ticker's lifetime result, above its trade history");
 
   check("No trades at all renders no summary",
     !renderTickerDetail(detail({ trades: [] })).includes("lifetime-summary"));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n46. Patterns in your own trading");
+// This exists because of an accident. A research brief on KTOS mentioned in
+// passing that there had been seven sells, every one at a loss, stepping down
+// from $94.31 to $48.90, with no plan on record. Nothing in the app had ever
+// said that and nothing would have: Orders shows what is held, history shows
+// what was done, and neither answers "what do I keep doing".
+//
+// Joe: "seeing patterns like that is what this is all about."
+{
+  const p = await import("../services/patternsService.js");
+
+  const sale = (symbol, pnl, date, buyDate) => ({
+    symbol, realized_pnl: pnl, transaction_date: date,
+    linked_buy_date: buyDate ?? date, voided_at: null,
+  });
+
+  // --- repeated losses ----------------------------------------------------
+  const repeats = p.repeatedLosses([
+    sale("BAD", -100, "2026-01-01"), sale("BAD", -200, "2026-02-01"),
+    sale("BAD", -300, "2026-03-01"), sale("BAD", -400, "2026-04-01"),
+    sale("OK", -100, "2026-01-01"), sale("OK", 500, "2026-02-01"),
+    sale("OK", 300, "2026-03-01"), sale("OK", 200, "2026-04-01"),
+    sale("FEW", -100, "2026-01-01"), sale("FEW", -200, "2026-02-01"),
+  ]);
+  check("A name lost on repeatedly is found", repeats.some((r) => r.symbol === "BAD"));
+  check("...with the total it cost", repeats.find((r) => r.symbol === "BAD").net === -1000);
+  check("...and the worst single sale", repeats.find((r) => r.symbol === "BAD").worst === -400);
+  check("A mostly-profitable name is not listed", !repeats.some((r) => r.symbol === "OK"));
+  // Two bad trades is a bad week, not a habit. The threshold is what stops
+  // this table filling with noise the moment anything goes wrong.
+  check("Two losses is not yet a pattern", !repeats.some((r) => r.symbol === "FEW"));
+  check("Worst first", repeats[0].symbol === "BAD");
+
+  // A name that lost money four times but made it back once, ending positive,
+  // is not a name that keeps costing you.
+  const recovered = p.repeatedLosses([
+    sale("BACK", -100, "2026-01-01"), sale("BACK", -100, "2026-02-01"),
+    sale("BACK", -100, "2026-03-01"), sale("BACK", 500, "2026-04-01"),
+  ]);
+  check("A name that ended up ahead is excluded", recovered.length === 0);
+
+  // --- win/loss shape -----------------------------------------------------
+  const shape = p.winLossShape([
+    sale("A", 100, "2026-01-01"), sale("A", 100, "2026-01-02"),
+    sale("A", 100, "2026-01-03"), sale("A", -200, "2026-01-04"),
+  ]);
+  check("Win rate counts closed sales", Math.abs(shape.winRate - 0.75) < 1e-9);
+  check("Average win", shape.avgWin === 100);
+  check("Average loss keeps its sign", shape.avgLoss === -200);
+  check("Payoff ratio is win over loss, unsigned", Math.abs(shape.payoffRatio - 0.5) < 1e-9);
+  // The number the other three decide, and the reason they are shown together:
+  // a 75% win rate with a 0.5 payoff is still only $25 a trade.
+  check("Expectancy combines rate and size", Math.abs(shape.expectancy - 25) < 1e-9);
+  check("A losing edge reads negative",
+    p.winLossShape([sale("A", 10, "2026-01-01"), sale("A", -100, "2026-01-02")]).expectancy < 0);
+  check("No sales at all yields nothing rather than zeros", p.winLossShape([]) === null);
+  check("With no losses the payoff ratio is null, not Infinity",
+    p.winLossShape([sale("A", 10, "2026-01-01")]).payoffRatio === null);
+
+  // --- holding periods ----------------------------------------------------
+  const hp = p.holdingPeriods([
+    sale("A", 100, "2026-01-11", "2026-01-01"),  // winner, 10 days
+    sale("A", 100, "2026-01-21", "2026-01-01"),  // winner, 20 days
+    sale("A", -100, "2026-01-06", "2026-01-01"), // loser, 5 days
+  ]);
+  check("Winners and losers are timed separately", hp.avgWinnerDays === 15 && hp.avgLoserDays === 5);
+  // Negative means winners held longer, which is the opposite of the commonly
+  // described pattern -- and is what this ledger actually shows.
+  check("The difference is losers minus winners", hp.differenceDays === -10);
+  check("One-sided data yields no comparison",
+    p.holdingPeriods([sale("A", 100, "2026-01-11", "2026-01-01")]) === null);
+
+  // --- same-day -----------------------------------------------------------
+  const sd = p.sameDayTrades([
+    sale("A", 100, "2026-01-01", "2026-01-01"),
+    sale("B", -50, "2026-01-02", "2026-01-02"),
+    sale("C", 200, "2026-01-10", "2026-01-01"),
+  ]);
+  check("Same-day round trips are counted", sd.count === 2);
+  check("...with their net, not just a count", sd.net === 50);
+  check("...and the tickers involved", sd.symbols.join(",") === "A,B");
+  check("None yields null rather than an empty shell", p.sameDayTrades([sale("C", 1, "2026-01-10", "2026-01-01")]) === null);
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

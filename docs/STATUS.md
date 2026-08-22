@@ -1716,3 +1716,52 @@ Claude Code was already installed and authenticated on the NUC; `which claude`
 only failed because `~/.npm-global/bin` was missing from the non-interactive
 PATH. The service names it explicitly rather than depending on how systemd
 started it.
+
+## Patterns (2026-08-21)
+
+Built because of an accident. A research brief on KTOS mentioned in passing
+that there had been seven sells, every one at a loss, stepping down from $94.31
+to $48.90, with no plan on record. Nothing in the app had ever said that and
+nothing would have: Orders shows what is held, history shows what was done, and
+neither answers **what do I keep doing**.
+
+Joe: "seeing patterns like that is what this is all about."
+
+`services/patternsService.js`, `GET /api/patterns`, Patterns tab. Five
+detectors over the trade ledger, all following the rule the rest of the app
+follows: **state the fact, recommend nothing.** "Your average loss is 19%
+larger than your average win" is arithmetic about what happened. "Cut your
+losses sooner" is advice, and this app has never given any.
+
+What it found on the real ledger, over 540 closed sales from 2025-04-04:
+
+| | |
+| --- | --- |
+| Win rate | **57.2%** (307 up, 230 down) |
+| Average win | $156.27 |
+| Average loss | $186.72 |
+| Payoff ratio | **0.84** — losses are bigger |
+| Expectancy | **+$9.36** per closed trade |
+
+The win rate and the payoff ratio pull in opposite directions, which is why
+they are shown together with the figure they decide. Winning 57% of the time
+sounds like an edge; it comes to nine dollars a trade.
+
+**Names that keep costing**: ten of them. SOUN −$3,249.45 across 15 losses in
+17 sales, KTOS −$2,642.79 with every one of seven a loss, then SLV, JOBY, SYM,
+SMCI and others. Four sales minimum and 70% at a loss, so a bad week does not
+qualify and a name that recovered is excluded.
+
+**Holding periods contradict the textbook.** The commonly described pattern is
+holding losers too long; this ledger holds winners 17.6 days and losers 14.3.
+Reported plainly rather than explained away — it is a fact about this trader,
+not about a study of other people, and computing it beat assuming it.
+
+**Same-day round trips**: 47 of them, 8.7% of all sales, net **+$2,312.52**.
+Counted separately because it is a different activity from holding something
+and mixing the two hides both.
+
+**37 open lots with no plan**, $30,815.03 of cost basis. Not a criticism — a
+trade can exist without a plan by explicit design. It is there because the app
+cannot measure an exit against an intention nobody recorded, and those 37 are
+the gap between what this app can measure and what it currently has to.

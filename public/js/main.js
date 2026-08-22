@@ -8,6 +8,7 @@ import { initializeAlertsModule } from "./modules/alerts/index.js";
 import { initPlansUi } from "./modules/plans/dialog.js";
 import { initializeNotificationsModule, reloadNotificationsView } from "./modules/notifications/index.js";
 import { initializeEfficiencyModule, reloadEfficiencyView } from "./modules/efficiency/index.js";
+import { initializePatternsModule, reloadPatternsView } from "./modules/patterns/index.js";
 import { initializeImportsModule, reloadImportsView } from "./modules/imports/index.js";
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -26,6 +27,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       onChange: () => Promise.all([reloadOrdersView(), reloadDashboardView()]),
     });
     await initializeEfficiencyModule();
+    await initializePatternsModule();
     // Deciding on an alert IS the event this report measures, so it reloads
     // alongside the position views rather than waiting for a tab switch.
     await initializeNotificationsModule({
@@ -66,6 +68,7 @@ function setupViewSwitching() {
     journal: document.getElementById("view-journal"),
     papertrade: document.getElementById("view-papertrade"),
     imports: document.getElementById("view-imports"),
+    patterns: document.getElementById("view-patterns"),
     efficiency: document.getElementById("view-efficiency"),
     notifications: document.getElementById("view-notifications"),
     settings: document.getElementById("view-settings"),
@@ -96,6 +99,7 @@ function setupViewSwitching() {
       else if (target === "papertrade") await reloadPaperTradeView();
       else if (target === "notifications") await reloadNotificationsView();
       else if (target === "efficiency") await reloadEfficiencyView();
+      else if (target === "patterns") await reloadPatternsView();
       else if (target === "imports") await reloadImportsView();
       else await reloadWatchlistView();
     });

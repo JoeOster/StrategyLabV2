@@ -17,6 +17,7 @@
         <button type="button" class="view-btn" data-view="journal">Journal</button>
         <button type="button" class="view-btn" data-view="papertrade">Paper Trade</button>
         <button type="button" class="view-btn" data-view="imports">Import</button>
+        <button type="button" class="view-btn" data-view="patterns">Patterns</button>
         <button type="button" class="view-btn" data-view="efficiency">Efficiency</button>
         <button type="button" class="view-btn" data-view="notifications">Notifications</button>
         <button type="button" class="view-btn" data-view="settings">Settings</button>
@@ -326,6 +327,57 @@
       <div id="import-pending"></div>
       <div id="import-currency"></div>
       <div id="import-preview"></div>
+    </main>
+  </section>
+
+  <section id="view-patterns" hidden>
+    <main>
+      <div id="patterns-banner" class="status-banner" hidden></div>
+
+      <div class="panel-head">
+        <h2>Patterns</h2>
+        <div class="sub-tabs">
+          <button type="button" class="sub-tab active" data-patterns-leg="real">Real trades</button>
+          <button type="button" class="sub-tab" data-patterns-leg="paper">Paper</button>
+        </div>
+      </div>
+
+      <div id="patterns-header"></div>
+
+      <div class="orders-panel">
+        <div class="panel-head"><h3>The shape of your trading</h3></div>
+        <div id="patterns-winloss"></div>
+      </div>
+
+      <div class="orders-panel">
+        <div class="panel-head"><h3>Names that keep costing you</h3></div>
+        <p class="panel-hint">
+          Tickers with four or more sales where most of them lost money. One loss is a trade;
+          the same name several times over is something the ledger can see and a transaction
+          list cannot.
+        </p>
+        <div class="table-scroll">
+          <table class="items-table">
+            <thead><tr id="patterns-repeat-head"></tr></thead>
+            <tbody id="patterns-repeat-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="orders-panel">
+        <div class="panel-head"><h3>How long you hold</h3></div>
+        <div id="patterns-holding"></div>
+      </div>
+
+      <div class="orders-panel">
+        <div class="panel-head"><h3>Same-day round trips</h3></div>
+        <div id="patterns-sameday"></div>
+      </div>
+
+      <div class="orders-panel">
+        <div class="panel-head"><h3>Positions with no plan</h3></div>
+        <div id="patterns-unplanned"></div>
+      </div>
     </main>
   </section>
 

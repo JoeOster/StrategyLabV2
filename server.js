@@ -51,6 +51,7 @@ const benchmarkSvc = await import("./services/benchmarkService.js");
 const priceService = await import("./services/priceService.js");
 const finnhub = await import("./services/providers/finnhubProvider.js");
 const research = await import("./services/researchService.js");
+const patterns = await import("./services/patternsService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -243,6 +244,12 @@ app.post("/api/benchmark/backfill", async (req, res) => {
     console.error("Benchmark backfill failed:", err);
     res.status(502).json({ error: err.message });
   }
+});
+
+// Patterns in the trader's own behaviour, from the trade ledger.
+app.get("/api/patterns", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  res.json(patterns.patternReport(holder.id, { isPaperTrade: req.query.paper === "1" }));
 });
 
 app.get("/api/alerts", (req, res) => {
