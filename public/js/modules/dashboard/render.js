@@ -172,6 +172,7 @@ export function renderTickerDetail(d) {
     ${
       d.trades.length > 0
         ? `<h3>Trade history</h3>
+           ${renderLifetimeSummary(d)}
            <table class="items-table detail-table">
              <thead><tr><th>Date</th><th>Type</th><th>Qty</th><th>Price</th><th>Realized P/L</th></tr></thead>
              <tbody>${d.trades
@@ -318,6 +319,77 @@ export function isSafeNewsUrl(url) {
     return false;
   }
   return parsed.protocol === "http:" || parsed.protocol === "https:";
+}
+
+/**
+ * What this ticker has actually done for you, across every transaction.
+ *
+ * The trade history listed each sale's realized P&L and never added them up,
+ * so a name sold at a loss seven times in a row looked like seven ordinary
+ * rows. The total was in the data the whole time and only surfaced when a
+ * research brief happened to mention it in passing -- which is not a thing to
+ * rely on.
+ *
+ * Three separate figures, kept separate on purpose:
+ *
+ *   REALIZED    booked on sales that have happened. A fact.
+ *   DIVIDENDS   income received. Also a fact, and easily forgotten -- it is
+ *               the part that quietly offsets a mediocre price result.
+ *   UNREALIZED  what is still open. Not money yet, and marked as such.
+ *
+ * The lifetime figure sums all three, because that is the honest answer to
+ * "how has this ticker treated me", and shows the split so the answer can be
+ * taken apart. A single number hiding $2,000 of dividends behind a price loss
+ * would be true and useless.
+ */
+function renderLifetimeSummary(d) {
+  const sales = d.trades.filter((t) => t.transaction_type === "SELL" && t.realized_pnl != null);
+  const realized = sales.reduce((sum, t) => sum + t.realized_pnl, 0);
+  const dividends = d.trades
+    .filter((t) => t.transaction_type === "DIVIDEND")
+    .reduce((sum, t) => sum + (t.price ?? 0), 0);
+  const unrealized = d.position?.unrealized_pnl ?? null;
+
+  const wins = sales.filter((t) => t.realized_pnl > 0).length;
+  const losses = sales.filter((t) => t.realized_pnl < 0).length;
+
+  // Two different reasons unrealized can be null, and they mean opposite
+  // things about the total.
+  //
+  //   Nothing is HELD -- there is no open position, so realized plus dividends
+  //   IS the whole story. SOUN, closed out across 33 trades, is this.
+  //
+  //   Something is held and nothing is PRICED -- the total is missing a piece
+  //   and has to say so, or it reads as complete when it is not.
+  //
+  // Collapsing the two would label a finished position "settled only", which
+  // implies more is coming when nothing is.
+  const holdsNothing = (d.position?.total_shares ?? 0) === 0;
+  const lifetime = realized + dividends + (unrealized ?? 0);
+  const partial = unrealized == null && !holdsNothing;
+
+  const cls = (v) => (v == null ? "" : v >= 0 ? "change-up" : "change-down");
+
+  // The record line only appears once there is a record to describe. "1 sale,
+  // 1 loss" is not a pattern and dressing it as one would be noise.
+  const record =
+    sales.length >= 3
+      ? `<span class="lifetime-record">${sales.length} sales · ${wins} up, ${losses} down</span>`
+      : "";
+
+  return `
+    <div class="lifetime-summary">
+      <div class="lifetime-total ${cls(lifetime)}">
+        <span class="lifetime-label">Lifetime${partial ? " (settled only)" : ""}</span>
+        <strong>${signedMoney(lifetime)}</strong>
+      </div>
+      <div class="lifetime-parts">
+        <span class="${cls(realized)}">realized ${signedMoney(realized)}</span>
+        ${dividends > 0 ? `<span class="change-up">dividends ${money(dividends)}</span>` : ""}
+        ${unrealized == null ? "" : `<span class="${cls(unrealized)}">open ${signedMoney(unrealized)}</span>`}
+        ${record}
+      </div>
+    </div>`;
 }
 
 /**

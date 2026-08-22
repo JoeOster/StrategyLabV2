@@ -986,3 +986,31 @@ dialog input, dialog select, dialog textarea {
   50%  { content: ".."; }
   75%  { content: "..."; }
 }
+
+/* Lifetime P&L for one ticker, above its trade history. The total is the
+   headline; the split below it is what makes the total checkable. */
+.lifetime-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 1rem;
+  padding: 0.5rem 0.7rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.lifetime-total { display: flex; align-items: baseline; gap: 0.45rem; }
+.lifetime-total strong { font-size: 1.15rem; }
+.lifetime-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.lifetime-parts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  font-size: 0.82rem;
+}
+.lifetime-record { color: var(--muted); }

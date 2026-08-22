@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 800;
+const MIN_EXPECTED_CHECKS = 814;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4794,6 +4794,88 @@ console.log("\n44. Research briefs are kept, and know what they were true of");
     try { research.runTickerResearch(bad); } catch (e) { refused = /not a ticker symbol/.test(e.message); }
     check(`Refuses ${JSON.stringify(bad)} as a symbol`, refused);
   }
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n45. A ticker's lifetime result, above its trade history");
+// The trade history listed each sale's realized P&L and never added them up,
+// so a name sold at a loss seven times running looked like seven ordinary
+// rows. The total existed in the data the whole time and surfaced only because
+// a research brief happened to mention it -- which is not a thing to rely on.
+{
+  const { renderTickerDetail } = await import("../public/js/modules/dashboard/render.js");
+
+  const detail = (over = {}) => ({
+    security: { symbol: "TEST", name: "Test Co", exchange_code: "NASDAQ", sector: null, industry: null, description: null, logo_url: null },
+    quote: { last_price: 50, prev_close: 51, change: -1, change_percent: -2, as_of: "2026-08-21T20:00:00Z", fetched_at: "2026-08-21 20:00:00" },
+    range: { low_52w: 40, high_52w: 100, position_percent: 16.7, bar_count: 251, first_date: "2025-08-22", last_date: "2026-08-21" },
+    series: [],
+    position: { total_shares: 10, total_cost: 600, total_value: 500, unrealized_pnl: -100, unrealized_pnl_percent: -16.7, lots: [] },
+    trades: [],
+    watchedItems: [],
+    dividends: [],
+    ...over,
+  });
+
+  const sell = (pnl, date) => ({
+    id: Math.random(), transaction_type: "SELL", transaction_date: date,
+    quantity: 10, price: 50, realized_pnl: pnl,
+  });
+
+  // The KTOS shape: every sale a loss.
+  const allLosses = renderTickerDetail(detail({
+    trades: [sell(-500, "2026-03-01"), sell(-800, "2026-04-01"), sell(-1342.79, "2026-05-01")],
+  }));
+  check("The lifetime figure sums every sale", allLosses.includes("-$2,742.79"));
+  check("...including the open position", /open/.test(allLosses));
+  check("...and shows the win/loss record", allLosses.includes("3 sales") && allLosses.includes("0 up, 3 down"));
+
+  // A mixed record, where the total alone would hide the shape.
+  const mixed = renderTickerDetail(detail({
+    trades: [sell(1000, "2026-03-01"), sell(-200, "2026-04-01"), sell(-100, "2026-05-01")],
+  }));
+  check("A profitable name reads positive", mixed.includes("+$600.00"));
+  check("...while still showing the losses behind it", mixed.includes("1 up, 2 down"));
+
+  // Dividends are part of what a ticker returned and are easy to forget --
+  // they are the part that quietly offsets a mediocre price result.
+  const withDivs = renderTickerDetail(detail({
+    position: { total_shares: 0, total_cost: 0, total_value: null, unrealized_pnl: null, unrealized_pnl_percent: null, lots: [] },
+    trades: [
+      sell(-300, "2026-03-01"),
+      { id: 9, transaction_type: "DIVIDEND", transaction_date: "2026-02-01", quantity: 0, price: 120, realized_pnl: null },
+    ],
+  }));
+  check("Dividends count towards the lifetime figure", withDivs.includes("-$180.00"));
+  check("...and are shown separately, not folded in silently", /dividends/.test(withDivs));
+
+  // Unrealized is null when nothing is priced. Treating that as zero would
+  // claim the open position is worth exactly what was paid for it.
+  const unpriced = renderTickerDetail(detail({
+    position: { total_shares: 10, total_cost: 600, total_value: null, unrealized_pnl: null, unrealized_pnl_percent: null, lots: [] },
+    trades: [sell(-300, "2026-03-01")],
+  }));
+  check("Held but unpriced says the total is settled-only", /settled only/.test(unpriced));
+  check("...and does not invent a zero for the open lot", !/open \+\$0\.00/.test(unpriced));
+
+  // A position closed out entirely is a DIFFERENT null. There is nothing open,
+  // so realized plus dividends is the whole story -- calling that "settled
+  // only" would imply more is still to come when nothing is. SOUN, closed
+  // across 33 trades, is exactly this case.
+  const closedOut = renderTickerDetail(detail({
+    position: { total_shares: 0, total_cost: 0, total_value: null, unrealized_pnl: null, unrealized_pnl_percent: null, lots: [] },
+    trades: [sell(-1000, "2026-03-01"), sell(-2249.45, "2026-04-01"), sell(-100, "2026-05-01")],
+  }));
+  check("A closed-out position reports a complete total", !/settled only/.test(closedOut));
+  check("...summing to everything it ever did", closedOut.includes("-$3,349.45"));
+
+  // A record line needs a record. "1 sale, 1 loss" is not a pattern.
+  const single = renderTickerDetail(detail({ trades: [sell(-50, "2026-03-01")] }));
+  check("One sale gets no win/loss record line", !single.includes("1 sales"));
+  check("...but still gets a lifetime figure", single.includes("Lifetime"));
+
+  check("No trades at all renders no summary",
+    !renderTickerDetail(detail({ trades: [] })).includes("lifetime-summary"));
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
