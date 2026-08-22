@@ -1036,9 +1036,30 @@ const NEWS_TTL_MS = 15 * 60 * 1000;
 // with no shell, passing the symbol as its own argv element, and the service
 // validates the symbol before that. Slow by nature -- the skill searches the
 // web -- so the client shows progress rather than assuming a hang.
+// The last brief written for this ticker, with whether the position has moved
+// since. Free and instant -- the point of storing them is that opening a
+// ticker should not cost two minutes to see what was already worked out.
+app.get("/api/ticker/:symbol/research", (req, res) => {
+  const holder = getOrCreateDefaultHolder();
+  const latest = research.latestResearch(holder.id, req.params.symbol);
+  res.json({
+    latest,
+    history: research.researchHistory(holder.id, req.params.symbol, { limit: 20 }),
+  });
+});
+
 app.post("/api/ticker/:symbol/research", async (req, res) => {
   try {
-    res.json(await research.runTickerResearch(req.params.symbol));
+    const holder = getOrCreateDefaultHolder();
+    const result = await research.runTickerResearch(req.params.symbol);
+    // Saved against the position as it stands NOW, immediately after the run,
+    // so the snapshot matches what the brief actually described rather than
+    // whatever it becomes later.
+    const saved = research.saveResearch(holder.id, result.symbol, {
+      brief: result.brief,
+      durationMs: result.ms,
+    });
+    res.json({ ...result, savedId: saved.id, createdAt: saved.created_at });
   } catch (err) {
     if (err.name === "ResearchUnavailableError") {
       // 409 rather than 500: "one is already running" and "not installed here"

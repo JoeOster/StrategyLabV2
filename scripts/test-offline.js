@@ -56,7 +56,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 780;
+const MIN_EXPECTED_CHECKS = 800;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -4721,5 +4721,79 @@ console.log("\n43. News links are somebody else's URLs");
 }
 
 
+
+// ---------------------------------------------------------------------------
+console.log("\n44. Research briefs are kept, and know what they were true of");
+// The button ran a fresh two-minute model session on every press and kept
+// nothing. Joe's question was the right one: "if I have 10 axon and I hit
+// research, is that data all stored so research is not redone?"
+//
+// It was not. Two consequences, and the second matters more: pressing twice
+// cost two minutes for near-identical output, and a position closed at a loss
+// in November carried no trace of the reasoning that was in front of you in
+// June -- the same plan-versus-actual question the rest of this app exists to
+// answer, applied to research instead of prices.
+{
+  const research = await import("../services/researchService.js");
+  const tx = await import("../services/transactionsService.js");
+
+  const exId = db.prepare("SELECT id FROM exchanges LIMIT 1").get().id;
+  db.prepare("INSERT INTO securities (symbol, exchange_id, name, data_source) VALUES ('RSCH', ?, 'Research Probe', 'manual')").run(exId);
+  const rHolder = db.prepare("INSERT INTO account_holders (name, is_default) VALUES ('Research Test', 0) RETURNING *").get();
+
+  check("No brief yet reads as none", research.latestResearch(rHolder.id, "RSCH") === null);
+  check("...and an empty history, not an error", research.researchHistory(rHolder.id, "RSCH").length === 0);
+
+  // Ten shares, then a brief about them.
+  const buy1 = await tx.recordBuy({
+    holderId: rHolder.id, symbol: "RSCH", transactionDate: "2026-08-01", quantity: 10, price: 50,
+  });
+  const saved = research.saveResearch(rHolder.id, "RSCH", { brief: "Ten shares, doing fine.", durationMs: 90000 });
+  check("A brief records the shares it was written against", saved.shares_at_time === 10);
+
+  const fresh = research.latestResearch(rHolder.id, "RSCH");
+  check("It comes back", fresh.brief === "Ten shares, doing fine.");
+  check("...and is not stale, because nothing has changed", fresh.stale === false);
+  check("...with nothing to report", fresh.changes.length === 0);
+
+  // Buy fifteen more -- exactly the case asked about.
+  await tx.recordBuy({
+    holderId: rHolder.id, symbol: "RSCH", transactionDate: "2026-08-15", quantity: 15, price: 55,
+  });
+  const afterBuy = research.latestResearch(rHolder.id, "RSCH");
+  check("Buying more makes the brief stale", afterBuy.stale === true);
+  check("...saying what changed, in shares", /held 10 share\(s\) then, 25 now/.test(afterBuy.changes[0]));
+  check("...while still showing the brief itself", afterBuy.brief === "Ten shares, doing fine.");
+  check("...which is not deleted or rewritten", afterBuy.sharesAtTime === 10 && afterBuy.sharesNow === 25);
+
+  // Stale means "what it describes has changed", never "it is old". A brief
+  // does not rot with time, and treating age as staleness would push a rerun
+  // every day for nothing.
+  const second = research.saveResearch(rHolder.id, "RSCH", { brief: "Twenty-five now.", durationMs: 100000 });
+  const latest = research.latestResearch(rHolder.id, "RSCH");
+  check("A newer brief supersedes the older one", latest.brief === "Twenty-five now.");
+  check("...and is fresh again", latest.stale === false);
+  check("...without discarding the first", research.researchHistory(rHolder.id, "RSCH").length === 2);
+  check("History is newest first", research.researchHistory(rHolder.id, "RSCH")[0].id === second.id);
+  check("...and carries the position each was written against",
+    research.researchHistory(rHolder.id, "RSCH").map((h) => h.shares_at_time).join(",") === "25,10");
+
+  // Selling counts as a change too, not only buying.
+  await tx.recordSell({
+    holderId: rHolder.id, symbol: "RSCH", transactionDate: "2026-08-20", quantity: 5, price: 60,
+  });
+  check("Selling also makes it stale", research.latestResearch(rHolder.id, "RSCH").stale === true);
+
+  // One holder's briefs are not another's.
+  check("Briefs are per holder", research.latestResearch(holder.id, "RSCH") === null);
+
+  // The symbol guard on the runner, which is the only place this app executes
+  // a program. Tested here because it is pure and the spawn is not.
+  for (const bad of ["../../etc", "A;rm -rf /", "APP && curl evil", "", "TOOLONGSYMBOLNAME", "$(whoami)"]) {
+    let refused = false;
+    try { research.runTickerResearch(bad); } catch (e) { refused = /not a ticker symbol/.test(e.message); }
+    check(`Refuses ${JSON.stringify(bad)} as a symbol`, refused);
+  }
+}
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

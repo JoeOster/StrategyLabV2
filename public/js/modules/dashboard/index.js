@@ -230,6 +230,59 @@ async function loadTickerNews(symbol) {
 }
 
 /**
+ * Shows the last brief written for this ticker, if there is one.
+ *
+ * Runs on every dialog open and costs nothing -- it is a database read. The
+ * button then means "write a NEW one" rather than "find out what is already
+ * known", which is the distinction that makes storing them worth the table.
+ */
+async function loadStoredResearch(symbol) {
+  let payload;
+  try {
+    payload = await api.fetchStoredResearch(symbol);
+  } catch {
+    return; // a missing brief is not an error worth reporting
+  }
+  if (state.detailSymbol !== symbol || !payload.latest) return;
+
+  const panel = document.createElement("div");
+  panel.className = "research-hint stored-research";
+  renderStoredBrief(panel, symbol, payload.latest, payload.history);
+  placeByActions(panel);
+  // Deliberately NOT scrolled to. The user opened the ticker, not the brief,
+  // and yanking the dialog to a panel they did not ask for is its own kind of
+  // rude. placeByActions scrolls; this undoes that by restoring the top.
+  els.detailDialog.scrollTop = 0;
+
+  els.researchBtn.textContent = payload.latest.stale ? "Research again" : "Research";
+}
+
+/** A stored brief, with what has changed since it was written. */
+function renderStoredBrief(panel, symbol, latest, history) {
+  panel.textContent = "";
+
+  const head = document.createElement("p");
+  head.className = "panel-hint";
+  const when = String(latest.createdAt).slice(0, 16).replace("T", " ");
+  head.textContent = `Last researched ${when}${history?.length > 1 ? ` · ${history.length} briefs on file` : ""}.`;
+  panel.append(head);
+
+  // The staleness line is the reason the position snapshot is stored at all.
+  // Without it a brief about 10 shares reads as current when 25 are held.
+  if (latest.stale) {
+    const warn = document.createElement("p");
+    warn.className = "status-banner status-warn";
+    warn.textContent = `Written against a different position — ${latest.changes.join("; ")}. Press Research again to redo it.`;
+    panel.append(warn);
+  }
+
+  const pre = document.createElement("pre");
+  pre.className = "research-brief";
+  pre.textContent = latest.brief;
+  panel.append(pre);
+}
+
+/**
  * Researches the ticker: fetches missing price history, then runs the skill.
  *
  * The button used to hand over a phrase to type into a chat session, because a
@@ -246,6 +299,12 @@ async function loadTickerNews(symbol) {
 async function showResearchHint() {
   const symbol = state.detailSymbol;
   if (!symbol) return;
+
+  const stored = els.detailDialog.querySelector(".stored-research");
+  // A stored brief is being REPLACED, not toggled -- the button was pressed to
+  // write a new one, and leaving the old one below it would put two briefs
+  // about the same ticker on screen with nothing saying which is which.
+  if (stored) stored.remove();
 
   const existing = els.detailDialog.querySelector(".research-hint");
   if (existing) return existing.remove(); // pressing it again closes it
@@ -351,6 +410,11 @@ async function openDetailFor(symbol) {
     const detail = await api.fetchTickerDetail(symbol);
     state.detailData = detail;
     els.detailBody.innerHTML = renderTickerDetail(detail);
+
+    // A brief already written for this ticker, if there is one. Free and
+    // instant: the whole point of storing them is that opening a ticker should
+    // not cost two minutes to see what was already worked out.
+    loadStoredResearch(symbol);
 
     // Appended after the dialog has already rendered, not awaited alongside
     // the detail fetch. Finnhub is a network call to a third party and the

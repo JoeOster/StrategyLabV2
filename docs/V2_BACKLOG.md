@@ -29,9 +29,14 @@ account and which is somebody's guess.
 
 **The three open questions, answered:**
 
-- *Save the brief back into the app?* No. It would need a schema decision that
-  has not been made, and printing in chat costs nothing to change later. The
-  skill is explicitly forbidden from writing to the database.
+- *Save the brief back into the app?* **Yes, as of schema v22** -- the decision
+  got made when Joe asked the obvious question: "if I have 10 axon and I hit
+  research, is that data all stored so research is not redone?" It was not.
+  `research_notes` keeps every brief with the position it was written against,
+  so opening a ticker shows the last one instantly and free, and says "written
+  against 10 shares, you now hold 25" when that has stopped being true. The
+  SKILL still does not write to the database; the server saves what the skill
+  returns, which keeps the subprocess read-only.
 - *How much history?* Since the oldest open lot when the ticker is held --
   `position.lots` supplies that date -- and 30 days when it is not. The skill
   states which window it used.

@@ -10,6 +10,7 @@
 // stating plainly, because everything else here is a database read, an HTTP
 // GET to a price provider, or a render. The rules below exist because of it.
 import { spawn } from "node:child_process";
+import db from "../lib/db.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -138,4 +139,143 @@ export function runTickerResearch(symbol) {
 /** Whether a run is currently going, for the UI to reflect. */
 export function researchInFlight() {
   return inFlight !== null;
+}
+
+// --- Stored briefs ---------------------------------------------------------
+//
+// A brief is only true of the holding it was written against. "You are down 9%
+// across two lots" stops being true the moment a third lot is bought, so the
+// position is stored beside the text and compared on the way back out.
+//
+// There is no TTL and nothing expires. An old brief is not wrong, it is old,
+// and that difference is the reason to keep it: a position closed at a loss in
+// November should still carry the reasoning that was in front of you in June.
+
+const insertNote = db.prepare(`
+  INSERT INTO research_notes
+    (security_id, holder_id, brief, duration_ms, shares_at_time, cost_basis_at_time,
+     price_at_time, lots_at_time)
+  VALUES
+    (@securityId, @holderId, @brief, @durationMs, @shares, @costBasis, @price, @lots)
+  RETURNING *
+`);
+
+const latestNote = db.prepare(`
+  SELECT r.* FROM research_notes r
+  JOIN securities s ON s.id = r.security_id
+  WHERE s.symbol = @symbol AND r.holder_id = @holderId
+  ORDER BY r.created_at DESC, r.id DESC
+  LIMIT 1
+`);
+
+const noteHistory = db.prepare(`
+  SELECT r.id, r.created_at, r.shares_at_time, r.cost_basis_at_time, r.price_at_time, r.duration_ms
+  FROM research_notes r
+  JOIN securities s ON s.id = r.security_id
+  WHERE s.symbol = @symbol AND r.holder_id = @holderId
+  ORDER BY r.created_at DESC, r.id DESC
+  LIMIT @limit
+`);
+
+/** The holding a brief is about, as it stands right now. */
+function positionSnapshot(holderId, symbol) {
+  const lots = db
+    .prepare(
+      `SELECT t.id AS lot_id, t.transaction_date, t.quantity_remaining, t.price, t.cost_basis
+         FROM transactions t JOIN securities s ON s.id = t.security_id
+        WHERE t.holder_id = ? AND s.symbol = ? AND t.transaction_type = 'BUY'
+          AND t.quantity_remaining > 0 AND t.voided_at IS NULL
+        ORDER BY t.transaction_date, t.id`,
+    )
+    .all(holderId, symbol);
+
+  const price = db
+    .prepare(
+      "SELECT q.last_price FROM quotes_cache q JOIN securities s ON s.id = q.security_id WHERE s.symbol = ?",
+    )
+    .get(symbol)?.last_price ?? null;
+
+  return {
+    shares: lots.reduce((sum, l) => sum + l.quantity_remaining, 0),
+    costBasis: lots.length
+      ? lots.reduce((sum, l) => sum + (l.cost_basis / l.quantity_remaining) * l.quantity_remaining, 0)
+      : null,
+    price,
+    lots,
+  };
+}
+
+/**
+ * The most recent brief for a ticker, and whether the position has moved since.
+ *
+ * @returns {null|{brief: string, createdAt: string, sharesAtTime: number,
+ *   sharesNow: number, stale: boolean, changes: string[]}}
+ */
+export function latestResearch(holderId, symbol) {
+  const clean = String(symbol ?? "").trim().toUpperCase();
+  const note = latestNote.get({ symbol: clean, holderId });
+  if (!note) return null;
+
+  const now = positionSnapshot(holderId, clean);
+  const changes = [];
+
+  // A tolerance, not equality. Fractional share counts carry float noise, and
+  // reporting "10.000000000000002 shares, now 10" as a change would make the
+  // staleness flag meaningless within a week.
+  if (Math.abs((note.shares_at_time ?? 0) - now.shares) > 1e-6) {
+    changes.push(
+      `held ${note.shares_at_time} share(s) then, ${now.shares} now`,
+    );
+  }
+  // Price is reported when it has moved enough to matter to prose that quotes
+  // it. Five percent rather than any movement: a brief is not wrong because
+  // the stock ticked.
+  if (note.price_at_time != null && now.price != null && note.price_at_time > 0) {
+    const move = (now.price - note.price_at_time) / note.price_at_time;
+    if (Math.abs(move) >= 0.05) {
+      changes.push(
+        `price was $${note.price_at_time.toFixed(2)}, now $${now.price.toFixed(2)} (${move >= 0 ? "+" : ""}${(move * 100).toFixed(1)}%)`,
+      );
+    }
+  }
+
+  return {
+    id: note.id,
+    brief: note.brief,
+    createdAt: note.created_at,
+    durationMs: note.duration_ms,
+    sharesAtTime: note.shares_at_time,
+    sharesNow: now.shares,
+    priceAtTime: note.price_at_time,
+    priceNow: now.price,
+    lotsAtTime: note.lots_at_time ? JSON.parse(note.lots_at_time) : null,
+    // Stale means "the thing it describes has changed", never "it is old".
+    // Time alone does not make a brief wrong.
+    stale: changes.length > 0,
+    changes,
+  };
+}
+
+/** Every brief written for a ticker, newest first, without their text. */
+export function researchHistory(holderId, symbol, { limit = 20 } = {}) {
+  return noteHistory.all({ symbol: String(symbol).trim().toUpperCase(), holderId, limit });
+}
+
+/** Stores a brief against the position it was written about. */
+export function saveResearch(holderId, symbol, { brief, durationMs }) {
+  const clean = String(symbol).trim().toUpperCase();
+  const security = db.prepare("SELECT id FROM securities WHERE symbol = ?").get(clean);
+  if (!security) throw new Error(`No security on file for ${clean}.`);
+
+  const snap = positionSnapshot(holderId, clean);
+  return insertNote.get({
+    securityId: security.id,
+    holderId,
+    brief,
+    durationMs: durationMs ?? null,
+    shares: snap.shares,
+    costBasis: snap.costBasis,
+    price: snap.price,
+    lots: JSON.stringify(snap.lots),
+  });
 }
