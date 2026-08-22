@@ -958,3 +958,31 @@ dialog input, dialog select, dialog textarea {
 }
 .news-list a { text-decoration: none; }
 .news-list a:hover { text-decoration: underline; }
+
+/* The research brief. Preformatted text, wrapped -- it is markdown shown raw,
+   which is honest about what it is and cannot execute anything. */
+.research-brief {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 60vh;
+  overflow-y: auto;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin: 0.5rem 0 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+}
+.research-status::after {
+  content: "";
+  display: inline-block;
+  width: 0.9em;
+  animation: research-dots 1.2s steps(4, end) infinite;
+}
+@keyframes research-dots {
+  0%   { content: ""; }
+  25%  { content: "."; }
+  50%  { content: ".."; }
+  75%  { content: "..."; }
+}

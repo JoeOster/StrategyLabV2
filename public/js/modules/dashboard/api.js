@@ -22,5 +22,8 @@ export const refreshPrices = () =>
 export const fetchTickerNews = (symbol) =>
   fetch(`/api/ticker/${encodeURIComponent(symbol)}/news`).then(handleResponse);
 
+export const runResearch = (symbol) =>
+  fetch(`/api/ticker/${encodeURIComponent(symbol)}/research`, { method: "POST" }).then(handleResponse);
+
 export const refreshTicker = (symbol) =>
   fetch(`/api/ticker/${encodeURIComponent(symbol)}/refresh`, { method: "POST" }).then(handleResponse);

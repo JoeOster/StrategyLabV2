@@ -1673,3 +1673,46 @@ and nothing anywhere else in the app to distinguish it from an idea never had.
 Entry alerts deliberately carry no price gap. The gap on a purchase that did
 happen is already measured from the trade itself, and counting it here as well
 would double every executed entry in the totals.
+
+## The Research button actually researches (2026-08-21)
+
+Joe: "seems weird I cant activate a local skill from the browser or script."
+
+He was right, and the reason is worth writing down because it is not obvious. A
+skill is a markdown file of instructions loaded into a model's context. There
+is no binary, no service, no endpoint -- "running" one means a model reads it
+and acts. A web page has nothing to invoke.
+
+Claude Code's headless mode is the missing process. `claude -p "research APP"`
+loads the same skill file a chat session would and writes the brief to stdout,
+so `services/researchService.js` spawns it and `POST /api/ticker/:symbol/research`
+returns the result. Roughly two minutes per run, most of it web search.
+
+**This is the only endpoint in the app that executes a program**, and it is
+built accordingly:
+
+- The symbol is validated against `/^[A-Za-z0-9.\-]{1,12}$/` AND passed as its
+  own argv element with no shell involved. Either alone would be enough; both,
+  because of what this endpoint does. `../../etc` and `A;rm -rf` are refused.
+- `--allowedTools` grants exactly `Bash(curl:*)`, `WebSearch` and `WebFetch`.
+  Not `--permission-mode bypassPermissions`, which would have been easier and
+  wrong: a web request should not be able to start a session that can write
+  files. The skill is told not to write to the database; this makes it
+  structural rather than a matter of the model complying.
+- One run at a time. Six clicks should queue, not launch six model sessions.
+
+The brief renders as preformatted TEXT, not parsed markdown. It quotes
+headlines and links from the open web, and this app has no markdown renderer --
+adding one would mean a third dependency or a hand-rolled parser handling
+somebody else's content, which is the worst of both.
+
+**Two things the first headless run exposed.** It came back asking for
+permissions, which is what a non-interactive session does when it cannot get
+approval. And the skill instructed it to `ssh orchestrator` -- while running ON
+the orchestrator. The skill now tries localhost first and falls back to SSH, so
+the same file works from Joe's Windows machine and from the NUC.
+
+Claude Code was already installed and authenticated on the NUC; `which claude`
+only failed because `~/.npm-global/bin` was missing from the non-interactive
+PATH. The service names it explicitly rather than depending on how systemd
+started it.

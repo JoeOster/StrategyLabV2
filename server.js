@@ -50,6 +50,7 @@ const efficiencySvc = await import("./services/efficiencyService.js");
 const benchmarkSvc = await import("./services/benchmarkService.js");
 const priceService = await import("./services/priceService.js");
 const finnhub = await import("./services/providers/finnhubProvider.js");
+const research = await import("./services/researchService.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3113;
@@ -1028,6 +1029,26 @@ app.post("/api/ticker/:symbol/refresh", async (req, res) => {
 // times in a minute is one Finnhub call, not five.
 const newsCache = new Map();
 const NEWS_TTL_MS = 15 * 60 * 1000;
+
+// Runs the ticker-research skill headlessly and returns the brief.
+//
+// The only endpoint in this app that executes a program. It spawns Claude Code
+// with no shell, passing the symbol as its own argv element, and the service
+// validates the symbol before that. Slow by nature -- the skill searches the
+// web -- so the client shows progress rather than assuming a hang.
+app.post("/api/ticker/:symbol/research", async (req, res) => {
+  try {
+    res.json(await research.runTickerResearch(req.params.symbol));
+  } catch (err) {
+    if (err.name === "ResearchUnavailableError") {
+      // 409 rather than 500: "one is already running" and "not installed here"
+      // are both states of this machine, not faults in the request.
+      return res.status(409).json({ error: err.message });
+    }
+    console.error(`Research failed for ${req.params.symbol}:`, err);
+    res.status(502).json({ error: err.message });
+  }
+});
 
 app.get("/api/ticker/:symbol/news", async (req, res) => {
   const symbol = String(req.params.symbol).trim().toUpperCase();

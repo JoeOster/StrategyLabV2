@@ -230,21 +230,18 @@ async function loadTickerNews(symbol) {
 }
 
 /**
- * Fetches the ticker's price history, then shows how to research it.
+ * Researches the ticker: fetches missing price history, then runs the skill.
  *
- * The app backfills history on demand and nothing had ever demanded it: 117 of
- * 118 securities had no stored prices at all, so the detail dialog drew no
- * chart and reported no 52-week range for almost everything in the portfolio.
- * The capability existed and was simply never called.
+ * The button used to hand over a phrase to type into a chat session, because a
+ * skill is instructions rather than code and a web page has nothing to invoke.
+ * Joe's reaction was the right one -- "seems weird I cant activate a local
+ * skill from the browser". Claude Code's headless mode is the missing process:
+ * the server spawns it, it loads the same skill file, and the brief comes back.
  *
- * Two years rather than the six months this was asked for, because that is
- * what backfillSecurityHistory already fetches on a first pull and because six
- * months cannot fill a 52-WEEK range -- the shorter window would leave the very
- * figure most worth having still blank.
- *
- * Only fetched when there is none. An incremental top-up is what the dialog's
- * own Refresh button is for, and doing it here too would mean two controls
- * quietly competing to do the same job.
+ * It takes a minute or two because the skill searches the web. That is why
+ * there is a progress line rather than a disabled button -- two minutes of
+ * nothing is indistinguishable from broken, which this button has already been
+ * accused of once and deserved.
  */
 async function showResearchHint() {
   const symbol = state.detailSymbol;
@@ -253,84 +250,96 @@ async function showResearchHint() {
   const existing = els.detailDialog.querySelector(".research-hint");
   if (existing) return existing.remove(); // pressing it again closes it
 
-  const hasHistory = (state.detailData?.series?.length ?? 0) > 0;
-  if (!hasHistory) {
-    els.researchBtn.disabled = true;
-    els.researchBtn.textContent = "Fetching history…";
-    try {
-      await api.refreshTicker(symbol);
-      // Re-open rather than patch the DOM: the chart, the 52-week bar and the
-      // range figures all derive from the series, and rebuilding them by hand
-      // would be a second renderer to keep in step with the first.
-      await openDetailFor(symbol);
-    } catch (err) {
-      // Placed by the button for the same reason the hint is: an error message
-      // at the top of a dialog you have scrolled past is indistinguishable
-      // from nothing happening.
-      const banner = errorBanner(`Could not fetch history for ${symbol}: ${err.message}`);
-      if (els.detailActions) els.detailActions.before(banner);
-      else els.detailBody.append(banner);
-      banner.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    } finally {
-      els.researchBtn.disabled = false;
-      els.researchBtn.textContent = "Research";
-    }
-  }
+  const panel = document.createElement("div");
+  panel.className = "research-hint";
+  placeByActions(panel);
 
-  renderResearchHint(symbol, state.detailData);
+  const status = document.createElement("p");
+  status.className = "research-status";
+  panel.append(status);
+
+  els.researchBtn.disabled = true;
+  try {
+    // History first, and only when there is none. The skill reads the app's
+    // own record, so fetching this now means the brief can talk about the
+    // price path rather than reporting that there is nothing stored.
+    if ((state.detailData?.series?.length ?? 0) === 0) {
+      status.textContent = `Fetching price history for ${symbol}…`;
+      els.researchBtn.textContent = "Fetching…";
+      await api.refreshTicker(symbol);
+      const refreshed = await api.fetchTickerDetail(symbol);
+      state.detailData = refreshed;
+    }
+
+    status.textContent = `Researching ${symbol} — reading your position, then searching the web. A minute or two.`;
+    els.researchBtn.textContent = "Researching…";
+
+    const result = await api.runResearch(symbol);
+    if (state.detailSymbol !== symbol) return; // dialog moved on
+    renderResearchBrief(panel, symbol, result);
+  } catch (err) {
+    if (state.detailSymbol !== symbol) return;
+    status.remove();
+    panel.append(researchFallback(symbol, err.message));
+  } finally {
+    els.researchBtn.disabled = false;
+    els.researchBtn.textContent = "Research";
+  }
+}
+
+/** Puts an element immediately above the dialog's action row, and in view. */
+function placeByActions(el) {
+  if (els.detailActions) els.detailActions.before(el);
+  else els.detailBody.append(el);
+  el.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 /**
- * The phrase to use, with the ticker filled in.
+ * The finished brief.
  *
- * The button cannot DO the research: it is a Claude skill invoked in a chat
- * session, which is the design rather than a gap -- no API key, no per-call
- * cost, no LLM code in a two-dependency app. So the honest thing for a button
- * in a web page is to hand over the exact phrase.
+ * Rendered as preformatted TEXT rather than parsed as markdown. The brief
+ * quotes headlines and links from the open web, and this app has no markdown
+ * renderer -- adding one would mean either a third dependency or a hand-rolled
+ * parser handling somebody else's content, which is the worst of both. A <pre>
+ * with textContent shows the structure, cannot execute anything, and is honest
+ * about being raw.
  */
-function renderResearchHint(symbol, detail) {
-  const bars = detail?.series?.length ?? 0;
-  const panel = document.createElement("div");
-  panel.className = "research-hint";
+function renderResearchBrief(panel, symbol, result) {
+  panel.textContent = "";
 
-  // textContent throughout: symbol reaches here from a URL parameter, and this
-  // is the same path BUG 9 was about.
+  const head = document.createElement("p");
+  head.className = "panel-hint";
+  head.textContent = `Researched ${symbol} in ${(result.ms / 1000).toFixed(0)}s. Position read from this app; news from the open web. Sources are linked in the text.`;
+
+  const pre = document.createElement("pre");
+  pre.className = "research-brief";
+  pre.textContent = result.brief;
+
+  panel.append(head, pre);
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+/**
+ * What to do when the run could not happen.
+ *
+ * Falls back to the phrase, which is what the button did before headless mode
+ * existed and still works from any Claude session. A failure here should leave
+ * the user with a route, not an apology.
+ */
+function researchFallback(symbol, message) {
+  const wrap = document.createElement("div");
+
+  const why = document.createElement("p");
+  why.className = "status-banner status-error";
+  why.textContent = message;
+
   const p = document.createElement("p");
-  // Says what to DO, in the words the user would use.
-  //
-  // It first read "In a Claude Code session on this project, say:" which told
-  // Joe nothing -- he does not think of himself as being "on this project",
-  // he is simply talking to Claude, and the phrasing implied a setup step that
-  // does not exist. The instruction is: type this at Claude.
-  p.textContent = "Ask Claude:";
+  p.textContent = "You can still ask Claude directly:";
   const code = document.createElement("code");
   code.textContent = `research ${symbol}`;
 
-  const note = document.createElement("p");
-  note.className = "panel-hint";
-  note.textContent = bars
-    ? `Claude reads your position in ${symbol} — shares, cost basis, targets and ${bars} days of price history — then searches the web, and reports the two separately. The browser cannot do this itself.`
-    : `Claude reads your position in ${symbol} — shares, cost basis and targets — then searches the web, and reports the two separately. No price history could be fetched for this ticker.`;
-
-  panel.append(p, code, note);
-
-  // Inserted directly ABOVE THE BUTTON, not at the top of the dialog body.
-  //
-  // Prepending put it there, and the detail body runs to about 1100px in a
-  // 720px viewport -- so you scroll down to reach the button, click it, and the
-  // panel appears five hundred pixels above your viewport. From where the user
-  // is sitting, the button does nothing. Reported exactly that way.
-  //
-  // scrollIntoView as well as placement, because the dialog's own height
-  // depends on the ticker: a holding with many lots and a long trade history
-  // pushes the actions further down than a bare watchlist entry, and placement
-  // alone only guarantees the panel is NEAR the button, not on screen.
-  if (els.detailActions) {
-    els.detailActions.before(panel);
-  } else {
-    els.detailBody.append(panel);
-  }
-  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  wrap.append(why, p, code);
+  return wrap;
 }
 
 async function openDetailFor(symbol) {

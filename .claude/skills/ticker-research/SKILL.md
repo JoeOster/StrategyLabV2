@@ -19,10 +19,13 @@ Always start here, before searching. The app's data determines what is worth
 searching for — an earnings date matters differently to someone holding 400
 shares at a loss than to someone watching from the sidelines.
 
-Strategy Lab runs on the orchestrator NUC. Reach it over SSH:
+Strategy Lab runs on the orchestrator NUC, on port 3113. **Try locally first**
+-- this skill runs both from Joe's Windows machine and from the NUC itself
+(the app's own Research button spawns it there), and an `ssh orchestrator` from
+the NUC is a pointless hop that may not even be configured:
 
 ```bash
-ssh orchestrator "curl -s http://localhost:3113/api/ticker/NVDA"
+curl -s --max-time 10 http://localhost:3113/api/ticker/NVDA   || ssh orchestrator "curl -s http://localhost:3113/api/ticker/NVDA"
 ```
 
 That returns, in one payload:
@@ -36,18 +39,16 @@ That returns, in one payload:
 - `watchedItems` — any entry or exit targets set
 - `dividends` — recorded dividend history
 
-If the server is down, query the database directly instead:
-
-```bash
-ssh orchestrator "cd ~/StrategyLabV2 && node -e \"import('./lib/db.js').then(m => console.log(JSON.stringify(m.default.prepare('SELECT * FROM securities WHERE symbol = ?').all('NVDA'))))\""
-```
+If the server is down, say so rather than reaching for the database file. The
+API is the read path; a direct query would need the right working directory and
+would bypass every derivation the services do.
 
 **If `series` is empty and `range` is null**, the app has no price history for
 this ticker — it only backfills on demand. Say so in the brief rather than
 treating the absence as a flat chart. One call fixes it if history matters:
 
 ```bash
-ssh orchestrator "curl -s -X POST http://localhost:3113/api/ticker/NVDA/refresh"
+curl -s -X POST http://localhost:3113/api/ticker/NVDA/refresh
 ```
 
 ## 2. Then search the web
