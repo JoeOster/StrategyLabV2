@@ -53,6 +53,7 @@ export async function initializeDashboardModule() {
 
   els.detailDialog = document.getElementById("ticker-detail-dialog");
   els.detailBody = document.getElementById("ticker-detail-body");
+  els.detailActions = document.querySelector("#ticker-detail-dialog .form-actions");
   els.detailCloseBtn = document.getElementById("ticker-detail-close-btn");
   els.researchBtn = document.getElementById("ticker-research-btn");
   els.tickerRefreshBtn = document.getElementById("ticker-refresh-btn");
@@ -229,7 +230,7 @@ async function showResearchHint() {
   const symbol = state.detailSymbol;
   if (!symbol) return;
 
-  const existing = els.detailBody.querySelector(".research-hint");
+  const existing = els.detailDialog.querySelector(".research-hint");
   if (existing) return existing.remove(); // pressing it again closes it
 
   const hasHistory = (state.detailData?.series?.length ?? 0) > 0;
@@ -243,7 +244,13 @@ async function showResearchHint() {
       // would be a second renderer to keep in step with the first.
       await openDetailFor(symbol);
     } catch (err) {
-      els.detailBody.prepend(errorBanner(`Could not fetch history for ${symbol}: ${err.message}`));
+      // Placed by the button for the same reason the hint is: an error message
+      // at the top of a dialog you have scrolled past is indistinguishable
+      // from nothing happening.
+      const banner = errorBanner(`Could not fetch history for ${symbol}: ${err.message}`);
+      if (els.detailActions) els.detailActions.before(banner);
+      else els.detailBody.append(banner);
+      banner.scrollIntoView({ behavior: "smooth", block: "nearest" });
     } finally {
       els.researchBtn.disabled = false;
       els.researchBtn.textContent = "Research";
@@ -280,7 +287,24 @@ function renderResearchHint(symbol, detail) {
     : `It reads this app's record of ${symbol} — your position, cost basis and targets — then searches the web, keeping the two clearly apart. No price history could be fetched for this ticker.`;
 
   panel.append(p, code, note);
-  els.detailBody.prepend(panel);
+
+  // Inserted directly ABOVE THE BUTTON, not at the top of the dialog body.
+  //
+  // Prepending put it there, and the detail body runs to about 1100px in a
+  // 720px viewport -- so you scroll down to reach the button, click it, and the
+  // panel appears five hundred pixels above your viewport. From where the user
+  // is sitting, the button does nothing. Reported exactly that way.
+  //
+  // scrollIntoView as well as placement, because the dialog's own height
+  // depends on the ticker: a holding with many lots and a long trade history
+  // pushes the actions further down than a bare watchlist entry, and placement
+  // alone only guarantees the panel is NEAR the button, not on screen.
+  if (els.detailActions) {
+    els.detailActions.before(panel);
+  } else {
+    els.detailBody.append(panel);
+  }
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 async function openDetailFor(symbol) {
