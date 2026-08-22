@@ -35,43 +35,51 @@ default-percentage settings pre-fill the exit ladder.
 
 ---
 
-## Tier 1 — still open, in order
+## Status, 2026-08-21 (third pass)
 
-### 1. Execution efficiency should be the headline report
+Everything in the previous Tier 1 and Tier 2 is built. Verified against the
+code rather than remembered, which is what the previous two passes of this file
+did not do and why it kept listing solved work as open.
 
-Still the first genuinely useful *output* the app can produce, and the thing
-Joe described first when asked what he wanted: signal says buy at $10, fill at
-$9.95, sell signal at $10.75, missed. `alerts` records when a level was reached
-and at what price; trades record what happened. Nothing joins them.
-
-Needs a handful of trades to be meaningful, unlike source reliability which
-needs hundreds -- so it is the report that becomes useful soonest.
-
-### 2. No benchmark anywhere
-
-"This source returned 8%" cannot be judged without "the market did 11% over the
-same holding period." Without it every source comparison is confounded by
-market regime, which means the headline output is not trustworthy.
-`historical_prices` already holds what a same-period baseline needs, so this is
-a query, not a schema change.
+**Built since the second pass:** the execution efficiency report, with the gap
+decomposed into overshoot and slippage and discipline measured on both the
+entry and exit sides; benchmark comparison against SPY over matched holding
+days; FIFO respecting thesis boundaries; provider fetch timeouts; non-trade
+cash import for all three brokers; `securities.asset_type`; the market-holiday
+calendar; `dividends.pay_date` and the dead `theme` setting both dropped in
+v20; the Patterns report; per-ticker lifetime P&L; the ticker-research skill,
+its headless runner, and stored briefs.
 
 ---
 
-## Tier 2 — real, lower urgency
+## What is actually left
 
-- **`securities.asset_type` is never set** (`BUGS.md` #14). Every mutual fund
-  and money-market sweep is recorded as a stock, while the Fidelity parser
-  already computes the classification and throws it away.
-- **No fetch timeout anywhere.** A hung provider call blocks a scheduler tick
-  indefinitely. The re-entrancy guard stops ticks piling up; the stall remains.
-- **Non-trade cash rows are not imported** -- deposits, fees, interest. Harmless
-  while every such row predates an opening balance, which is true today and
-  will not stay true. See `V2_BACKLOG.md`.
-- **No market-holiday calendar.** Costs a couple of wasted polls a year.
-- **`dividends.pay_date` cannot be filled** from the current provider
-  (`BUGS.md` #15). Drop the column or change provider.
-- **`theme` is dead in both directions** (`BUGS.md` #16). Remove it, or build
-  the theme it implies.
+Nothing on this list is a defect. They are decisions and unbuilt features.
+
+### Needs Joe, not code
+
+- **The alert webhook** is unset. It needs a Home Assistant URL and token, and
+  entering credentials on someone's behalf is not something to do even when
+  handed them directly -- his own session rule, and it still holds.
+- **Attribution.** One source, one strategy, one attributed trade, and 37 open
+  lots with no plan. The efficiency and benchmark reports are complete and have
+  nothing to describe. No further code changes that.
+
+### Small, and genuinely unbuilt
+
+- **Log Paper Trade does not autofill the price** or flag limit against market.
+  Joe asked for this on 2026-08-21: after typing a ticker it should populate
+  the current price, editable, with a buy-limit checkbox. The dialog currently
+  has symbol, quantity, price, fees and notes and nothing else.
+
+### Designed but not decided
+
+- **Promote destroys the paper leg.** Agreed as a problem, shape not chosen.
+  The interesting version keeps the paper leg running alongside the real one so
+  the mechanically-followed plan stays visible as a baseline.
+- **Fidelity ledger sync via browser automation** -- an idea, not a spec.
+- **Backtesting / multi-agent trade evaluation** -- scoped, large, and worth
+  nothing until there is attribution to backtest against.
 
 ---
 
