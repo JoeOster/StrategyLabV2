@@ -871,174 +871,81 @@ only -- parsing, validation and payload shape are already done and already
 covered by the offline tests. Building it the other way round produces two
 mappers that agree right up until they do not.
 
-## Promote destroys the paper leg (Joe, 2026-08-21 -- agreed, needs designing)
+## Promote keeps the paper leg -- BUILT 2026-08-21 (shape 3, schema v23)
 
-`promotePaperTrade` flips `is_paper_trade` 1 -> 0 **on the same row**. Nothing
-is copied. The moment a paper trade is promoted there is no longer any record
-that it was ever paper: same id, same price, same date, reclassified.
+`promotePaperTrade` flipped `is_paper_trade` 1 -> 0 on the same row. Nothing was
+copied, so the moment a paper trade was promoted there was no record it had
+ever been paper.
 
-That is fine if Promote means "this stopped being hypothetical". It is a
-problem for the stated purpose of the app, because it erases exactly the
-comparison Joe wants -- how the paper version of a strategy did, versus what he
-actually got. Joe: *"good point and yea i think then a new row or new fields
-are needed."*
+Now it creates a NEW real transaction and leaves the paper one open and
+running, linked by `promoted_from_id`. Both legs live: the paper leg is the
+plan followed perfectly, the real leg is what actually happened, and the
+divergence is the measurement.
 
-**The deeper issue is that Promote collects no fill.** The current code says so
-outright: a paper trade "already IS a fully-specified transaction ... so
-there's no separate fill to collect." But if promoting cannot record that the
-real fill was $96.40 on Tuesday when the paper leg said $95.99 on Monday, there
-is no gap to measure. `executeJournalIdea` already collects a real fill;
-Promote should probably work the same way.
+**A fill price is required.** Defaulting it to the paper price would record the
+ideal as though it were real and erase the entry gap in the same motion --
+which is exactly what `resolveAlert` refuses on the exit side, for the same
+reason. The dialog prefills the CURRENT price rather than the paper one,
+deliberately: offering the paper price as the default invites accepting it.
 
-**DECIDED (Joe, 2026-08-21): shape 3.** The paper leg keeps running alongside
-the real one. The other two are recorded below only to show what was weighed.
+`promotedLegs()` reports the gap per share, the total, and how many days late
+the real entry was. Same sign convention as the efficiency report -- positive
+means better than planned -- so the two never need reconciling in a reader's
+head.
 
-Three shapes, increasing in usefulness and cost:
+**The real leg does not inherit the plan.** A plan owns a ladder of rungs
+against a quantity; pointing two legs at one plan would let the paper leg's
+automatic exits draw down the real position. The real leg gets its own plan
+when one is made for it.
 
-1. **Fields on the same row** -- `paper_price`, `paper_transaction_date`,
-   `promoted_at`. Cheapest. Still one row, so the legs cannot diverge after
-   promotion and a later missed exit is invisible.
-2. **New row, paper leg frozen.** The paper transaction stays as a closed
-   historical record; a new real transaction is created and linked back to it
-   (`promoted_from_id`). Two legs, comparable as at the moment of promotion.
-3. **New row, paper leg keeps running.** The paper position stays OPEN and
-   tracks alongside the real one. The paper leg then shows what the strategy
-   would have returned if followed mechanically -- including hitting its own
-   take-profit on time -- while the real leg records the late entry and the
-   missed exit. This is the only shape where "optimal vs real life" is a
-   continuous comparison rather than a single snapshot, and the only one where
-   a missed exit shows up as a divergence.
+**Promoting a partly-sold paper lot is now allowed.** It used to be refused
+because the old in-place flip had no answer for what should happen to the paper
+SELLs. Shape 3 answers it -- they stay on the paper leg -- so the refusal was a
+stand-in for an undecided design rather than a rule worth keeping.
 
-Cost of (3): a promoted paper position never leaves the Paper Trade tab without
-a state to mark it, and paper P&L must be rigorously kept out of real totals --
-`is_paper_trade` already partitions every query, so the machinery exists.
+Twenty-two checks in section 47, plus the rewritten guards in 6h. The one that
+matters most: the real book and the paper book each hold only their own leg. A
+paper position leaking into real totals is the easiest way for this design to
+become a liability instead of a feature.
 
-Also still unsupported, and related: promoting a partially-sold paper position
-is refused, because what happens to its paper SELL rows is undecided. Shape (3)
-answers that question -- the paper sells stay on the paper leg.
+**Still open from the original entry:** what marks a promoted paper position as
+"already taken" in the Paper Trade tab. It currently looks like any other paper
+position. The link exists in the data; the tab does not use it yet.
 
-**What shape 3 still needs, identified 2026-08-21.** A paper trade has no
-targets on it. Take-profit, second take-profit and stop all live on
-`watched_items`; a transaction has none. So a paper position today has no
-notion of where the strategy said to exit, and a paper leg that cannot exit on
-its own just mirrors the real one and demonstrates nothing.
+## Log Paper Trade: autofill the price -- BUILT 2026-08-21
 
-Two ways to give it exits:
+Joe: "after putting the ticker in, it should autopopulate the current price
+albeit be editable and have a buy limit price checkbox."
 
-- **Link to the watched_item that already carries them.**
-  `transactions.watched_item_id` exists and is already set by
-  `executeJournalIdea`. This keeps ONE definition of "the plan" -- the idea's
-  targets -- and both legs reference it. Preferred.
-- **Put targets on the transaction.** Duplicates the fields and invites the two
-  copies to drift, which is how `escape_price` ended up stored in one place and
-  evaluated nowhere (BUG 10).
+The price half is built. Typing a ticker fetches `GET /api/quote/:symbol` and
+fills the price in, with three rules that each matter:
 
-Open questions for the build, not to be guessed:
+- It never overwrites a price the user has typed. A field that rewrites itself
+  under the cursor is worse than an empty one.
+- The value is marked as a suggestion until touched, so a wrong quote is
+  visibly the app's guess rather than the user's entry.
+- It says nothing on failure. An unknown ticker is a typo far more often than
+  an outage, and an error while someone is still typing "NV" on the way to
+  "NVDA" would be noise.
 
-- If the paper leg is 100 shares and only 50 were really bought, the legs
-  diverge in quantity as well as price. Is that a partial promotion, or two
-  independent positions?
-- **ANSWERED 2026-08-21: the paper leg auto-sells.** Joe: *"yes as this is just
-  set for an ideal scenario."* So the paper leg is a mechanical simulation of
-  the plan followed perfectly, and the real leg is what actually happened. The
-  divergence between them IS the measurement.
+`/api/quote/:symbol` is deliberately separate from `/api/ticker/:symbol`, which
+assembles position, lots, trades, series and watched items. A dialog asking
+"what is this worth right now" should not pull all of that, and a ticker with
+no stored history should still answer. It refetches when the cached quote is
+older than the polling interval, because a form prefilling yesterday's close
+would be worse than one left blank -- the user would not know to check it.
 
-  Two things follow. The paper leg must be rigorously excluded from real totals
-  -- `is_paper_trade` already partitions every query, so the machinery exists,
-  but an auto-generated sale is the easiest thing to leak. And an auto-sell is
-  the ONLY sale this app ever creates by itself: everywhere else a rung fires
-  an alert and a human records what really happened. Worth keeping that
-  boundary explicit in the code, because the reasoning for it is the whole
-  design.
+**The limit checkbox is NOT built, on purpose.** A checkbox that only labels
+the price is a control that does nothing, which this codebase has already
+removed twice (`notification_cooldown_minutes`, `theme`). For it to mean
+anything, a limit buy has to be able to exist as a PENDING order -- Joe:
+"limit buy, these are always pending" -- and that is a state the transactions
+table does not have. A limit order that has not filled is not a position.
 
-- (superseded) Does the paper leg auto-sell when its take-profit is reached, or only record
-  that the level was hit? Auto-selling makes "optimal" concrete; recording
-  keeps the paper tab honest about being a log rather than a simulator.
-- When does a promoted paper position stop being shown as open?
-
-**Do not build before the flow walkthrough concludes.**
-
-## Log Paper Trade: autofill the price, and flag limit vs market (Joe, 2026-08-21)
-
-Noticed while walking the Journal flow. Two changes to the Log Paper Trade
-dialog (`Paper Trade > + Log Paper Trade`):
-
-1. **Entering a ticker should auto-populate Price per share with the current
-   quote, still editable.** Today it is a blank number field, so logging a
-   paper trade at today's price means looking the price up by hand and typing
-   it -- which both slows the entry down and invites exactly the typo the CSV
-   audit exists to catch. `GET /api/tickers/:symbol` already returns a quote,
-   so this is frontend work.
-
-2. **A "buy limit price" checkbox.**
-
-**Question to settle before building #2**, because two readings lead to very
-different work:
-
-**ANSWERED 2026-08-21.** Joe: *"limit buy - these are always pending, probably
-needs a confirmation of price, same goes for limit sell."*
-
-So a limit order is PENDING until the price is reached, and when it is, the
-actual fill is confirmed by hand rather than assumed to equal the limit. That
-gap -- limit $92, filled at $92.05 -- is entry slippage, the other half of the
-measurement the exit ladder provides.
-
-### This machinery already exists. It is in the wrong tab.
-
-A pending buy at a target price, which alerts when reached and then collects a
-real fill, is exactly a Journal idea of type BUY_LIMIT. `executeJournalIdea`
-already asks for the actual fill rather than reusing the target -- deliberately,
-per its own comment, because a real fill rarely matches. It is built and
-tested.
-
-What is missing is that **Log Paper Trade and Log Order only offer "I already
-bought this"**, so the pending case has nowhere to go from those tabs and would
-otherwise be reinvented beside the one that works.
-
-The model is then symmetric, which is a good sign it is right:
-
-| | trigger | user confirms | measures |
-|---|---|---|---|
-| entry | limit price reached | actual fill price | entry slippage |
-| exit | rung reached | actual sale | exit slippage |
-
-The exit half shipped 2026-08-21 (plans + plan_exits). The entry half exists
-but is reachable only through Journal.
-
-**So the work is exposure, not construction:** the trade dialogs gain a
-pending mode that creates the watched_item rather than a transaction, and the
-confirm-fill step becomes reachable from Orders and Paper Trade instead of
-living only behind Journal's Execute button.
-
-A standalone limit SELL needs nothing new -- it is a one-rung ladder.
-
-This also settles the question raised during the walkthrough about whether
-Journal ideas and paper trades were converging. For the pending case they are
-the same object, and should not be built twice.
-
-**Superseded (kept for the reasoning):** "limit buy is execute at x dollars, not at
-current price necessarily." So the price typed is a TRIGGER, not a fill that
-has already happened. That rules out Reading A below. What is still open is
-whether the position exists immediately at that price, or not until the market
-actually reaches it.
-
-- *Reading A -- a label.* RULED OUT by the clarification above. The box records
-  that this fill was a limit rather
-  than a market order. The trade still becomes a paper lot immediately at the
-  price typed. Small: one flag, one column.
-- *Reading B -- a pending order.* Ticking it means "I would place a limit at
-  $X", which is not a position until the price is reached. That needs a
-  pending state, something to watch for the fill, and a decision about what
-  happens if it never fills.
-
-Reading B overlaps heavily with what a Journal idea of type BUY_LIMIT already
-is -- a planned buy at a target price, watched, alerting when hit, and
-convertible into a real trade via Execute. If B is what is wanted, the honest
-question is whether Paper Trade should gain a pending state at all, or whether
-that path already exists under Journal and the two are being reinvented side
-by side.
-
-Ask before building. Do not guess.
+The app can already record that intent today: a `BUY_LIMIT` watched item with
+the target price, which alerts when the price is reached. The missing piece is
+turning that alert into a filled trade in one step, which is the entry-side
+half of the same gap the efficiency report measures.
 
 ## Plan vs. actual: efficiency against the source (requested 2026-08-21)
 

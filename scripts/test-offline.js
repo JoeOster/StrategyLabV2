@@ -79,7 +79,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 832;
+const MIN_EXPECTED_CHECKS = 863;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -1339,24 +1339,37 @@ const promoteLot = await tx.recordBuy({
   fees: 0,
   isPaperTrade: true,
 });
-const promoted = tx.promotePaperTrade(paperHolder.id, promoteLot.id);
-check("Promoting flips is_paper_trade to 0", promoted.is_paper_trade === 0);
-check("Promoting preserves cost basis", promoted.cost_basis === 5 * 100);
-check("Promoting preserves quantity_remaining", promoted.quantity_remaining === 5);
+// Promotion used to flip is_paper_trade on this row. It now creates a new one
+// and leaves this lot running -- see section 47 for the full contract and the
+// reasoning. These checks are what section 6h asserted before that change,
+// rewritten to the behaviour rather than deleted, because the guards they
+// cover still matter.
+const { real: promoted } = tx.promotePaperTrade(paperHolder.id, promoteLot.id, {
+  fillPrice: 101,
+  fillDate: "2026-06-03",
+});
+check("Promoting produces a real transaction", promoted.is_paper_trade === 0);
+check("...as a NEW row, not the paper one reclassified", promoted.id !== promoteLot.id);
+check("...costed at the price actually paid", promoted.cost_basis === 5 * 101);
+check("...for the same quantity by default", promoted.quantity_remaining === 5);
 check(
-  "The promoted lot now shows up as a real position",
-  tx.listOpenPositions(paperHolder.id, { isPaperTrade: false }).some((p) => p.lot_id === promoteLot.id),
+  "The real leg shows up as a real position",
+  tx.listOpenPositions(paperHolder.id, { isPaperTrade: false }).some((p) => p.lot_id === promoted.id),
 );
 check(
-  "...and no longer appears among paper positions",
-  !tx.listOpenPositions(paperHolder.id, { isPaperTrade: true }).some((p) => p.lot_id === promoteLot.id),
+  "...and the paper leg is STILL a paper position",
+  tx.listOpenPositions(paperHolder.id, { isPaperTrade: true }).some((p) => p.lot_id === promoteLot.id),
+);
+check(
+  "...with the real book not seeing the paper lot",
+  !tx.listOpenPositions(paperHolder.id, { isPaperTrade: false }).some((p) => p.lot_id === promoteLot.id),
 );
 
 check(
   "Promoting an already-real transaction is refused",
   (() => {
     try {
-      tx.promotePaperTrade(paperHolder.id, promoteLot.id);
+      tx.promotePaperTrade(paperHolder.id, promoted.id, { fillPrice: 1 });
       return false;
     } catch (err) {
       return /already a real transaction/.test(err.message);
@@ -1371,7 +1384,7 @@ check(
   "Promoting a non-BUY (e.g. a dividend) is refused",
   (() => {
     try {
-      tx.promotePaperTrade(paperHolder.id, nonBuyPaper.id);
+      tx.promotePaperTrade(paperHolder.id, nonBuyPaper.id, { fillPrice: 1 });
       return false;
     } catch (err) {
       return /Only a paper BUY/.test(err.message);
@@ -1397,16 +1410,28 @@ await tx.recordSell({
   holderId: paperHolder.id, symbol: "AMZN", transactionDate: "2026-06-10", quantity: 3, price: 210,
   isPaperTrade: true,
 });
+// This used to be refused, because the old promotion reclassified the row in
+// place and nobody had decided what should happen to its paper SELLs. Shape 3
+// answers that: promotion creates a separate real lot and does not touch the
+// paper leg, so the paper sells simply stay where they are.
+//
+// The refusal was a stand-in for an undecided design, not a rule worth
+// keeping, and removing it is the point rather than a regression.
+const partlySoldPromotion = tx.promotePaperTrade(paperHolder.id, partlySoldPaperLot.id, {
+  fillPrice: 205,
+});
+check("A partly-sold paper lot CAN now be promoted", partlySoldPromotion.real.id != null);
 check(
-  "Promoting a partly-sold paper lot is refused",
-  (() => {
-    try {
-      tx.promotePaperTrade(paperHolder.id, partlySoldPaperLot.id);
-      return false;
-    } catch (err) {
-      return /partly or fully sold/.test(err.message);
-    }
-  })(),
+  "...at the quantity actually bought, defaulting to the paper lot's original size",
+  partlySoldPromotion.real.quantity === partlySoldPaperLot.quantity,
+);
+check(
+  "...leaving the paper leg's own sells untouched",
+  partlySoldPromotion.paper.quantity_remaining === partlySoldPaperLot.quantity - 3,
+);
+check(
+  "...and the paper leg still on the paper book",
+  partlySoldPromotion.paper.is_paper_trade === 1,
 );
 
 console.log("\n6i. Paper Trade: handlers + render (pure functions)");
@@ -4984,6 +5009,122 @@ console.log("\n46. Patterns in your own trading");
   check("...with their net, not just a count", sd.net === 50);
   check("...and the tickers involved", sd.symbols.join(",") === "A,B");
   check("None yields null rather than an empty shell", p.sameDayTrades([sale("C", 1, "2026-01-10", "2026-01-01")]) === null);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n47. Promoting a paper trade keeps the paper leg");
+// promotePaperTrade flipped is_paper_trade from 1 to 0 on the same row, so the
+// moment a paper trade was promoted there was no record it had ever been
+// paper. That erased the comparison the app exists to make: the paper leg is
+// the plan followed perfectly, the real leg is what happened, and the gap
+// between them is the measurement.
+{
+  const pHolder = db
+    .prepare("INSERT INTO account_holders (name, is_default) VALUES ('Promote Test', 0) RETURNING *")
+    .get();
+
+  const paper = await tx.recordBuy({
+    holderId: pHolder.id, symbol: "NVDA", transactionDate: "2026-08-01",
+    quantity: 100, price: 95.99, isPaperTrade: true,
+  });
+
+  // A fill price is required, for the same reason resolveAlert requires one on
+  // a real sale: defaulting it to the ideal erases the gap being measured.
+  let refused = "";
+  try { tx.promotePaperTrade(pHolder.id, paper.id, {}); } catch (e) { refused = e.message; }
+  check("Promoting without a fill price is refused", /price you actually paid/.test(refused));
+  check("...explaining what it would destroy", /erase the entry gap/.test(refused));
+
+  const { real, paper: after } = tx.promotePaperTrade(pHolder.id, paper.id, {
+    fillPrice: 96.4, fillDate: "2026-08-04",
+  });
+
+  check("A NEW transaction is created", real.id !== paper.id);
+  check("...that is real", real.is_paper_trade === 0);
+  check("...at the price actually paid", real.price === 96.4);
+  check("...on the day it actually happened", real.transaction_date === "2026-08-04");
+  check("...linked back to the paper trade", real.promoted_from_id === paper.id);
+
+  check("The paper leg is still paper", after.is_paper_trade === 1);
+  check("...still open", after.quantity_remaining === 100);
+  check("...at its own price", after.price === 95.99);
+  check("...and is not marked as consumed", after.voided_at === null);
+
+  // The measurement.
+  const [leg] = tx.promotedLegs(pHolder.id, paper.id);
+  check("The entry gap is paper minus real", Math.abs(leg.gapPerShare - -0.41) < 1e-9);
+  check("...totalled over the shares bought", Math.abs(leg.gapTotal - -41) < 1e-9);
+  check("...with how late the real entry was", leg.daysLate === 3);
+  // Same sign convention as the efficiency report: positive is better than
+  // planned. Buying above the paper price is worse, so negative.
+  check("Paying MORE than the plan reads negative", leg.gapPerShare < 0);
+
+  // The two books must not mix. A paper leg leaking into real totals is the
+  // easiest way for this design to become a liability rather than a feature.
+  const realBook = tx.getPortfolioSummary(pHolder.id, { isPaperTrade: false });
+  const paperBook = tx.getPortfolioSummary(pHolder.id, { isPaperTrade: true });
+  check("The real book holds only the real leg", Math.abs(realBook.totalCost - 9640) < 1e-9);
+  check("The paper book holds only the paper leg", Math.abs(paperBook.totalCost - 9599) < 1e-9);
+  check("Neither counts the other", realBook.positionCount === 1 && paperBook.positionCount === 1);
+
+  // Buying fewer shares than planned is a real divergence and is recorded.
+  const partial = await tx.recordBuy({
+    holderId: pHolder.id, symbol: "AMD", transactionDate: "2026-08-01",
+    quantity: 100, price: 10, isPaperTrade: true,
+  });
+  const half = tx.promotePaperTrade(pHolder.id, partial.id, { fillPrice: 10, quantity: 50 });
+  check("A smaller real purchase is allowed", half.real.quantity === 50);
+  check("...leaving the paper leg at its full size", half.paper.quantity_remaining === 100);
+  check("...and the shortfall is reportable",
+    tx.promotedLegs(pHolder.id, partial.id)[0].quantityShortfall === 50);
+
+  let tooMany = "";
+  try { tx.promotePaperTrade(pHolder.id, partial.id, { fillPrice: 10, quantity: 500 }); }
+  catch (e) { tooMany = e.message; }
+  check("Buying MORE than planned is a separate purchase, not a promotion", /separate purchase/.test(tooMany));
+
+  // Guards that were there before and must stay.
+  let notPaper = "";
+  try { tx.promotePaperTrade(pHolder.id, real.id, { fillPrice: 1 }); } catch (e) { notPaper = e.message; }
+  check("A real transaction cannot be promoted", /already a real transaction/.test(notPaper));
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n48. The migration runner can always reconcile its own stamp");
+// The version stamp was only written when a migration actually ran. Write a
+// migration, apply it, THEN bump the version constant -- the ordinary order --
+// and the stamp can never catch up: the next run finds nothing pending, skips
+// the stamp, and the database is left claiming a version below what the code
+// expects.
+//
+// assertSchemaCurrent then refuses to boot and points at the migrate command,
+// which reports "up to date" and changes nothing. That is a database wedged
+// shut by its own tooling, and the only way out was editing app_settings by
+// hand on a machine whose app would not start. It happened here, tonight.
+{
+  const { SCHEMA_VERSION, SCHEMA_VERSION_KEY } = await import("../lib/schemaVersion.js");
+  const { runPending, pendingMigrations } = await import("../lib/migrate.js");
+
+  check("Nothing is pending on a freshly built test database", pendingMigrations().length === 0);
+
+  const stampNow = () =>
+    db.prepare("SELECT value FROM app_settings WHERE key = ?").get(SCHEMA_VERSION_KEY)?.value;
+
+  // Simulate the trap: a stamp behind the code, with every migration applied.
+  db.prepare(
+    `INSERT INTO app_settings (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(SCHEMA_VERSION_KEY, String(SCHEMA_VERSION - 1));
+  check("A stale stamp can exist with nothing pending", Number(stampNow()) === SCHEMA_VERSION - 1);
+
+  // The fix: runPending stamps when the LEDGER is complete, not when it did work.
+  const applied = runPending();
+  check("Running with nothing pending applies no migrations", applied.length === 0);
+  check("...but still reconciles the stamp", Number(stampNow()) === SCHEMA_VERSION);
+
+  // And it stays correct on a second run rather than oscillating.
+  runPending();
+  check("...and is stable when run again", Number(stampNow()) === SCHEMA_VERSION);
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

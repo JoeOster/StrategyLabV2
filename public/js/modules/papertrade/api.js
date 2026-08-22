@@ -43,9 +43,22 @@ export const voidTransaction = (id, reason = null) =>
     body: JSON.stringify({ reason }),
   }).then(handleResponse);
 
-/** Flips a paper BUY to a real one in place -- see promotePaperTrade in transactionsService.js. */
-export const promoteTransaction = (id) =>
-  fetch(`/api/transactions/${id}/promote`, { method: "POST" }).then(handleResponse);
+export const fetchQuote = (symbol) =>
+  fetch(`/api/quote/${encodeURIComponent(symbol)}`).then(handleResponse);
+
+/**
+ * Records that a paper trade was actually taken.
+ *
+ * Creates a NEW real transaction and leaves the paper one running -- see
+ * promotePaperTrade in transactionsService.js for why both legs have to
+ * survive. Requires the price actually paid.
+ */
+export const promoteTransaction = (id, body) =>
+  fetch(`/api/transactions/${id}/promote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  }).then(handleResponse);
 
 export const fetchSources = () => fetch("/api/sources").then(handleResponse);
 

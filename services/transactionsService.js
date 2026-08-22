@@ -22,13 +22,13 @@ const insertTransaction = db.prepare(`
     import_batch_id,
     transaction_type, transaction_date, quantity, price, fees, cost_basis,
     quantity_remaining, linked_buy_id, external_ref, notes,
-    needs_review, review_reason, plan_id
+    needs_review, review_reason, plan_id, promoted_from_id
   ) VALUES (
     @holderId, @accountId, @securityId, @watchedItemId, @sourceId, @strategyId, @isPaperTrade,
     @importBatchId,
     @transactionType, @transactionDate, @quantity, @price, @fees, @costBasis,
     @quantityRemaining, @linkedBuyId, @externalRef, @notes,
-    @needsReview, @reviewReason, @planId
+    @needsReview, @reviewReason, @planId, @promotedFromId
   ) RETURNING *
 `);
 
@@ -42,6 +42,7 @@ const insertTxn = (params) =>
     reviewReason: null,
     importBatchId: null,
     planId: null,
+    promotedFromId: null,
     ...params,
   });
 
@@ -211,6 +212,7 @@ export function recordBuyWith(security, input) {
       reviewReason: input.reviewReason ?? null,
       notes: input.notes ?? null,
       planId: input.planId ?? null,
+      promotedFromId: input.promotedFromId ?? null,
     });
 
     // Catch up a backdated entry: if this stock already split, on record,
@@ -944,35 +946,127 @@ export function voidTransaction(holderId, id, reason = null) {
 const setRealStmt = db.prepare("UPDATE transactions SET is_paper_trade = 0 WHERE id = ?");
 
 /**
- * "Promotes" a paper BUY into a real one -- the Paper Trade tab's version of
- * Journal's executeJournalIdea(), but simpler: a paper trade here already IS
- * a fully-specified transaction (real quantity/price/date), not just a
- * target-price watch, so there's no separate fill to collect. Promoting is
- * just flipping is_paper_trade 1 -> 0 on the same row -- cost_basis,
- * quantity_remaining, source_id, and strategy_id all carry over untouched,
- * which is exactly what "leaves the Paper Trade tab and joins Orders,
- * retaining the journal links" means in practice.
+ * Records that a paper trade was actually taken, WITHOUT destroying it.
  *
- * v1 deliberately only supports promoting an untouched lot (nothing sold
- * against it yet, on paper or otherwise) -- promoting a partially-realized
- * paper position would mean deciding what happens to its paper SELL rows
- * too, which is a real design question left for later. See STATUS.md.
+ * This used to flip `is_paper_trade` from 1 to 0 on the same row. Nothing was
+ * copied, so the moment a paper trade was promoted there was no longer any
+ * record it had ever been paper -- same id, same price, same date,
+ * reclassified.
+ *
+ * That erased the comparison this app exists to make. The paper leg is the
+ * plan followed perfectly: entered at the price the idea named, exiting when
+ * its rung says so. The real leg is what actually happened -- a later entry, a
+ * worse fill, an exit that got missed. The DIVERGENCE between them is the
+ * measurement, and flipping one row into the other destroyed it before it
+ * could be taken.
+ *
+ * So promotion now creates a NEW real transaction and leaves the paper one
+ * open and running. Both legs live, linked by `promoted_from_id`.
+ *
+ * **A fill price is required.** Defaulting it to the paper price would record
+ * the ideal as though it were real and erase the entry gap in the same motion
+ * -- which is exactly what resolveAlert refuses to do on the exit side, for
+ * exactly the same reason. The number is a fact the user knows; the app should
+ * ask for it rather than invent it.
+ *
+ * @param {number} holderId
+ * @param {number} id the paper BUY being promoted
+ * @param {{fillPrice: number, fillDate?: string, quantity?: number,
+ *          accountId?: number, fees?: number, notes?: string}} input
  */
-export function promotePaperTrade(holderId, id) {
+export function promotePaperTrade(holderId, id, input = {}) {
   return withTransaction(() => {
-    const txn = getTransaction.get(id, holderId);
-    if (!txn) throw new Error("Transaction not found.");
-    if (txn.voided_at) throw new Error("This transaction is voided and can't be promoted.");
-    if (!txn.is_paper_trade) throw new Error("This is already a real transaction, not a paper trade.");
-    if (txn.transaction_type !== "BUY") {
+    const paper = getTransaction.get(id, holderId);
+    if (!paper) throw new Error("Transaction not found.");
+    if (paper.voided_at) throw new Error("This transaction is voided and can't be promoted.");
+    if (!paper.is_paper_trade) {
+      throw new Error("This is already a real transaction, not a paper trade.");
+    }
+    if (paper.transaction_type !== "BUY") {
       throw new Error("Only a paper BUY can be promoted -- it's what opens the position.");
     }
-    if (txn.quantity_remaining < txn.quantity) {
+
+    const fillPrice = Number(input.fillPrice);
+    if (!(fillPrice >= 0)) {
       throw new Error(
-        "This paper position has already been partly or fully sold on paper. Promoting a partially-realized position isn't supported yet -- delete the paper sell(s) first if you want to promote the whole lot.",
+        "Give the price you actually paid. Recording the paper price as the real fill would " +
+          "erase the entry gap, which is the thing worth measuring.",
       );
     }
-    setRealStmt.run(id);
-    return getTransaction.get(id, holderId);
+
+    // Defaults to the whole paper lot, but a smaller real purchase is allowed
+    // and is itself data: planning 100 and buying 50 is a divergence in size,
+    // and refusing to record it would only mean it went unrecorded.
+    const quantity = input.quantity == null ? paper.quantity : Number(input.quantity);
+    if (!(quantity > 0)) throw new Error("Quantity must be greater than zero.");
+    if (quantity - paper.quantity > 1e-9) {
+      throw new Error(
+        `The paper trade is for ${paper.quantity} share(s); promoting more than that is a separate purchase, not a promotion.`,
+      );
+    }
+
+    const fees = Number(input.fees ?? 0);
+    const real = insertTxn({
+      holderId,
+      // Paper trades are not account-dependent -- Joe's own decision -- so a
+      // real one needs to be told where it actually happened.
+      accountId: input.accountId ?? null,
+      securityId: paper.security_id,
+      watchedItemId: paper.watched_item_id ?? null,
+      sourceId: paper.source_id ?? null,
+      strategyId: paper.strategy_id ?? null,
+      isPaperTrade: 0,
+      transactionType: "BUY",
+      transactionDate: input.fillDate || new Date().toISOString().slice(0, 10),
+      quantity,
+      price: fillPrice,
+      fees,
+      costBasis: quantity * fillPrice + fees,
+      quantityRemaining: quantity,
+      linkedBuyId: null,
+      externalRef: null,
+      importBatchId: null,
+      notes: input.notes ?? null,
+      // Deliberately NOT copied from the paper lot. A plan owns a ladder of
+      // rungs against a quantity, and pointing two legs at one plan would let
+      // the paper leg's automatic exits draw down the real position. The real
+      // leg gets its own plan when the user makes one.
+      planId: null,
+      promotedFromId: paper.id,
+    });
+
+    // The paper row is untouched on purpose. It keeps its quantity, its plan
+    // and its rungs, and goes on running as the mechanically-followed baseline.
+    return { real, paper: getTransaction.get(id, holderId) };
   });
+}
+
+const promotedLegStmt = db.prepare(`
+  SELECT id, transaction_date, quantity, price, account_id
+  FROM transactions
+  WHERE promoted_from_id = ? AND voided_at IS NULL
+  ORDER BY transaction_date, id
+`);
+
+/**
+ * The real trade(s) a paper lot was promoted into, with the entry gap.
+ *
+ * Positive means the real fill was BETTER than the paper one -- bought cheaper
+ * than the plan said. The same sign convention the efficiency report uses, so
+ * the two never have to be reconciled in a reader's head.
+ */
+export function promotedLegs(holderId, paperId) {
+  const paper = getTransaction.get(paperId, holderId);
+  if (!paper) return [];
+  return promotedLegStmt.all(paperId).map((real) => ({
+    ...real,
+    gapPerShare: paper.price - real.price,
+    gapTotal: (paper.price - real.price) * real.quantity,
+    daysLate: Math.round(
+      (Date.parse(`${real.transaction_date}T00:00:00Z`) -
+        Date.parse(`${paper.transaction_date}T00:00:00Z`)) /
+        86400000,
+    ),
+    quantityShortfall: paper.quantity - real.quantity,
+  }));
 }

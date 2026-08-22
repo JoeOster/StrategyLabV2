@@ -152,7 +152,14 @@ export async function initializePaperTradeModule() {
   els.orderCancelBtn.addEventListener("click", () => els.orderDialog.close());
   els.orderTypeSelect.addEventListener("change", updateOrderFormForType);
   els.orderForm.elements.symbol.addEventListener("input", debounce(updateOrderFormForType, 250));
+  els.orderForm.elements.symbol.addEventListener("input", debounce(autofillPrice, 400));
   els.orderForm.addEventListener("submit", handleOrderSubmit);
+  // Once touched, the price belongs to the user and autofill leaves it alone.
+  els.orderForm.elements.price?.addEventListener("input", (e) => {
+    delete e.target.dataset.suggested;
+    const hint = els.orderForm.querySelector(".price-hint");
+    if (hint) hint.remove();
+  });
   els.orderDeleteBtn.addEventListener("click", handleDeleteFromDialog);
   els.refreshPricesBtn.addEventListener("click", handleRefreshPrices);
 
@@ -309,19 +316,109 @@ async function handlePositionsAction(event) {
  * not here -- see promotePaperTrade's own comment in transactionsService.js
  * for why cost basis, source, and strategy links all carry over untouched.
  */
+/**
+ * Fills in the current price once a ticker has been typed.
+ *
+ * Joe asked for this while walking the Journal flow: "after putting the ticker
+ * in, it should autopopulate the current price albeit be editable".
+ *
+ * Three rules, each of which matters:
+ *
+ *   It never overwrites a price the user has already typed. A field that
+ *   rewrites itself under the cursor is worse than an empty one.
+ *
+ *   It marks the value as a suggestion until touched, so a stale or wrong
+ *   quote is visibly the app's guess rather than the user's entry.
+ *
+ *   It says nothing on failure. An unknown ticker is a typo far more often
+ *   than an outage, and an error banner while someone is still typing "NV" on
+ *   the way to "NVDA" would be noise.
+ */
+async function autofillPrice() {
+  const form = els.orderForm;
+  const symbol = form.elements.symbol.value.trim().toUpperCase();
+  const priceField = form.elements.price;
+  if (!priceField || symbol.length < 1) return;
+
+  // A price the user typed is theirs. Only a previously-suggested value, or an
+  // empty field, may be replaced.
+  const untouched = priceField.value === "" || priceField.dataset.suggested === "1";
+  if (!untouched) return;
+
+  // Editing an existing trade prefills from the record, and that record is the
+  // truth about what was logged -- not whatever the stock costs today.
+  if (state.editingId != null) return;
+
+  try {
+    const q = await api.fetchQuote(symbol);
+    // The ticker may have changed while the request was in flight.
+    if (form.elements.symbol.value.trim().toUpperCase() !== symbol) return;
+    if (q.price == null) return;
+
+    priceField.value = q.price;
+    priceField.dataset.suggested = "1";
+    showPriceHint(`Current price for ${q.symbol}${q.name ? ` (${q.name})` : ""}. Edit it if you paid something else.`);
+  } catch {
+    // Silent on purpose -- see the note above.
+  }
+}
+
+/** A one-line note under the price field, replaced rather than stacked. */
+function showPriceHint(text) {
+  const field = els.orderForm.elements.price;
+  let hint = els.orderForm.querySelector(".price-hint");
+  if (!hint) {
+    hint = document.createElement("p");
+    hint.className = "panel-hint price-hint";
+    field.closest("label").append(hint);
+  }
+  hint.textContent = text;
+}
+
 async function handlePromote(lotId, symbol) {
-  if (
-    !window.confirm(
-      `Promote this paper ${symbol} position to a real purchase?\n\n` +
-        "It will move from Paper Trade into Orders, keeping its journal source and strategy links. This can't be undone.",
-    )
-  ) {
+  const lot = state.positions.find((p) => p.lot_id === lotId);
+  const paperPrice = lot?.cost_per_share;
+
+  // Prefilled with the CURRENT price, not the paper price. Offering the paper
+  // price as the default would invite accepting it, and accepting it records
+  // the ideal as though it were real -- erasing the entry gap, which is the
+  // whole reason both legs now exist.
+  let suggestion = "";
+  try {
+    const q = await api.fetchQuote(symbol);
+    if (q.price != null) suggestion = String(q.price);
+  } catch {
+    // No suggestion is fine; the user knows what they paid.
+  }
+
+  const answer = window.prompt(
+    `What did you actually pay per share for ${symbol}?\n\n` +
+      (paperPrice != null ? `The paper trade was entered at $${paperPrice}. ` : "") +
+      "The paper position stays open alongside the real one, so the difference between them can be measured.",
+    suggestion,
+  );
+  if (answer == null) return; // cancelled
+
+  const fillPrice = Number(answer);
+  if (!(fillPrice >= 0)) {
+    banner("That is not a price. Nothing was recorded.", true);
     return;
   }
+
   try {
-    await api.promoteTransaction(lotId);
+    const result = await api.promoteTransaction(lotId, { fillPrice });
     await reloadPaperTradeView();
-    banner(`${symbol} promoted to a real purchase -- see it under Orders.`, false);
+    if (onDataChanged) await onDataChanged();
+
+    const gap = paperPrice == null ? null : paperPrice - fillPrice;
+    banner(
+      `${symbol} recorded as a real purchase at $${fillPrice}. ` +
+        (gap == null
+          ? "The paper position stays open alongside it."
+          : `${gap >= 0 ? "Better" : "Worse"} than the paper entry by $${Math.abs(gap).toFixed(2)} a share. ` +
+            "The paper position stays open alongside it."),
+      false,
+    );
   } catch (err) {
     banner(err.message, true);
   }

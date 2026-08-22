@@ -470,6 +470,11 @@ CREATE TABLE transactions (
   -- degraded one. Trades sharing a plan_id were scaled into under one thesis
   -- and share one exit ladder.
   plan_id             INTEGER REFERENCES plans(id) ON DELETE SET NULL,
+  -- The paper trade this real one was promoted from, if any. Promotion creates
+  -- a NEW row rather than reclassifying the old one, so both legs survive: the
+  -- paper leg is the plan followed perfectly, the real leg is what happened,
+  -- and the gap between them is the thing worth measuring. See migration 023.
+  promoted_from_id    INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
   external_ref        TEXT,               -- broker's own txn id, or a computed fingerprint
   notes               TEXT,
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
@@ -642,6 +647,8 @@ CREATE TABLE app_settings (
 CREATE INDEX idx_accounts_broker              ON accounts(broker_id);
 CREATE INDEX idx_accounts_number              ON accounts(account_number);
 CREATE INDEX idx_transactions_plan            ON transactions(plan_id);
+CREATE INDEX idx_transactions_promoted_from   ON transactions (promoted_from_id)
+  WHERE promoted_from_id IS NOT NULL;
 -- The evaluator's hot query is "every pending rung of an open plan".
 CREATE INDEX idx_plan_exits_pending
   ON plan_exits (plan_id) WHERE status = 'pending';

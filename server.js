@@ -1010,9 +1010,51 @@ app.post("/api/transactions/:id/void", (req, res) => {
 app.post("/api/transactions/:id/promote", (req, res) => {
   const holder = getOrCreateDefaultHolder();
   try {
-    res.json(txns.promotePaperTrade(holder.id, Number(req.params.id)));
+    res.json(txns.promotePaperTrade(holder.id, Number(req.params.id), req.body || {}));
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// The current price for one ticker, for a form that wants to prefill it.
+//
+// Deliberately separate from /api/ticker/:symbol, which assembles position,
+// lots, trades, series and watched items. A dialog asking "what is this worth
+// right now" should not pull all of that, and a ticker with no stored history
+// should still answer.
+app.get("/api/quote/:symbol", async (req, res) => {
+  const symbol = String(req.params.symbol).trim().toUpperCase();
+  try {
+    const security = await priceService.getOrCreateSecurity(symbol);
+    let quote = db
+      .prepare("SELECT last_price, as_of, fetched_at FROM quotes_cache WHERE security_id = ?")
+      .get(security.id);
+
+    // Refetched when there is nothing stored, or when what is stored is older
+    // than the polling interval. A form prefilling a price with yesterday's
+    // close would be worse than leaving it blank, because the user would not
+    // know to check it.
+    const stale =
+      !quote?.fetched_at ||
+      Date.now() - Date.parse(`${quote.fetched_at.replace(" ", "T")}Z`) > 15 * 60 * 1000;
+    if (stale) {
+      await priceService.refreshQuote(security.id, security.symbol);
+      quote = db
+        .prepare("SELECT last_price, as_of, fetched_at FROM quotes_cache WHERE security_id = ?")
+        .get(security.id);
+    }
+
+    res.json({
+      symbol: security.symbol,
+      name: security.name,
+      price: quote?.last_price ?? null,
+      asOf: quote?.as_of ?? null,
+      fetchedAt: quote?.fetched_at ?? null,
+    });
+  } catch (err) {
+    // A ticker that cannot be resolved is a user typo far more often than an
+    // outage, so this is a 404 with the symbol echoed rather than a 502.
+    res.status(404).json({ error: err.message, symbol });
   }
 });
 

@@ -46,7 +46,24 @@ if (args.has("--status")) {
 }
 
 if (pending.length === 0) {
-  console.log(`Up to date -- applied through ${currentVersion() ?? "(none)"}, code expects v${SCHEMA_VERSION}.`);
+  // Nothing to apply is not the same as nothing to do. The version stamp can
+  // sit BELOW the code's expectation with every migration already applied --
+  // write a migration, run it, then bump the constant, which is the ordinary
+  // order. The app then refuses to start and points at this command, which
+  // reported "up to date" and exited without touching the stamp.
+  //
+  // That is a database wedged shut by its own migration tool, and the only way
+  // out was editing app_settings by hand on a machine whose app would not boot.
+  // runPending() now reconciles the stamp when the ledger is complete, so it
+  // is called even when there is nothing pending.
+  const before = currentVersion();
+  runPending();
+  const after = currentVersion();
+  console.log(
+    before === after
+      ? `Up to date -- applied through ${before ?? "(none)"}, code expects v${SCHEMA_VERSION}.`
+      : `Nothing to apply. Version stamp reconciled from ${before ?? "(none)"} to ${after}.`,
+  );
   process.exit(0);
 }
 
