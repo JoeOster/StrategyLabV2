@@ -908,9 +908,17 @@ matters most: the real book and the paper book each hold only their own leg. A
 paper position leaking into real totals is the easiest way for this design to
 become a liability instead of a feature.
 
-**Still open from the original entry:** what marks a promoted paper position as
-"already taken" in the Paper Trade tab. It currently looks like any other paper
-position. The link exists in the data; the tab does not use it yet.
+**The tab marks them.** A promoted paper lot carries a `taken +$1.00` badge
+showing the gap against the real fill, coloured by whether the real entry beat
+the paper one, with the fill price and date on hover. Without it a position
+that WAS acted on looked identical to one that was ignored -- the opposite of
+what promotion now records, in the place the user is actually looking.
+
+The sign follows the same convention as the efficiency report and the
+benchmark: positive means better than planned. It was negated at first, which
+produced a badge whose number contradicted its own colour -- down-red beside a
+plus sign. Caught by the test that asserts both together rather than either
+alone.
 
 ## Log Paper Trade: autofill the price -- BUILT 2026-08-21
 

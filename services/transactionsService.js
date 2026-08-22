@@ -497,10 +497,21 @@ const openPositionsQuery = db.prepare(`
     -- Which thesis owns this lot. The sell form needs it to say so before the
     -- server has to refuse an ambiguous sale -- an error is a worse way to
     -- learn that a holding spans two theses than simply being shown it.
+    -- The real trade this paper lot was promoted into, if any. Carried on the
+    -- row so the Paper Trade tab can show that a position has already been
+    -- taken for real -- without it, a promoted paper lot looks identical to
+    -- one that was never acted on, which is the opposite of what promotion
+    -- now records.
+    promo.id AS promoted_to_id,
+    promo.price AS promoted_price,
+    promo.transaction_date AS promoted_date,
+    promo.quantity AS promoted_quantity,
     t.plan_id, pl.notes AS plan_notes,
     plsrc.name AS plan_source_name, plstrat.title AS plan_strategy_title
   FROM transactions t
   JOIN securities s ON s.id = t.security_id
+  LEFT JOIN transactions promo
+    ON promo.promoted_from_id = t.id AND promo.voided_at IS NULL
   LEFT JOIN plans pl ON pl.id = t.plan_id
   LEFT JOIN advice_sources plsrc ON plsrc.id = pl.source_id
   LEFT JOIN strategies plstrat ON plstrat.id = pl.strategy_id

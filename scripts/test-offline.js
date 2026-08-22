@@ -79,7 +79,7 @@ const {
 //
 // Raise this when tests are added. Never lower it to make a run pass -- if the
 // count dropped, find out what stopped running.
-const MIN_EXPECTED_CHECKS = 863;
+const MIN_EXPECTED_CHECKS = 871;
 
 // Registered as an exit handler, NOT checked at the end of the run: the
 // failure this guards against is the suite THROWING part-way through, which
@@ -5125,6 +5125,59 @@ console.log("\n48. The migration runner can always reconcile its own stamp");
   // And it stays correct on a second run rather than oscillating.
   runPending();
   check("...and is stable when run again", Number(stampNow()) === SCHEMA_VERSION);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n49. A promoted paper lot says it was taken");
+// Promotion no longer consumes the paper leg -- both run on -- so without a
+// marker here, a paper position that WAS acted on looks exactly like one that
+// was ignored. That is the opposite of what promotion now records, and it is
+// the half of the feature that lives where the user is actually looking.
+{
+  const R = await import("../public/js/modules/orders/render.js");
+  const cols = [
+    { key: "symbol", label: "Ticker" },
+    { key: "quantity_remaining", label: "Qty" },
+    { key: "cost_per_share", label: "Entry" },
+  ];
+  const lot = (over = {}) => ({
+    lot_id: 1, security_id: 7, symbol: "NVDA", security_name: "NVIDIA",
+    transaction_date: "2026-08-01", quantity_remaining: 100, quantity: 100,
+    cost_per_share: 95.99, cost_basis: 9599, market_value: 9700,
+    last_price: 97, unrealized_pnl: 101, unrealized_pnl_percent: 1.05, days_held: 3,
+    ...over,
+  });
+
+  const plain = R.renderPositionsRows([lot()], cols, { showPromote: true });
+  check("An unpromoted paper lot carries no marker", !/promoted-tag/.test(plain));
+
+  // Bought for real at a WORSE price than the paper entry.
+  const worse = R.renderPositionsRows(
+    [lot({ promoted_to_id: 9, promoted_price: 96.4, promoted_date: "2026-08-04", promoted_quantity: 100 })],
+    cols,
+    { showPromote: true },
+  );
+  check("A promoted lot is marked", /promoted-tag/.test(worse));
+  check("...showing the gap, not just a flag", worse.includes("-$0.41"));
+  check("...coloured as the worse outcome it was", /promoted-tag change-down/.test(worse));
+  check("...with the real fill and date on hover", worse.includes("96.40") && worse.includes("2026-08-04"));
+  check("...and the paper leg still shown as a position", worse.includes("95.99"));
+
+  // Bought for real CHEAPER than the paper entry.
+  const better = R.renderPositionsRows(
+    [lot({ promoted_to_id: 9, promoted_price: 94.99, promoted_date: "2026-08-02", promoted_quantity: 100 })],
+    cols,
+    { showPromote: true },
+  );
+  check("Beating the paper entry reads positive", better.includes("+$1.00"));
+  check("...and is coloured as the better outcome", /promoted-tag change-up/.test(better));
+
+  // The sign convention has to match the efficiency report, or the two
+  // contradict each other on the same screen: positive is better than planned.
+  check(
+    "Positive always means better than the plan, as everywhere else",
+    better.includes("+$1.00") && worse.includes("-$0.41"),
+  );
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

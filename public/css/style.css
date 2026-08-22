@@ -1014,3 +1014,16 @@ dialog input, dialog select, dialog textarea {
   font-size: 0.82rem;
 }
 .lifetime-record { color: var(--muted); }
+
+/* A paper lot already taken for real. Promotion keeps both legs running, so
+   the tab has to say which paper positions were acted on. */
+.promoted-tag {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.1rem 0.35rem;
+  margin-right: 0.3rem;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  white-space: nowrap;
+}

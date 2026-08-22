@@ -284,12 +284,27 @@ function lotRow(p, columns, showPromote, { indented }) {
   const cells = columns
     .map((col) => (POSITION_CELL_RENDERERS[col.key] || (() => "<td>—</td>"))(p))
     .join("");
+
+  // A paper lot that has already been taken for real. Promotion no longer
+  // consumes the paper leg -- both run on -- so without saying so here, a
+  // position that was acted on looks exactly like one that was ignored.
+  const promoted = p.promoted_to_id
+    ? (() => {
+        // Paper minus real, so POSITIVE means the real fill beat the paper
+        // entry -- the same convention the efficiency report and the benchmark
+        // use. Negated here first, which made the tag's number contradict its
+        // own colour: down-red beside a plus sign.
+        const gap = p.cost_per_share - p.promoted_price;
+        return `<span class="promoted-tag ${gap >= 0 ? "change-up" : "change-down"}" title="Bought for real at ${formatPrice(p.promoted_price)} on ${escapeHtml(p.promoted_date)} — ${gap >= 0 ? "better" : "worse"} than this paper entry by ${money(Math.abs(gap))} a share. This paper leg keeps running as the plan-followed-perfectly baseline.">taken ${signedMoney(gap)}</span>`;
+      })()
+    : "";
   return `
     <tr class="${indented ? "lot-row" : ""}">
       ${cells}
       <td class="actions-cell">
         ${showPromote ? `<button type="button" class="icon-btn promote-txn-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Promote to a real purchase" aria-label="Promote ${escapeHtml(p.symbol)} to a real purchase">${ACTION_ICONS.promote}</button>` : ""}
         <button type="button" class="icon-btn sell-lot-btn" data-symbol="${escapeHtml(p.symbol)}" data-lot-id="${p.lot_id}" data-qty="${p.quantity_remaining}" title="Sell from this lot" aria-label="Sell ${escapeHtml(p.symbol)}">${ACTION_ICONS.sell}</button>
+        ${promoted}
         <button type="button" class="icon-btn exits-btn" data-id="${p.lot_id}" data-symbol="${escapeHtml(p.symbol)}" title="Exit plan: take-profit and stop rungs" aria-label="Exit plan for ${escapeHtml(p.symbol)}">${ACTION_ICONS.exits}</button>
         <button type="button" class="icon-btn edit-txn-btn" data-id="${p.lot_id}" title="Correct this purchase" aria-label="Edit ${escapeHtml(p.symbol)} purchase">${ACTION_ICONS.edit}</button>
       </td>
